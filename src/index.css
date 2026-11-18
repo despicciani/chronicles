@@ -1,0 +1,612 @@
+@import "tailwindcss";
+
+:root,
+[data-theme="dark-fantasy"] {
+  --bg-app: #06070c;
+  --bg-panel: #10121b;
+  --bg-card: #171a26;
+  --bg-card-hover: #212536;
+  --bg-input: #0a0c13;
+  --border-subtle: rgba(197, 155, 56, 0.22);
+  --border-ornate: #d4aa48;
+  --text-primary: #f6eedc;
+  --text-secondary: #bfb59f;
+  --text-muted: #7c7566;
+  --accent-primary: #e4ba52;
+  --accent-primary-hover: #f7d479;
+  --accent-crimson: #9f2225;
+  --accent-crimson-hover: #c52e32;
+  --accent-arcane: #3b82f6;
+  --accent-success: #22c55e;
+  --shadow-panel: 0 22px 60px rgba(0, 0, 0, 0.85);
+  --canvas-bg: #08090f;
+  --grid-line: rgba(228, 186, 82, 0.13);
+}
+
+[data-theme="bright-fantasy"] {
+  --bg-app: #e7dbc1;
+  --bg-panel: #f7efdc;
+  --bg-card: #fcf6e8;
+  --bg-card-hover: #efe1c4;
+  --bg-input: #fffdf7;
+  --border-subtle: rgba(139, 90, 43, 0.28);
+  --border-ornate: #8c5a24;
+  --text-primary: #25190d;
+  --text-secondary: #5a452d;
+  --text-muted: #8a7254;
+  --accent-primary: #8f5c22;
+  --accent-primary-hover: #6e4414;
+  --accent-crimson: #8f1d21;
+  --accent-crimson-hover: #b32429;
+  --accent-arcane: #1d4ed8;
+  --accent-success: #15803d;
+  --shadow-panel: 0 18px 42px rgba(68, 48, 22, 0.22);
+  --canvas-bg: #dfd0b0;
+  --grid-line: rgba(110, 68, 29, 0.18);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at 50% 15%, rgba(212, 170, 72, 0.08), transparent 60%), var(--bg-app);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+.font-chronicle {
+  font-family: 'Cinzel Decorative', 'Cinzel', Georgia, serif;
+}
+
+.font-display {
+  font-family: 'Cinzel', Georgia, serif;
+}
+
+.font-lore {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+}
+
+.font-mono-dice {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Carved Metallic Gold Title Effect */
+@keyframes chronicleTitleSweep {
+  0% { background-position: -180% 0; }
+  100% { background-position: 220% 0; }
+}
+
+.chronicle-gold-text {
+  background: linear-gradient(
+    115deg,
+    #b68524 0%,
+    #f6d67a 28%,
+    #fff7d6 45%,
+    #e0ac3d 62%,
+    #946314 100%
+  );
+  background-size: 220% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 4px 18px rgba(228, 186, 82, 0.38));
+  animation: chronicleTitleSweep 5.5s ease-in-out infinite;
+}
+
+[data-theme="bright-fantasy"] .chronicle-gold-text {
+  background: linear-gradient(
+    115deg,
+    #52320d 0%,
+    #9c641f 35%,
+    #cf943a 50%,
+    #784915 70%,
+    #3d2207 100%
+  );
+  background-size: 220% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  filter: drop-shadow(0 2px 10px rgba(90, 56, 15, 0.25));
+}
+
+.rpg-panel {
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(212, 170, 72, 0.08) 0%, transparent 55%),
+    linear-gradient(180deg, var(--bg-panel) 0%, var(--bg-app) 100%);
+  border: 1px solid rgba(197, 155, 56, 0.28);
+  box-shadow:
+    var(--shadow-panel),
+    inset 0 1px 0 rgba(255, 228, 158, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.75);
+}
+
+.rpg-card {
+  background:
+    radial-gradient(110% 85% at 50% 0%, rgba(228, 186, 82, 0.05) 0%, transparent 60%),
+    linear-gradient(170deg, var(--bg-card) 0%, var(--bg-panel) 100%);
+  border: 1px solid var(--border-subtle);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 232, 179, 0.1),
+    inset 0 -2px 8px rgba(0, 0, 0, 0.52),
+    0 6px 16px rgba(0, 0, 0, 0.36);
+}
+
+.rpg-socket {
+  background: radial-gradient(circle at 50% 35%, #121520 0%, #06070c 100%);
+  border: 1px solid rgba(197, 155, 56, 0.32);
+  box-shadow:
+    inset 0 3px 10px rgba(0, 0, 0, 0.95),
+    0 1px 0 rgba(255, 230, 165, 0.12);
+}
+
+[data-theme="bright-fantasy"] .rpg-socket {
+  background: radial-gradient(circle at 50% 35%, #efe3c7 0%, #dec99f 100%);
+  border-color: rgba(140, 90, 36, 0.38);
+  box-shadow:
+    inset 0 2px 6px rgba(80, 50, 18, 0.24),
+    0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+.rpg-ornate-border {
+  border: 1px solid var(--border-ornate);
+  box-shadow:
+    0 0 22px rgba(212, 170, 72, 0.16),
+    inset 0 0 18px rgba(212, 170, 72, 0.07);
+}
+
+.rpg-glass-panel {
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(212, 170, 72, 0.11) 0%, transparent 55%),
+    linear-gradient(180deg, rgba(22, 24, 34, 0.96) 0%, rgba(12, 14, 21, 0.97) 58%, rgba(7, 8, 13, 0.98) 100%);
+  backdrop-filter: blur(14px);
+  border: 1px solid #8c6d2e;
+  box-shadow:
+    0 22px 60px rgba(0, 0, 0, 0.92),
+    inset 0 0 0 1px rgba(255, 226, 150, 0.14),
+    inset 0 2px 16px rgba(0, 0, 0, 0.85);
+}
+
+[data-theme="bright-fantasy"] .rpg-glass-panel {
+  background: linear-gradient(160deg, rgba(252, 246, 232, 0.96), rgba(236, 223, 194, 0.97));
+  border-color: #9c6a32;
+  box-shadow:
+    0 20px 50px rgba(72, 48, 20, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.78);
+}
+
+.rpg-input {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 0.45rem;
+  padding: 0.42rem 0.68rem;
+  font-size: 0.875rem;
+  outline: none;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.rpg-input:focus {
+  border-color: var(--accent-primary);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55), 0 0 0 2px rgba(228, 186, 82, 0.22);
+}
+
+.rpg-btn-primary {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, #eec96c 0%, #c18f2b 55%, #845d14 100%);
+  color: #140e04;
+  font-family: 'Cinzel', Georgia, serif;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  border: 1px solid #fbe29dcc;
+  box-shadow:
+    0 5px 15px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    inset 0 -2px 0 rgba(65, 42, 6, 0.72);
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), filter 0.18s ease, box-shadow 0.18s ease;
+}
+
+[data-theme="bright-fantasy"] .rpg-btn-primary {
+  background: linear-gradient(180deg, #a66c28 0%, #7d4c17 100%);
+  color: #fff9ec;
+  border-color: #d4a66a;
+}
+
+.rpg-btn-primary:hover {
+  filter: brightness(1.09);
+  transform: translateY(-1.5px);
+  box-shadow: 0 8px 22px rgba(228, 186, 82, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.rpg-btn-primary::after,
+.rpg-btn-crimson::after {
+  content: '';
+  position: absolute;
+  top: -20%;
+  left: -120%;
+  width: 65%;
+  height: 140%;
+  background: linear-gradient(105deg, transparent 20%, rgba(255, 250, 225, 0.32) 50%, transparent 80%);
+  transform: skewX(-18deg);
+  pointer-events: none;
+  transition: left 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.rpg-btn-primary:hover::after,
+.rpg-btn-crimson:hover::after {
+  left: 140%;
+}
+
+.rpg-btn-primary:active {
+  transform: translateY(1px) scale(0.98);
+}
+
+.rpg-btn-crimson {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, #c93437 0%, #8f1c20 62%, #590d10 100%);
+  color: #fff5f5;
+  font-family: 'Cinzel', Georgia, serif;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  border: 1px solid rgba(252, 165, 165, 0.42);
+  box-shadow:
+    0 5px 15px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    inset 0 -2px 0 rgba(50, 5, 8, 0.8);
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), filter 0.18s ease, box-shadow 0.18s ease;
+}
+
+.rpg-btn-crimson:hover {
+  filter: brightness(1.12);
+  transform: translateY(-1.5px);
+  box-shadow: 0 7px 22px rgba(201, 52, 56, 0.55);
+}
+
+.rpg-btn-crimson:active {
+  transform: translateY(1px) scale(0.98);
+}
+
+/* Collectible Fantasy Magic Cards */
+.rpg-magic-card {
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.rpg-magic-card:hover {
+  transform: translateY(-4px) scale(1.015);
+}
+
+.rarity-comum {
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  box-shadow: 0 4px 14px rgba(100, 116, 139, 0.18);
+}
+
+.rarity-raro {
+  border: 1px solid rgba(56, 189, 248, 0.65);
+  box-shadow: 0 4px 18px rgba(56, 189, 248, 0.28), inset 0 0 18px rgba(56, 189, 248, 0.09);
+}
+
+.rarity-epico {
+  border: 1px solid rgba(168, 85, 247, 0.72);
+  box-shadow: 0 4px 20px rgba(168, 85, 247, 0.34), inset 0 0 20px rgba(168, 85, 247, 0.12);
+}
+
+.rarity-lendario {
+  border: 1px solid rgba(245, 158, 11, 0.85);
+  box-shadow: 0 6px 26px rgba(245, 158, 11, 0.44), inset 0 0 24px rgba(245, 158, 11, 0.18);
+}
+
+/* Liquid Vital Bars */
+@keyframes liquidShimmer {
+  0% { background-position: -100% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.liquid-bar-shine {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.32) 50%,
+    transparent 100%
+  );
+  background-size: 60% 100%;
+  animation: liquidShimmer 2.4s infinite linear;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-app);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-ornate);
+}
+
+/* Weather effects */
+@keyframes rainFall {
+  0% { background-position: 0 0; }
+  100% { background-position: -30px 100px; }
+}
+
+.weather-rain {
+  background-image: repeating-linear-gradient(
+    105deg,
+    transparent,
+    transparent 18px,
+    rgba(147, 197, 253, 0.22) 18px,
+    rgba(147, 197, 253, 0.22) 19px
+  );
+  background-size: 120px 100px;
+  animation: rainFall 0.45s linear infinite;
+}
+
+@keyframes floatEmbers {
+  0% { background-position: 0 100px, 40px 140px; opacity: 0.5; }
+  50% { opacity: 0.9; }
+  100% { background-position: 30px -100px, -20px -60px; opacity: 0.5; }
+}
+
+.weather-embers {
+  background-image:
+    radial-gradient(2px 2px at 20px 30px, rgba(251, 146, 60, 0.85), transparent),
+    radial-gradient(2px 2px at 80px 70px, rgba(239, 68, 68, 0.75), transparent);
+  background-size: 120px 120px;
+  animation: floatEmbers 3.5s linear infinite;
+}
+
+@keyframes snowFall {
+  0% { background-position: 0 0, 20px 0; }
+  100% { background-position: 40px 160px, -20px 160px; }
+}
+
+.weather-snow {
+  background-image:
+    radial-gradient(3px 3px at 25px 25px, rgba(255, 255, 255, 0.7), transparent),
+    radial-gradient(2px 2px at 75px 60px, rgba(226, 232, 240, 0.6), transparent);
+  background-size: 110px 110px;
+  animation: snowFall 4s linear infinite;
+}
+
+.weather-mist {
+  background: radial-gradient(circle at 50% 50%, rgba(203, 213, 225, 0.16), rgba(148, 163, 184, 0.25));
+  backdrop-filter: blur(0.5px);
+}
+
+/* Title Screen 3-Stage Cinematic Animations */
+@keyframes titleArcaneEmblem {
+  0% { transform: scale(0.3) rotate(-60deg); opacity: 0; }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+.animate-title-emblem {
+  animation: titleArcaneEmblem 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes titleLetterReveal {
+  0% { opacity: 0; letter-spacing: 0.45em; transform: translateY(14px) scale(0.92); filter: blur(6px); }
+  100% { opacity: 1; letter-spacing: 0.14em; transform: translateY(0) scale(1); filter: blur(0); }
+}
+
+.animate-title-reveal {
+  animation: titleLetterReveal 1.15s cubic-bezier(0.16, 1, 0.3, 1) 0.18s both;
+}
+
+@keyframes portalsGlideUp {
+  0% { opacity: 0; transform: translateY(28px) scale(0.96); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.animate-portals-up {
+  animation: portalsGlideUp 0.85s cubic-bezier(0.16, 1, 0.3, 1) 0.75s both;
+}
+
+/* Combat VFX, Dice, Cards & Shield Animations */
+@keyframes pingPulse {
+  0% { transform: translate(-50%, -50%) scale(0.4); opacity: 1; }
+  100% { transform: translate(-50%, -50%) scale(2.4); opacity: 0; }
+}
+
+.map-ping-ring {
+  animation: pingPulse 1.4s ease-out infinite;
+}
+
+@keyframes spinSlow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin-slow {
+  animation: spinSlow 16s linear infinite;
+}
+
+@keyframes diceTumble {
+  0% { transform: scale(0.42) rotate(-180deg) translateY(-38px); opacity: 0; }
+  45% { transform: scale(1.16) rotate(20deg) translateY(5px); opacity: 1; }
+  72% { transform: scale(0.95) rotate(-6deg) translateY(-3px); }
+  100% { transform: scale(1) rotate(0deg) translateY(0); opacity: 1; }
+}
+
+.animate-dice-tumble {
+  animation: diceTumble 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes diceSpinning {
+  0% { transform: rotate(0deg) scale(0.92); }
+  25% { transform: rotate(90deg) scale(1.08); }
+  50% { transform: rotate(180deg) scale(0.95); }
+  75% { transform: rotate(270deg) scale(1.08); }
+  100% { transform: rotate(360deg) scale(0.92); }
+}
+
+.animate-dice-rolling {
+  animation: diceSpinning 0.42s linear infinite;
+}
+
+@keyframes critShake {
+  0%, 100% { transform: translate(0, 0); }
+  20% { transform: translate(-7px, 4px); }
+  40% { transform: translate(7px, -5px); }
+  60% { transform: translate(-5px, -3px); }
+  80% { transform: translate(5px, 3px); }
+}
+
+.animate-crit-shake {
+  animation: critShake 0.42s ease-in-out;
+}
+
+@keyframes shieldShatter {
+  0% { transform: scale(1); filter: brightness(1); }
+  35% { transform: scale(1.22) rotate(8deg); filter: brightness(2); }
+  100% { transform: scale(0.88) rotate(-4deg); opacity: 0.48; filter: grayscale(0.4); }
+}
+
+.animate-shield-shatter {
+  animation: shieldShatter 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes shieldBlock {
+  0% { transform: scale(0.95); }
+  40% { transform: scale(1.18); filter: drop-shadow(0 0 22px #38bdf8); }
+  100% { transform: scale(1); }
+}
+
+.animate-shield-block {
+  animation: shieldBlock 0.5s ease-out forwards;
+}
+
+@keyframes slashVfx {
+  0% { stroke-dashoffset: 160; opacity: 0; transform: scale(0.6); }
+  30% { opacity: 1; transform: scale(1.1); }
+  100% { stroke-dashoffset: 0; opacity: 0; transform: scale(1.3); }
+}
+
+.animate-slash-vfx {
+  stroke-dasharray: 160;
+  animation: slashVfx 0.65s ease-out forwards;
+}
+
+@keyframes cardFlipReveal {
+  0% { transform: perspective(900px) rotateY(90deg) scale(0.7); opacity: 0; }
+  60% { transform: perspective(900px) rotateY(-10deg) scale(1.05); opacity: 1; }
+  100% { transform: perspective(900px) rotateY(0deg) scale(1); opacity: 1; }
+}
+
+.animate-card-reveal {
+  animation: cardFlipReveal 0.65s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes floatCombatDamage {
+  0% { transform: translate(-50%, 0) scale(0.65); opacity: 0; }
+  20% { transform: translate(-50%, -16px) scale(1.28); opacity: 1; }
+  100% { transform: translate(-50%, -62px) scale(1); opacity: 0; }
+}
+
+.animate-floating-combat {
+  animation: floatCombatDamage 1.65s ease-out forwards;
+}
+
+@keyframes deathPulse {
+  0%, 100% { box-shadow: 0 0 12px rgba(220, 38, 38, 0.45); }
+  50% { box-shadow: 0 0 30px rgba(239, 68, 68, 0.95); }
+}
+
+.animate-death-pulse {
+  animation: deathPulse 1.3s ease-in-out infinite;
+}
+
+/* =========================================================
+   AAA DARK-FANTASY CHOREOGRAPHED ANIMATIONS & GHOST HP BAR
+   ========================================================= */
+.hp-ghost-bar {
+  background: linear-gradient(90deg, #fde68a 0%, #f59e0b 100%);
+  transition: width 0.65s cubic-bezier(0.22, 1, 0.36, 1) 0.18s;
+}
+
+@keyframes modalUnfurl {
+  0% {
+    opacity: 0;
+    transform: translateY(18px) scale(0.95);
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+.animate-modal-unfurl {
+  animation: modalUnfurl 0.38s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes attackerLunge {
+  0% { transform: translateX(0) scale(1); }
+  28% { transform: translateX(26px) scale(1.06); filter: brightness(1.18); }
+  60% { transform: translateX(-4px) scale(0.98); }
+  100% { transform: translateX(0) scale(1); filter: brightness(1); }
+}
+
+.animate-attacker-lunge {
+  animation: attackerLunge 0.56s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes torchFlicker {
+  0%, 100% { opacity: 0.68; transform: scale(1); }
+  35% { opacity: 0.92; transform: scale(1.05); }
+  70% { opacity: 0.58; transform: scale(0.96); }
+}
+
+.animate-torch-flicker {
+  animation: torchFlicker 3.2s ease-in-out infinite;
+}
+
+@keyframes criticalNova {
+  0% {
+    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.75), 0 22px 60px rgba(0, 0, 0, 0.9);
+  }
+  65% {
+    box-shadow: 0 0 0 26px rgba(250, 204, 21, 0), 0 0 60px rgba(250, 204, 21, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0), 0 22px 60px rgba(0, 0, 0, 0.9);
+  }
+}
+
+.animate-critical-nova {
+  animation: criticalNova 1.4s cubic-bezier(0.16, 1, 0.3, 1) 2;
+}
+
+@keyframes shieldShardsFly {
+  0% { opacity: 0; transform: scale(0.4) translate(0, 0) rotate(0deg); }
+  25% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1.25) translate(16px, -18px) rotate(45deg); }
+}
+
+.animate-shield-shards {
+  animation: shieldShardsFly 0.72s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes bannerDrain {
+  from { width: 100%; }
+  to { width: 0%; }
+}
+
+.animate-banner-drain {
+  animation: bannerDrain 2.8s linear forwards;
+}

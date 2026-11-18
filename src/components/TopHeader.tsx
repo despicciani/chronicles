@@ -1,0 +1,503 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  ArrowLeft,
+  BookOpen,
+  Copy,
+  Crown,
+  Download,
+  Eye,
+  Globe,
+  Moon,
+  RotateCcw,
+  ScrollText,
+  Shield,
+  Sun,
+  Swords,
+  Upload,
+  User,
+  Volume2,
+  Wifi,
+  WifiOff,
+  X,
+} from 'lucide-react';
+import { useCampaign } from '../context/CampaignContext';
+import { PLAYER_COLOR_PALETTE } from '../shared/rulesEngine';
+
+export type ActiveModalType =
+  | null
+  | 'sheet'
+  | 'compendium'
+  | 'gm-shield'
+  | 'diary'
+  | 'soundboard';
+
+interface TopHeaderProps {
+  activeModal: ActiveModalType;
+  setActiveModal: (modal: ActiveModalType) => void;
+}
+
+export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModal }) => {
+  const {
+    campaign,
+    setInLobby,
+    isConnected,
+    connectedClients,
+    serverUrl,
+    setServerUrl,
+    networkAddresses,
+    publicTunnel,
+    startPublicTunnel,
+    stopPublicTunnel,
+    myPlayerColor,
+    setMyPlayerColor,
+    myCharacter,
+    theme,
+    setTheme,
+    role,
+    setRole,
+    activeCharacterId,
+    setActiveCharacterId,
+    activeAmbientName,
+    resetCampaign,
+    importCampaign,
+  } = useCampaign();
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [showNetworkModal, setShowNetworkModal] = useState(false);
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  const [remoteInput, setRemoteInput] = useState(serverUrl);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [hasGmPrivilege, setHasGmPrivilege] = useState(() => role === 'gm');
+
+  useEffect(() => {
+    if (role === 'gm') {
+      setHasGmPrivilege(true);
+    }
+  }, [role]);
+
+  const toggleModal = (modal: ActiveModalType) => {
+    setActiveModal(activeModal === modal ? null : modal);
+  };
+
+  const handleExportJson = () => {
+    const blob = new Blob([JSON.stringify(campaign, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${campaign.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        await importCampaign(parsed);
+      } catch {
+        alert('Erro ao importar arquivo JSON da campanha.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const copyValue = (val: string, key: string) => {
+    navigator.clipboard.writeText(val);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const navButtons: Array<{
+    id: ActiveModalType;
+    label: string;
+    icon: React.ReactNode;
+    gmOnly?: boolean;
+  }> = [
+    { id: 'sheet', label: 'Ficha', icon: <User className="w-4 h-4" /> },
+    { id: 'compendium', label: 'Compêndio', icon: <BookOpen className="w-4 h-4" /> },
+    { id: 'diary', label: 'Diário', icon: <ScrollText className="w-4 h-4" /> },
+    { id: 'gm-shield', label: 'Escudo GM', icon: <Shield className="w-4 h-4" />, gmOnly: true },
+    { id: 'soundboard', label: 'Mesa de Som', icon: <Volume2 className="w-4 h-4" /> },
+  ];
+
+  const currentColor =
+    role === 'player' ? myCharacter?.playerColor || myPlayerColor : '#e0b84c';
+
+  return (
+    <>
+      <header className="rpg-panel h-14 px-3 flex items-center justify-between gap-2 border-b z-30 shrink-0 select-none relative">
+        {/* Left: Lobby Back + Brand + Nav */}
+        <div className="flex items-center gap-2.5 min-w-0">
+          <button
+            onClick={() => setInLobby(true)}
+            className="rpg-card px-2 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1 hover:opacity-85 cursor-pointer shrink-0"
+            title="Voltar ao Lobby de Campanhas"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline">Lobby</span>
+          </button>
+
+          <div className="flex items-center gap-2.5 shrink-0">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center rpg-ornate-border bg-black/40 shadow-[0_0_12px_rgba(224,184,76,0.2)]">
+              <Swords className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+            </div>
+            <div className="hidden md:block leading-tight">
+              <div className="flex items-center gap-1.5">
+                <span className="font-chronicle font-bold text-[10px] tracking-[0.2em] chronicle-gold-text">
+                  CHRONICLE
+                </span>
+                <span className="text-[10px] opacity-40">•</span>
+                <span className="font-display font-bold text-xs tracking-wide truncate max-w-[165px]">
+                  {campaign.name}
+                </span>
+              </div>
+              <div className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                Mestre: {campaign.gmName || 'Mestre'}
+              </div>
+            </div>
+          </div>
+
+          <nav className="flex items-center gap-1 ml-1">
+            {navButtons.map((btn) => {
+              if (btn.gmOnly && role !== 'gm') return null;
+              const active = activeModal === btn.id;
+              return (
+                <button
+                  key={btn.id}
+                  onClick={() => toggleModal(btn.id)}
+                  className={`px-2.5 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                    active ? 'rpg-btn-primary shadow-sm' : 'rpg-card hover:opacity-90'
+                  }`}
+                  style={!active ? { color: 'var(--text-primary)' } : undefined}
+                >
+                  {btn.icon}
+                  <span className="hidden sm:inline">{btn.label}</span>
+                  {btn.id === 'soundboard' && activeAmbientName && (
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+
+        {/* Right: Color Swatch, Char Selector, Role Switch, Theme, Network */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Player Color Picker */}
+          <div className="relative">
+            <button
+              onClick={() => setShowColorPicker((v) => !v)}
+              className="rpg-card px-2 py-1 rounded-md flex items-center gap-1.5 text-xs cursor-pointer"
+              title="Sua Cor (Borda do Herói & Bolinha do Mapa)"
+            >
+              <span
+                className="w-3.5 h-3.5 rounded-full border border-white/60"
+                style={{ backgroundColor: currentColor }}
+              />
+              <span className="hidden xl:inline text-[11px]">Minha Cor</span>
+            </button>
+
+            {showColorPicker && (
+              <div className="absolute right-0 top-10 z-50 rpg-glass-panel rounded-xl p-3 w-52 space-y-2 shadow-2xl">
+                <div className="text-[11px] font-bold">Escolha sua Cor Mágica</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {PLAYER_COLOR_PALETTE.map((col) => (
+                    <button
+                      key={col}
+                      onClick={() => {
+                        setMyPlayerColor(col);
+                        setShowColorPicker(false);
+                      }}
+                      className="w-6 h-6 rounded-full border border-white/50 cursor-pointer hover:scale-110 transition"
+                      style={{ backgroundColor: col }}
+                    />
+                  ))}
+                  <input
+                    type="color"
+                    value={currentColor}
+                    onChange={(e) => setMyPlayerColor(e.target.value)}
+                    className="w-6 h-6 rounded cursor-pointer bg-transparent"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Character selector (GM can pick any; Player locked to their single character) */}
+          {role === 'gm' ? (
+            campaign.characters.length > 0 && (
+              <select
+                value={activeCharacterId}
+                onChange={(e) => setActiveCharacterId(e.target.value)}
+                className="rpg-input text-xs py-1 max-w-[145px]"
+                title="Selecionar personagem ativo"
+              >
+                {campaign.characters.map((ch) => (
+                  <option key={ch.id} value={ch.id}>
+                    {ch.name} (Nv {ch.level})
+                  </option>
+                ))}
+              </select>
+            )
+          ) : (
+            myCharacter && (
+              <span className="rpg-card px-2.5 py-1 rounded text-xs font-semibold truncate max-w-[140px]">
+                {myCharacter.name}
+              </span>
+            )
+          )}
+
+          {/* Role Badge (+ GM preview toggle for GMs only) */}
+          <div className="flex items-center gap-1.5">
+            <div
+              className={`px-2.5 py-1 rounded-md text-xs font-display font-bold flex items-center gap-1.5 border ${
+                role === 'gm'
+                  ? 'bg-red-950/70 border-amber-500/40 text-amber-200 shadow-[0_0_12px_rgba(220,38,38,0.2)]'
+                  : 'bg-amber-950/40 border-amber-400/30 text-amber-200'
+              }`}
+            >
+              {role === 'gm' ? (
+                <>
+                  <Crown className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden lg:inline">Mestre</span>
+                </>
+              ) : (
+                <>
+                  <User className="w-3.5 h-3.5 text-amber-300" />
+                  <span className="hidden lg:inline">Jogador</span>
+                </>
+              )}
+            </div>
+
+            {hasGmPrivilege && (
+              <button
+                onClick={() => setRole(role === 'gm' ? 'player' : 'gm')}
+                className="rpg-card px-2 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 cursor-pointer hover:opacity-85"
+                title={
+                  role === 'gm'
+                    ? 'Simular visão de Jogador na mesa'
+                    : 'Voltar para o modo Mestre'
+                }
+              >
+                <Eye className="w-3.5 h-3.5 text-sky-400" />
+                <span className="hidden xl:inline">
+                  {role === 'gm' ? 'Visão Jogador' : 'Voltar Mestre'}
+                </span>
+              </button>
+            )}
+          </div>
+
+          {/* Dual Theme Switcher */}
+          <button
+            onClick={() => setTheme(theme === 'dark-fantasy' ? 'bright-fantasy' : 'dark-fantasy')}
+            className="rpg-card p-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer hover:opacity-90"
+            title="Alternar Dark Fantasy / Bright Fantasy"
+          >
+            {theme === 'dark-fantasy' ? (
+              <Moon className="w-3.5 h-3.5 text-amber-400" />
+            ) : (
+              <Sun className="w-3.5 h-3.5 text-amber-600" />
+            )}
+          </button>
+
+          {/* Export / Import / Reset */}
+          <div className="hidden xl:flex items-center gap-1">
+            <button
+              onClick={handleExportJson}
+              className="rpg-card p-1.5 rounded-md hover:opacity-80 cursor-pointer"
+              title="Exportar Campanha (JSON)"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="rpg-card p-1.5 rounded-md hover:opacity-80 cursor-pointer"
+              title="Importar Campanha (JSON)"
+            >
+              <Upload className="w-3.5 h-3.5" />
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json"
+              onChange={handleImportFile}
+              className="hidden"
+            />
+            {role === 'gm' && (
+              <button
+                onClick={() => {
+                  if (window.confirm('Restaurar esta campanha para o pacote inicial padrão?')) {
+                    resetCampaign();
+                  }
+                }}
+                className="rpg-card p-1.5 rounded-md hover:opacity-80 cursor-pointer text-red-400"
+                title="Restaurar Seed Inicial"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Room / Invite Modal Trigger */}
+          <button
+            onClick={() => {
+              setRemoteInput(serverUrl);
+              setShowNetworkModal(true);
+            }}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-semibold rpg-card hover:opacity-90 cursor-pointer"
+            title="Código de Convite da Sala / Conexão"
+          >
+            {isConnected ? (
+              <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+            ) : (
+              <WifiOff className="w-3.5 h-3.5 text-amber-400" />
+            )}
+            <span className="hidden sm:inline">Sala ({connectedClients})</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Network / Friendly Room Code Modal */}
+      {showNetworkModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="rpg-glass-panel rounded-2xl max-w-lg w-full p-5 space-y-4 text-xs">
+            <div className="flex items-center justify-between border-b pb-3" style={{ borderColor: 'var(--border-subtle)' }}>
+              <div className="flex items-center gap-2">
+                <Globe className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
+                <div>
+                  <h3 className="font-display font-bold text-base">
+                    Convidar Jogadores &amp; Conexão Simples
+                  </h3>
+                  <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                    Jogadores na mesma rede/VPN encontram a sala automaticamente no Lobby!
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setShowNetworkModal(false)} className="rpg-card p-1.5 rounded cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="rpg-card rounded-xl p-3.5 space-y-2.5 border-amber-400/50">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="font-display font-bold text-sm text-amber-300 flex items-center gap-1.5">
+                    <Globe className="w-4 h-4" />
+                    <span>Link Direto pela Internet (Sem Radmin / VPN)</span>
+                  </div>
+                  <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                    Seus jogadores abrem o link direto no navegador ou colam no Lobby — sem instalar VPN!
+                  </p>
+                </div>
+              </div>
+
+              {publicTunnel.status === 'active' && publicTunnel.url ? (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-md bg-emerald-950/50 border border-emerald-500/50">
+                    <span className="font-mono-dice font-bold text-xs text-emerald-200 truncate select-all">
+                      {publicTunnel.url}
+                    </span>
+                    <button
+                      onClick={() => copyValue(publicTunnel.url, 'tunnel-url')}
+                      className="rpg-btn-primary px-2.5 py-1 rounded text-[11px] flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      <Copy className="w-3 h-3" />
+                      {copiedKey === 'tunnel-url' ? 'Link Copiado!' : 'Copiar Link'}
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-[10px]">
+                    <span className="text-emerald-300/90">
+                      Túnel ativo! Envie no WhatsApp ou Discord para os jogadores entrarem.
+                    </span>
+                    <button
+                      onClick={stopPublicTunnel}
+                      className="px-2 py-1 rounded bg-red-950/80 border border-red-500/40 text-red-200 hover:bg-red-900 cursor-pointer shrink-0"
+                    >
+                      Encerrar Link
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2 pt-1">
+                  {publicTunnel.status === 'error' && publicTunnel.error && (
+                    <div className="px-2.5 py-1.5 rounded bg-red-950/70 border border-red-500/50 text-red-200 text-[11px]">
+                      {publicTunnel.error}
+                    </div>
+                  )}
+                  <button
+                    onClick={startPublicTunnel}
+                    disabled={publicTunnel.status === 'starting'}
+                    className="w-full rpg-btn-primary px-3 py-2 rounded-md text-xs font-display font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                  >
+                    <Globe className="w-4 h-4" />
+                    <span>
+                      {publicTunnel.status === 'starting'
+                        ? 'Abrindo link público da mesa (aguarde alguns segundos)...'
+                        : 'Gerar Link Público da Mesa (1 Clique)'}
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="rpg-card rounded-xl p-3.5 space-y-2">
+              <div className="font-display font-bold text-sm" style={{ color: 'var(--accent-primary)' }}>
+                Ou Códigos Locais / VPN (Wi-Fi / Radmin)
+              </div>
+              <div className="space-y-1.5 pt-1">
+                {networkAddresses.map((addr) => (
+                  <div
+                    key={addr.url}
+                    className="flex items-center justify-between gap-2 px-2.5 py-2 rounded bg-black/25"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-[10px] opacity-70">[{addr.name}] • {addr.url}</div>
+                      <div className="font-mono-dice font-bold text-sm text-amber-300">
+                        {addr.roomCode}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => copyValue(addr.roomCode, addr.roomCode)}
+                      className="rpg-btn-primary px-2.5 py-1 rounded text-[11px] flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      <Copy className="w-3 h-3" />
+                      {copiedKey === addr.roomCode ? 'Copiado!' : 'Copiar Código'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rpg-card rounded-xl p-3.5 space-y-2">
+              <div className="font-display font-bold text-sm">
+                Conectar a Outro Mestre Manualmente
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={remoteInput}
+                  onChange={(e) => setRemoteInput(e.target.value)}
+                  placeholder="Ex: http://26.237.199.159:3001 (vazio = local)"
+                  className="rpg-input flex-1 font-mono-dice"
+                />
+                <button
+                  onClick={() => {
+                    setServerUrl(remoteInput);
+                    setShowNetworkModal(false);
+                  }}
+                  className="rpg-btn-primary px-3 py-1.5 rounded cursor-pointer"
+                >
+                  Conectar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+};

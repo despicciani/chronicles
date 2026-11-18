@@ -1,0 +1,331 @@
+import React, { useEffect, useState } from 'react';
+import { Flame, Heart, Shield, Sparkles, Swords, X } from 'lucide-react';
+import { useCampaign } from '../context/CampaignContext';
+import { formatFormulaForDisplay } from '../shared/rulesEngine';
+import { OrnateDivider, OrnateFrame, OrnateHeaderBanner, SculptedHealthBar } from './OrnateFrame';
+import { PolyhedronShape } from './PolyhedralDiceOverlay';
+import { TokenPortrait } from './TokenPortrait';
+
+export const CombatDuelOverlay: React.FC = () => {
+  const { campaign, activeDuel, rollDuelDamage, dismissDuel } = useCampaign();
+  const [tickNums, setTickNums] = useState<number[]>([20, 20, 8, 6]);
+
+  useEffect(() => {
+    if (!activeDuel) return;
+    if (activeDuel.phase !== 'rolling-attack' && activeDuel.phase !== 'rolling-damage') {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setTickNums([
+        Math.floor(Math.random() * 20) + 1,
+        Math.floor(Math.random() * 20) + 1,
+        Math.floor(Math.random() * 12) + 1,
+        Math.floor(Math.random() * 10) + 1,
+      ]);
+    }, 65);
+    return () => window.clearInterval(interval);
+  }, [activeDuel]);
+
+  if (!activeDuel) return null;
+
+  const isAttackRolling = activeDuel.phase === 'rolling-attack';
+  const isAttackResult = activeDuel.phase === 'attack-result';
+  const isDamageRolling = activeDuel.phase === 'rolling-damage';
+  const isDamageResult = activeDuel.phase === 'damage-result';
+
+  // Read live HP of defender so bar drops visually in real time when damage is applied!
+  const activeMap = campaign.maps.find((m) => m.id === campaign.activeMapId);
+  const liveDefenderToken = activeMap?.tokens.find(
+    (t) => t.id === activeDuel.defenderTokenId
+  );
+  const currentDefenderHp = liveDefenderToken ? liveDefenderToken.hp : activeDuel.defenderHpBefore;
+  const isHeal = activeDuel.damageType?.toLowerCase() === 'cura';
+
+  return (
+    <div className="fixed inset-0 z-[72] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+      <OrnateFrame
+        accentColor={activeDuel.isCrit ? '#facc15' : activeDuel.attackerColor}
+        className={`rpg-glass-panel rounded-lg max-w-3xl w-full p-6 space-y-5 ${
+          isAttackResult && activeDuel.isCrit
+            ? 'animate-crit-shake animate-critical-nova'
+            : 'animate-modal-unfurl'
+        }`}
+      >
+        {/* Top Action Header */}
+        <div className="flex items-center justify-between gap-3">
+          <OrnateHeaderBanner
+            title={activeDuel.actionTitle}
+            subtitle="Confronto de Combate"
+            icon={<Swords className="w-5 h-5" style={{ color: activeDuel.attackerColor }} />}
+          />
+          <button
+            onClick={dismissDuel}
+            className="rpg-card p-1.5 rounded-md hover:border-amber-400 cursor-pointer shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <OrnateDivider />
+
+        {/* Duelists Row: Attacker (with Lunge) vs CA Shield (with Shards/Block) vs Defender (with Ghost HP) */}
+        <div className="grid grid-cols-1 md:grid-cols-11 gap-4 items-center">
+          {/* Attacker */}
+          <div
+            className={`md:col-span-4 rpg-card rounded-lg p-4 flex flex-col items-center text-center gap-2 ${
+              !isAttackRolling && activeDuel.hitSuccess && (isAttackResult || isDamageRolling)
+                ? 'animate-attacker-lunge'
+                : ''
+            }`}
+          >
+            <TokenPortrait
+              name={activeDuel.attackerName}
+              imageUrl={activeDuel.attackerImageUrl}
+              playerColor={activeDuel.attackerColor}
+              frameStyle={activeDuel.attackerFrame || 'gold'}
+              sizePx={74}
+            />
+            <div className="font-display font-bold text-sm" style={{ color: activeDuel.attackerColor }}>
+              {activeDuel.attackerName}
+            </div>
+            <span className="rpg-socket text-[10px] font-display uppercase tracking-widest px-2.5 py-0.5 rounded-xs text-amber-200/85">
+              Atacante
+            </span>
+          </div>
+
+          {/* Center Clash: CA Shield with SVG Cracks & Shards */}
+          <div className="md:col-span-3 flex flex-col items-center justify-center gap-2 relative">
+            <div
+              className={`relative w-24 h-28 flex flex-col items-center justify-center transition-all ${
+                (isAttackResult || isDamageRolling || isDamageResult) && activeDuel.hitSuccess
+                  ? 'animate-shield-shatter'
+                  : isAttackResult && !activeDuel.hitSuccess
+                  ? 'animate-shield-block'
+                  : ''
+              }`}
+            >
+              <svg viewBox="0 0 100 115" className="w-full h-full drop-shadow-[0_6px_18px_rgba(0,0,0,0.85)]">
+                <defs>
+                  <linearGradient id="ca-shield-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#64748b" />
+                    <stop offset="45%" stopColor="#1e293b" />
+                    <stop offset="100%" stopColor="#090d16" />
+                  </linearGradient>
+                </defs>
+                <path
+                  d="M50,4 L92,20 L88,64 C86,88 68,104 50,111 C32,104 14,88 12,64 L8,20 Z"
+                  fill="url(#ca-shield-grad)"
+                  stroke={
+                    isAttackResult && !activeDuel.hitSuccess
+                      ? '#38bdf8'
+                      : activeDuel.hitSuccess && !isAttackRolling
+                      ? '#facc15'
+                      : '#d4aa48'
+                  }
+                  strokeWidth="4"
+                />
+                {/* Inner Steel Bevel */}
+                <path
+                  d="M50,12 L84,25 L80,62 C78,82 64,95 50,101 C36,95 22,82 20,62 L16,25 Z"
+                  fill="none"
+                  stroke="rgba(255,255,255,0.16)"
+                  strokeWidth="1.5"
+                />
+                {/* SVG Fracture Cracks when Shield Shatters on Hit */}
+                {(isAttackResult || isDamageRolling || isDamageResult) && activeDuel.hitSuccess && (
+                  <g stroke="#facc15" strokeWidth="2.4" strokeLinecap="round" fill="none">
+                    <polyline points="22,26 44,48 34,74 52,96" />
+                    <polyline points="74,30 52,54 70,68" />
+                    <line x1="44" y1="48" x2="62" y2="38" />
+                  </g>
+                )}
+              </svg>
+
+              {/* Flying Metallic Shards on Shatter */}
+              {isAttackResult && activeDuel.hitSuccess && (
+                <>
+                  <svg viewBox="0 0 24 24" className="w-5 h-5 absolute -top-1 -right-2 pointer-events-none animate-shield-shards">
+                    <polygon points="4,2 20,8 10,20" fill="#fde68a" />
+                  </svg>
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 absolute top-6 -left-3 pointer-events-none animate-shield-shards">
+                    <polygon points="2,14 18,4 14,22" fill="#94a3b8" />
+                  </svg>
+                </>
+              )}
+
+              {/* Deflection Ring on Block */}
+              {isAttackResult && !activeDuel.hitSuccess && (
+                <div className="absolute inset-0 rounded-full border-2 border-sky-400/75 pointer-events-none animate-ping opacity-55" />
+              )}
+
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <Shield className="w-4 h-4 text-amber-300/90 mb-0.5" />
+                <span className="text-[9px] uppercase font-display tracking-wider text-slate-300 font-bold">
+                  Defesa CA
+                </span>
+                <span className="font-chronicle font-black text-2xl text-white leading-none drop-shadow">
+                  {activeDuel.defenderDefense}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Defender + Live Ghost-Drain HP Bar */}
+          <div className="md:col-span-4 rpg-card rounded-lg p-4 flex flex-col items-center text-center gap-2">
+            <TokenPortrait
+              name={activeDuel.defenderName}
+              imageUrl={activeDuel.defenderImageUrl}
+              playerColor={activeDuel.defenderColor}
+              frameStyle={activeDuel.defenderFrame || 'crimson'}
+              sizePx={74}
+              isDead={currentDefenderHp <= 0}
+            />
+            <div className="font-display font-bold text-sm">{activeDuel.defenderName}</div>
+            <div className="w-full space-y-1.5">
+              <SculptedHealthBar
+                hp={currentDefenderHp}
+                maxHp={activeDuel.defenderMaxHp}
+                ghostOverride={activeDuel.defenderHpBefore}
+                heightClass="h-3"
+              />
+              <div className="text-xs font-mono-dice font-bold flex items-center justify-center gap-1">
+                <Heart className="w-3 h-3 text-red-400" />
+                <span>
+                  PV {currentDefenderHp} / {activeDuel.defenderMaxHp}
+                </span>
+                {isDamageResult && activeDuel.damageTotal !== undefined && (
+                  <span className={isHeal ? 'text-emerald-400' : 'text-red-400'}>
+                    ({isHeal ? `+${activeDuel.damageTotal}` : `-${activeDuel.damageTotal}`})
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* STAGE 1 OR STAGE 2 DICE & ACTION PANEL */}
+        <div className="rpg-socket rounded-lg p-4 flex flex-col items-center gap-3 text-center">
+          {(isAttackRolling || isAttackResult) && (
+            <>
+              <div className="text-xs uppercase tracking-widest font-display font-bold text-amber-200/90">
+                Etapa 1 — Teste de Acerto ({formatFormulaForDisplay(activeDuel.attackFormula || '')})
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-5">
+                {activeDuel.attackRolledDice.map((die, idx) => (
+                  <PolyhedronShape
+                    key={idx}
+                    die={die}
+                    displayValue={isAttackRolling ? tickNums[idx % tickNums.length] : die.value}
+                    skin={activeDuel.diceSkin}
+                    rolling={isAttackRolling}
+                    isCritDie={!isAttackRolling && die.sides === 20 && die.value === 20}
+                    isFumbleDie={!isAttackRolling && die.sides === 20 && die.value === 1}
+                  />
+                ))}
+              </div>
+
+              {isAttackResult && (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-center gap-3">
+                    <span className="text-sm font-lore">Total do Ataque:</span>
+                    <span
+                      className="font-chronicle font-black text-3xl drop-shadow"
+                      style={{ color: activeDuel.hitSuccess ? '#facc15' : '#f87171' }}
+                    >
+                      {activeDuel.attackTotal}
+                    </span>
+                    <span className="text-sm opacity-75">vs CA {activeDuel.defenderDefense}</span>
+                  </div>
+
+                  {activeDuel.hitSuccess ? (
+                    <div className="space-y-2.5">
+                      <div className="inline-flex items-center gap-2 px-4 py-1 rounded-md bg-amber-950/70 border border-amber-400/70 text-amber-200 font-display font-bold text-xs tracking-wider shadow">
+                        <Flame className="w-4 h-4 text-amber-400" />
+                        {activeDuel.isCrit
+                          ? 'ACERTO CRÍTICO! (Dados de dano dobrados!)'
+                          : `ACERTOU! Superou a CA ${activeDuel.defenderDefense}!`}
+                      </div>
+                      {activeDuel.damageFormula ? (
+                        <div>
+                          <button
+                            onClick={rollDuelDamage}
+                            className="rpg-btn-crimson px-7 py-2.5 rounded-md text-sm flex items-center gap-2 mx-auto cursor-pointer shadow-xl"
+                          >
+                            <Sparkles className="w-4 h-4" />
+                            <span>
+                              Rolar Dano Agora ({formatFormulaForDisplay(activeDuel.damageFormula)})
+                            </span>
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={dismissDuel}
+                          className="rpg-btn-primary px-6 py-2 rounded-md text-xs cursor-pointer"
+                        >
+                          Concluir Ataque
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      <div className="inline-flex items-center gap-2 px-4 py-1 rounded-md bg-slate-900/80 border border-sky-400/50 text-sky-200 font-display font-bold text-xs tracking-wider">
+                        <Shield className="w-4 h-4 text-sky-400" />
+                        BLOQUEADO PELA DEFESA (CA {activeDuel.defenderDefense})!
+                      </div>
+                      <div>
+                        <button
+                          onClick={dismissDuel}
+                          className="rpg-card px-5 py-2 rounded-md text-xs font-display font-semibold cursor-pointer"
+                        >
+                          Fechar
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {(isDamageRolling || isDamageResult) && activeDuel.damageRolledDice && (
+            <>
+              <div className="text-xs uppercase tracking-widest font-display font-bold text-red-300">
+                Etapa 2 — Rolagem de {isHeal ? 'Cura' : 'Dano'} ({formatFormulaForDisplay(activeDuel.damageFormula || '')})
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-5">
+                {activeDuel.damageRolledDice.map((die, idx) => (
+                  <PolyhedronShape
+                    key={idx}
+                    die={die}
+                    displayValue={isDamageRolling ? tickNums[idx % tickNums.length] : die.value}
+                    skin={activeDuel.diceSkin}
+                    rolling={isDamageRolling}
+                  />
+                ))}
+              </div>
+
+              {isDamageResult && (
+                <div className="space-y-2.5 animate-dice-tumble">
+                  <div className="font-chronicle font-black text-3xl text-red-400 drop-shadow">
+                    {isHeal
+                      ? `+${activeDuel.damageTotal} PV Restaurados!`
+                      : `-${activeDuel.damageTotal} de Dano (${activeDuel.damageType || 'Físico'})!`}
+                  </div>
+                  <div className="text-xs text-emerald-300 font-semibold">
+                    Vida de {activeDuel.defenderName} atualizada automaticamente para {currentDefenderHp}/{activeDuel.defenderMaxHp} PV.
+                  </div>
+                  <button
+                    onClick={dismissDuel}
+                    className="rpg-btn-primary px-6 py-2 rounded-md text-xs cursor-pointer"
+                  >
+                    Continuar Batalha
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </OrnateFrame>
+    </div>
+  );
+};

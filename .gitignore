@@ -1,0 +1,17 @@
+# Dependencies & binaries
+node_modules/
+
+# Build outputs
+dist/
+*.tsbuildinfo
+
+# Local runtime uploads & saves
+server/data/uploads/
+server/data/campaigns/
+server/data/active-campaign.txt
+server/data/campaign-state.json
+
+# Logs & OS files
+*.log
+.DS_Store
+Thumbs.db
