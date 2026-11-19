@@ -5,6 +5,7 @@ node_modules/
 dist/
 dist-server/
 release/
+Chronicles.exe
 *.tsbuildinfo
 
 # Local runtime uploads & saves

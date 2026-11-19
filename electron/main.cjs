@@ -83,6 +83,17 @@ async function startBackendServer() {
   }
 
   // Development mode: prefer compiled bundle if available, fallback to tsx
+  const compiledServer = path.join(ROOT_DIR, 'dist-server', 'server.cjs');
+  if (fs.existsSync(compiledServer)) {
+    serverProc = spawn(process.execPath, [compiledServer], {
+      cwd: ROOT_DIR,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(SERVER_PORT) },
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    return;
+  }
+
   const tsxCli = path.join(ROOT_DIR, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   const serverEntry = path.join(ROOT_DIR, 'server', 'index.ts');
 
