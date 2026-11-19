@@ -15,9 +15,11 @@ import {
   X,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
+import { DAMAGE_TYPE_OPTIONS, findNearestFreeGridCell } from '../shared/rulesEngine';
 import {
   AbilityDef,
   AttributeDef,
+  CardRarity,
   ClassDef,
   ConditionDef,
   ItemDef,
@@ -48,15 +50,23 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
 
   const canEdit = role === 'gm';
 
-  const sections: Array<{ id: CompendiumSection; label: string; icon: React.ReactNode }> = [
+  const allSections: Array<{
+    id: CompendiumSection;
+    label: string;
+    icon: React.ReactNode;
+    gmOnly?: boolean;
+  }> = [
     { id: 'rules', label: 'Regras & Atributos', icon: <Settings className="w-4 h-4" /> },
     { id: 'races', label: 'Raças', icon: <Users className="w-4 h-4" /> },
     { id: 'classes', label: 'Classes', icon: <Swords className="w-4 h-4" /> },
     { id: 'abilities', label: 'Poderes & Magias', icon: <Flame className="w-4 h-4" /> },
     { id: 'items', label: 'Itens & Armas', icon: <Package className="w-4 h-4" /> },
     { id: 'conditions', label: 'Condições', icon: <Sparkles className="w-4 h-4" /> },
-    { id: 'monsters', label: 'Bestiário', icon: <Skull className="w-4 h-4" /> },
+    { id: 'monsters', label: 'Bestiário', icon: <Skull className="w-4 h-4" />, gmOnly: true },
   ];
+  const sections = allSections.filter((s) => !s.gmOnly || role === 'gm');
+  const activeSection: CompendiumSection =
+    role !== 'gm' && section === 'monsters' ? 'abilities' : section;
 
   // Helpers to update compendium arrays cleanly
   const updateCompendium = <K extends keyof typeof campaign.compendium>(
@@ -177,35 +187,41 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
     const activeMap = campaign.maps.find((m) => m.id === campaign.activeMapId);
     if (!activeMap) return;
     const count = activeMap.tokens.filter((t) => t.referenceId === mon.id).length;
+    const size = mon.size === 'Grande' || mon.size === 'Enorme' ? 2 : 1;
     updateCampaign((prev) => ({
       ...prev,
-      maps: prev.maps.map((m) =>
-        m.id === activeMap.id
-          ? {
-              ...m,
-              tokens: [
-                ...m.tokens,
-                {
-                  id: `tok-${Date.now()}`,
-                  name: `${mon.name} #${count + 1}`,
-                  type: 'monster',
-                  referenceId: mon.id,
-                  x: Math.floor(m.gridWidth / 2),
-                  y: Math.floor(m.gridHeight / 2),
-                  size: mon.size === 'Grande' || mon.size === 'Enorme' ? 2 : 1,
-                  hp: mon.maxHp,
-                  maxHp: mon.maxHp,
-                  defense: mon.defense,
-                  activeConditionIds: [],
-                  isHidden: false,
-                  color: mon.tokenColor,
-                },
-              ],
-            }
-          : m
-      ),
+      maps: prev.maps.map((m) => {
+        if (m.id !== activeMap.id) return m;
+        const pos = findNearestFreeGridCell(
+          m,
+          Math.floor(m.gridWidth / 2),
+          Math.floor(m.gridHeight / 2),
+          size
+        );
+        return {
+          ...m,
+          tokens: [
+            ...m.tokens,
+            {
+              id: `tok-${Date.now()}`,
+              name: `${mon.name} #${count + 1}`,
+              type: 'monster',
+              referenceId: mon.id,
+              x: pos.x,
+              y: pos.y,
+              size,
+              hp: mon.maxHp,
+              maxHp: mon.maxHp,
+              defense: mon.defense,
+              activeConditionIds: [],
+              isHidden: false,
+              color: mon.tokenColor,
+            },
+          ],
+        };
+      }),
     }));
-    window.alert(`${mon.name} invocado no centro do mapa "${activeMap.name}"!`);
+    window.alert(`${mon.name} invocado no mapa "${activeMap.name}"!`);
   };
 
   const renderModifierEditor = (
@@ -359,7 +375,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                 setSearch('');
               }}
               className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 shrink-0 cursor-pointer transition ${
-                section === sec.id ? 'rpg-btn-primary' : 'rpg-card hover:opacity-85'
+                activeSection === sec.id ? 'rpg-btn-primary' : 'rpg-card hover:opacity-85'
               }`}
             >
               {sec.icon}
@@ -799,7 +815,8 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                       </button>
                     ))}
 
-                {section === 'monsters' &&
+                {activeSection === 'monsters' &&
+                  role === 'gm' &&
                   campaign.compendium.monsters
                     .filter((m) => m.name.toLowerCase().includes(q))
                     .map((m) => (
@@ -1026,7 +1043,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                           />
                         </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-2.5">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                         <div>
                           <label className="block mb-1">Atributo Chave</label>
                           <select
@@ -1040,6 +1057,26 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                                 {a.name}
                               </option>
                             ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block mb-1">Silhueta do Corpo (Paperdoll)</label>
+                          <select
+                            disabled={!canEdit}
+                            value={item.paperdollArchetype || ''}
+                            onChange={(e) =>
+                              patch({
+                                paperdollArchetype: (e.target.value || undefined) as
+                                  | ClassDef['paperdollArchetype']
+                                  | undefined,
+                              })
+                            }
+                            className="rpg-input w-full"
+                          >
+                            <option value="">Automático pelo nome da classe</option>
+                            <option value="warrior">Guerreiro (Armadura Pesada)</option>
+                            <option value="arcane">Arcano (Manto &amp; Runas)</option>
+                            <option value="rogue">Ladino (Couro &amp; Sombras)</option>
                           </select>
                         </div>
                         <div>
@@ -1263,6 +1300,22 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                         </div>
                       </div>
 
+                      <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                        <input
+                          disabled={!canEdit}
+                          type="checkbox"
+                          checked={Boolean(item.requiresConcentration)}
+                          onChange={(e) => patch({ requiresConcentration: e.target.checked })}
+                          className="accent-sky-400"
+                        />
+                        <span className="text-sky-300 font-semibold">
+                          Requer Concentração
+                        </span>
+                        <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                          (Ativa foco automaticamente ao conjurar; sofrer dano exige teste de CON)
+                        </span>
+                      </label>
+
                       <div>
                         <label className="block mb-1">Descrição</label>
                         <textarea
@@ -1469,14 +1522,58 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                           />
                         </div>
                       </div>
-                      <div>
-                        <label className="block mb-1">Tipo de Dano / Efeito</label>
-                        <input
-                          disabled={!canEdit}
-                          value={item.damageType || ''}
-                          onChange={(e) => patch({ damageType: e.target.value })}
-                          className="rpg-input w-full"
-                        />
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                        <div>
+                          <label className="block mb-1">Tipo de Dano / Efeito</label>
+                          <input
+                            disabled={!canEdit}
+                            value={item.damageType || ''}
+                            onChange={(e) => patch({ damageType: e.target.value })}
+                            className="rpg-input w-full"
+                          />
+                        </div>
+                        {item.type !== 'Consumível' && (
+                          <div>
+                            <label className="block mb-1">Parte do Corpo (Slot)</label>
+                            <select
+                              disabled={!canEdit}
+                              value={item.slot || ''}
+                              onChange={(e) =>
+                                patch({
+                                  slot: (e.target.value || undefined) as ItemDef['slot'],
+                                })
+                              }
+                              className="rpg-input w-full"
+                            >
+                              <option value="">Automático pelo Tipo/Nome</option>
+                              <option value="head">Cabeça (Elmo / Capuz / Coroa)</option>
+                              <option value="amulet">Pescoço / Manto (Colar / Capa)</option>
+                              <option value="armor">Tronco / Armadura (Peitoral / Veste)</option>
+                              <option value="mainHand">Mão Principal (Arma / Cajado)</option>
+                              <option value="offHand">Mão Secundária (Escudo / Foco)</option>
+                              <option value="ring">Anel / Relíquia (Anel / Luvas)</option>
+                              <option value="boots">Pés / Botas (Grevas / Botas)</option>
+                            </select>
+                          </div>
+                        )}
+                        <div>
+                          <label className="block mb-1">Raridade</label>
+                          <select
+                            disabled={!canEdit}
+                            value={item.rarity || 'comum'}
+                            onChange={(e) =>
+                              patch({
+                                rarity: e.target.value as CardRarity,
+                              })
+                            }
+                            className="rpg-input w-full"
+                          >
+                            <option value="comum">Comum</option>
+                            <option value="raro">Raro</option>
+                            <option value="epico">Épico</option>
+                            <option value="lendario">Lendário</option>
+                          </select>
+                        </div>
                       </div>
                       <div>
                         <label className="block mb-1">Descrição</label>
@@ -1574,8 +1671,9 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                   );
                 })()}
 
-              {/* MONSTER EDITOR */}
-              {section === 'monsters' &&
+              {/* MONSTER EDITOR (GM ONLY) */}
+              {activeSection === 'monsters' &&
+                role === 'gm' &&
                 (() => {
                   const item =
                     campaign.compendium.monsters.find((m) => m.id === selectedId) ||
@@ -1701,6 +1799,66 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                             className="rpg-input w-full h-8 p-1"
                           />
                         </div>
+                      </div>
+
+                      {/* Damage Resistances / Immunities / Vulnerabilities */}
+                      <div className="rpg-card p-3 rounded-lg space-y-2">
+                        <div className="font-semibold text-amber-200">
+                          Afinidades de Dano (Resistência ½ • Imunidade 0 • Vulnerabilidade 2x)
+                        </div>
+                        {(
+                          [
+                            {
+                              key: 'damageResistances' as const,
+                              label: 'Resistente (½ dano)',
+                              activeCls: 'bg-sky-950/90 border-sky-400/70 text-sky-200',
+                            },
+                            {
+                              key: 'damageImmunities' as const,
+                              label: 'Imune (0 dano)',
+                              activeCls: 'bg-emerald-950/90 border-emerald-400/70 text-emerald-200',
+                            },
+                            {
+                              key: 'damageVulnerabilities' as const,
+                              label: 'Vulnerável (2x dano)',
+                              activeCls: 'bg-red-950/90 border-red-400/70 text-red-200',
+                            },
+                          ] as const
+                        ).map((group) => {
+                          const list = item[group.key] || [];
+                          return (
+                            <div key={group.key} className="space-y-1">
+                              <div className="text-[10px] uppercase tracking-wider opacity-75">
+                                {group.label}
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {DAMAGE_TYPE_OPTIONS.map((dt) => {
+                                  const active = list.includes(dt);
+                                  return (
+                                    <button
+                                      key={dt}
+                                      type="button"
+                                      disabled={!canEdit}
+                                      onClick={() => {
+                                        const nextList = active
+                                          ? list.filter((x) => x !== dt)
+                                          : [...list, dt];
+                                        patch({ [group.key]: nextList });
+                                      }}
+                                      className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer transition disabled:opacity-50 ${
+                                        active
+                                          ? group.activeCls
+                                          : 'rpg-card opacity-70 hover:opacity-100'
+                                      }`}
+                                    >
+                                      {dt}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
 
                       {/* Attacks + 1-Click Monster Attack Roll for GM */}

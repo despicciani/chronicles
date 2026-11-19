@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Crown,
   Dices,
   Music,
@@ -10,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import { computeCharacterStats, evaluateFormula, formatSigned } from '../shared/rulesEngine';
+import { DraggablePanel, DragGripBadge } from './DraggablePanel';
 import { OrnateDivider, OrnateFrame, SculptedHealthBar } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
 
@@ -89,83 +92,113 @@ export const CinematicOverlays: React.FC = () => {
   );
 
   const activeBoss = campaign.activeBoss;
+  const [bossMinimized, setBossMinimized] = useState(false);
 
   return (
     <>
-      {/* 1. GOTHIC BOSS FIGHT BAR WITH GHOST DRAIN */}
+      {/* 1. COMPACT GOTHIC BOSS BAR (Positioned bottom-right & Draggable!) */}
       {activeBoss && activeBoss.active && (
-        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-30 w-[92%] max-w-2xl pointer-events-auto">
-          <OrnateFrame
-            accentColor="#dc2626"
-            cornerSize={20}
-            className="rpg-glass-panel rounded-lg px-5 py-3 shadow-[0_18px_50px_rgba(180,25,25,0.45)] animate-modal-unfurl"
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <TokenPortrait
-                  name={activeBoss.name}
-                  imageUrl={activeBoss.imageUrl}
-                  playerColor={activeBoss.color || '#dc2626'}
-                  frameStyle="crimson"
-                  sizePx={46}
-                  isDead={activeBoss.hp <= 0}
-                />
-                <div className="min-w-0">
-                  <div className="font-chronicle font-black text-base tracking-wider text-red-200 uppercase truncate">
-                    {activeBoss.name}
+        <DraggablePanel
+          storageKey="boss-fight-bar"
+          className="fixed bottom-20 right-4 z-25 w-[310px] sm:w-[350px] pointer-events-auto"
+        >
+          {bossMinimized ? (
+            <button
+              onClick={() => setBossMinimized(false)}
+              className="ml-auto rpg-glass-panel rounded-md px-3 py-1.5 flex items-center gap-2 border-red-500/60 shadow-xl cursor-pointer hover:border-amber-400"
+              title="Expandir barra do Chefe"
+            >
+              <Crown className="w-3.5 h-3.5 text-red-400" />
+              <span className="font-chronicle font-bold text-xs text-red-200 truncate max-w-[180px]">
+                {activeBoss.name}
+              </span>
+              <ChevronUp className="w-3.5 h-3.5 text-amber-300" />
+            </button>
+          ) : (
+            <OrnateFrame
+              accentColor="#dc2626"
+              cornerSize={14}
+              className="rpg-glass-panel rounded-lg px-3.5 py-2 shadow-[0_14px_38px_rgba(180,25,25,0.45)] animate-modal-unfurl"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <TokenPortrait
+                    name={activeBoss.name}
+                    imageUrl={activeBoss.imageUrl}
+                    playerColor={activeBoss.color || '#dc2626'}
+                    frameStyle="crimson"
+                    sizePx={36}
+                    isDead={activeBoss.hp <= 0}
+                  />
+                  <div className="min-w-0">
+                    <div className="font-chronicle font-black text-xs tracking-wider text-red-200 uppercase truncate">
+                      {activeBoss.name}
+                    </div>
+                    <div className="text-[10px] font-display uppercase tracking-wider text-amber-300/80 truncate">
+                      {activeBoss.title}
+                    </div>
                   </div>
-                  <div className="text-[11px] font-display uppercase tracking-widest text-amber-300/80 truncate">
-                    {activeBoss.title}
-                  </div>
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0 text-[11px]">
+                  <DragGripBadge />
+                  {role === 'gm' && (
+                    <>
+                      <button
+                        onClick={() =>
+                          announceBoss({
+                            ...activeBoss,
+                            hp: Math.max(0, activeBoss.hp - 10),
+                          })
+                        }
+                        className="px-1.5 py-0.5 rounded bg-red-950/85 border border-red-500/40 hover:bg-red-800 text-red-100 cursor-pointer"
+                      >
+                        -10
+                      </button>
+                      <button
+                        onClick={() =>
+                          announceBoss({
+                            ...activeBoss,
+                            hp: Math.min(activeBoss.maxHp, activeBoss.hp + 10),
+                          })
+                        }
+                        className="px-1.5 py-0.5 rounded bg-emerald-950/85 border border-emerald-500/40 hover:bg-emerald-800 text-emerald-100 cursor-pointer"
+                      >
+                        +10
+                      </button>
+                    </>
+                  )}
+                  <button
+                    onClick={() => setBossMinimized(true)}
+                    className="rpg-card p-1 rounded text-amber-300 cursor-pointer"
+                    title="Minimizar Barra de Chefe"
+                  >
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
+                  {role === 'gm' && (
+                    <button
+                      onClick={() => announceBoss(null)}
+                      className="rpg-card p-1 rounded text-red-300 cursor-pointer"
+                      title="Ocultar Barra de Chefe"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {role === 'gm' && (
-                <div className="flex items-center gap-1.5 shrink-0 text-xs">
-                  <button
-                    onClick={() =>
-                      announceBoss({
-                        ...activeBoss,
-                        hp: Math.max(0, activeBoss.hp - 10),
-                      })
-                    }
-                    className="px-2 py-1 rounded bg-red-950/85 border border-red-500/40 hover:bg-red-800 text-red-100 cursor-pointer"
-                  >
-                    -10
-                  </button>
-                  <button
-                    onClick={() =>
-                      announceBoss({
-                        ...activeBoss,
-                        hp: Math.min(activeBoss.maxHp, activeBoss.hp + 10),
-                      })
-                    }
-                    className="px-2 py-1 rounded bg-emerald-950/85 border border-emerald-500/40 hover:bg-emerald-800 text-emerald-100 cursor-pointer"
-                  >
-                    +10
-                  </button>
-                  <button
-                    onClick={() => announceBoss(null)}
-                    className="rpg-card p-1 rounded text-red-300 cursor-pointer"
-                    title="Ocultar Barra de Chefe"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <div className="mt-2.5">
-              <SculptedHealthBar
-                hp={activeBoss.hp}
-                maxHp={activeBoss.maxHp}
-                variant="boss"
-                heightClass="h-3.5"
-                label={role === 'gm' ? `${activeBoss.hp} / ${activeBoss.maxHp} PV` : undefined}
-              />
-            </div>
-          </OrnateFrame>
-        </div>
+              <div className="mt-2">
+                <SculptedHealthBar
+                  hp={activeBoss.hp}
+                  maxHp={activeBoss.maxHp}
+                  variant="boss"
+                  heightClass="h-2.5"
+                  label={role === 'gm' ? `${activeBoss.hp} / ${activeBoss.maxHp} PV` : undefined}
+                />
+              </div>
+            </OrnateFrame>
+          )}
+        </DraggablePanel>
       )}
 
       {/* 2. CINEMATIC LOCATION BANNER */}

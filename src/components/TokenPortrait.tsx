@@ -264,10 +264,27 @@ export const TokenPortrait: React.FC<TokenPortraitProps> = ({
           <img
             src={resolved}
             alt={name}
-            className={`w-full h-full object-cover ${isDead ? 'grayscale brightness-75' : ''}`}
+            className={`w-full h-full object-cover ${isDead ? 'grayscale sepia-[0.35] brightness-75' : ''}`}
           />
         ) : (
           renderFantasyCrestSvg(`${name} ${iconHint || ''}`)
+        )}
+
+        {/* Fallen Crimson Skull Crest Overlay (no flat black ball!) */}
+        {isDead && (
+          <div className="absolute inset-0 bg-red-950/55 flex items-center justify-center pointer-events-none">
+            <svg viewBox="0 0 24 24" className="w-[56%] h-[56%] drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)]" fill="none">
+              <path
+                d="M6 10.5C6 6.8 8.7 4 12 4C15.3 4 18 6.8 18 10.5C18 13.1 16.8 14.9 15.6 15.9V19H8.4V15.9C7.2 14.9 6 13.1 6 10.5Z"
+                fill="#450a0a"
+                stroke="#fca5a5"
+                strokeWidth="1.6"
+              />
+              <circle cx="9.6" cy="11" r="1.4" fill="#fca5a5" />
+              <circle cx="14.4" cy="11" r="1.4" fill="#fca5a5" />
+              <path d="M10.5 16.5V19M13.5 16.5V19" stroke="#fca5a5" strokeWidth="1.3" />
+            </svg>
+          </div>
         )}
 
         {/* Top-Left Specular Glass Arc */}

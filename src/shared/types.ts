@@ -5,6 +5,15 @@ export type CardRarity = 'comum' | 'raro' | 'epico' | 'lendario';
 export type DiceSkin = 'gold' | 'fire' | 'ice' | 'emerald' | 'amethyst' | 'blood';
 export type TokenFrameStyle = 'gold' | 'runic' | 'emerald' | 'crimson' | 'arcane';
 export type ActionEconomyCost = 'Padrão' | 'Bônus' | 'Reação' | 'Livre';
+export type PaperdollArchetype = 'warrior' | 'arcane' | 'rogue';
+export type EquipSlot =
+  | 'head'
+  | 'amulet'
+  | 'armor'
+  | 'mainHand'
+  | 'offHand'
+  | 'ring'
+  | 'boots';
 
 export interface CampaignSettings {
   systemName: string;
@@ -16,6 +25,8 @@ export interface CampaignSettings {
   gridSquareMeters: number;
   attributePointBudget: number;
   maxTrainedSkills: number;
+  showEnemyAcToPlayers?: boolean;
+  enableFlanking?: boolean;
 }
 
 export interface AttributeDef {
@@ -91,6 +102,7 @@ export interface ClassDef {
   proficiencies: string[];
   numTrainedSkills: number;
   color: string;
+  paperdollArchetype?: PaperdollArchetype;
   levelFeatures: ClassLevelFeature[];
 }
 
@@ -112,12 +124,15 @@ export interface AbilityDef {
   saveDcFormula?: string;
   applyConditionId?: string;
   conditionDurationRounds?: number;
+  requiresConcentration?: boolean;
 }
 
 export interface ItemDef {
   id: string;
   name: string;
   type: 'Arma' | 'Armadura' | 'Escudo' | 'Consumível' | 'Item Mágico' | 'Equipamento';
+  slot?: EquipSlot;
+  rarity?: CardRarity;
   weight: number;
   valueGold: number;
   description: string;
@@ -154,6 +169,9 @@ export interface MonsterDef {
   saves: { fort: number; ref: number; von: number };
   attacks: MonsterAttack[];
   abilities: string[];
+  damageResistances?: string[];
+  damageImmunities?: string[];
+  damageVulnerabilities?: string[];
   description: string;
   tokenColor: string;
 }
@@ -163,6 +181,7 @@ export interface InventoryEntry {
   itemId: string;
   quantity: number;
   equipped: boolean;
+  equippedSlot?: EquipSlot;
   customNotes?: string;
 }
 
@@ -192,11 +211,19 @@ export interface CharacterCustomAbility {
 
 export interface Character {
   id: string;
+  vaultId?: string;
+  lastSyncedAt?: string;
   ownerPlayerId?: string;
   playerName: string;
   playerColor: string;
   tokenFrameStyle?: TokenFrameStyle;
   diceSkin?: DiceSkin;
+  paperdollArchetype?: PaperdollArchetype;
+  nextAttackRollOverride?: 'advantage' | 'disadvantage' | null;
+  damageResistances?: string[];
+  damageImmunities?: string[];
+  damageVulnerabilities?: string[];
+  concentratingSpell?: string | null;
   themeMusicUrl?: string;
   themeMusicTitle?: string;
   name: string;
@@ -260,6 +287,7 @@ export interface AoETemplate {
 }
 
 export type GmMarkerKind = 'chest' | 'item' | 'trap' | 'secret';
+export type TerrainCellKind = 'wall' | 'cover' | 'difficult';
 
 export interface GmMapMarker {
   id: string;
@@ -269,6 +297,13 @@ export interface GmMapMarker {
   title: string;
   description?: string;
   revealed: boolean;
+  lootItems?: Array<{ itemId: string; quantity: number }>;
+  lootGold?: number;
+  trapDc?: number;
+  trapSaveSkillId?: string;
+  trapDamageFormula?: string;
+  trapDamageType?: string;
+  trapTriggered?: boolean;
 }
 
 export interface TacticalMap {
@@ -282,6 +317,7 @@ export interface TacticalMap {
   gridSizePx: number;
   fogEnabled: boolean;
   revealedCells: string[];
+  terrainCells?: Record<string, TerrainCellKind>;
   weather: 'none' | 'rain' | 'embers' | 'snow' | 'mist';
   sceneNpcIds: string[];
   tokens: MapToken[];
@@ -314,6 +350,7 @@ export interface Combatant {
   reactionAvailable: boolean;
   disengaged?: boolean;
   dodging?: boolean;
+  concentratingSpell?: string | null;
   isHidden: boolean;
   color: string;
   effects: ActiveCombatEffect[];
@@ -380,6 +417,7 @@ export interface CombatDuelState {
   attackerImageUrl?: string;
   attackerFrame?: TokenFrameStyle;
   defenderTokenId: string;
+  defenderType?: 'character' | 'monster' | 'npc';
   defenderName: string;
   defenderColor: string;
   defenderImageUrl?: string;
@@ -401,6 +439,9 @@ export interface CombatDuelState {
   damageRolledDice?: RolledDieVisual[];
   damageTotal?: number;
   damageApplied?: boolean;
+  situationalModifiers?: string[];
+  effectiveAdvantageMode?: 'normal' | 'advantage' | 'disadvantage';
+  autoCritOnHit?: boolean;
   phase: 'rolling-attack' | 'attack-result' | 'rolling-damage' | 'damage-result';
 }
 
@@ -523,6 +564,16 @@ export interface MapPointerState {
   updatedAt: number;
 }
 
+export interface ConnectedPlayerInfo {
+  socketId: string;
+  playerId: string;
+  playerName: string;
+  playerColor: string;
+  role: UserRole;
+  characterId?: string;
+  characterName?: string;
+}
+
 export interface SkillCheckRequest {
   id: string;
   skillOrAttrId: string;
@@ -547,6 +598,59 @@ export interface CardRewardNotification {
   cardSubtitle: string;
   rarity: CardRarity;
   description: string;
+}
+
+export interface TacticalSaveTargetEntry {
+  tokenId: string;
+  characterId?: string;
+  name: string;
+  type: 'character' | 'monster' | 'npc';
+  color: string;
+  imageUrl?: string;
+  status: 'pending' | 'passed' | 'failed';
+  d20?: number;
+  bonus?: number;
+  total?: number;
+  damageToApply: number;
+  applied?: boolean;
+}
+
+export interface TacticalSavePrompt {
+  id: string;
+  kind: 'trap' | 'aoe' | 'concentration';
+  title: string;
+  subtitle?: string;
+  saveSkillId: string;
+  saveLabel: string;
+  dc: number;
+  damageFormula?: string;
+  damageType?: string;
+  halfOnSuccess?: boolean;
+  rolledRawDamage?: number;
+  targets: TacticalSaveTargetEntry[];
+}
+
+export interface ChatMessageEntry {
+  id: string;
+  timestamp: string;
+  senderName: string;
+  senderRole: UserRole;
+  senderColor: string;
+  senderPlayerId?: string;
+  characterName?: string;
+  recipientName?: string;
+  recipientPlayerId?: string;
+  isWhisper: boolean;
+  text: string;
+}
+
+export interface SavedHeroEntry {
+  id: string;
+  character: Character;
+  savedAt: string;
+  updatedAt: string;
+  originCampaignId?: string;
+  originCampaignName?: string;
 }
 
 export interface CampaignSummary {
@@ -584,6 +688,7 @@ export interface CampaignState {
   activeMapId: string;
   combat: CombatState;
   rollLog: RollLogEntry[];
+  chatLog?: ChatMessageEntry[];
   quests: Quest[];
   npcs: NpcEntry[];
   gmNotes: GmNote[];

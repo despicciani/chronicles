@@ -1,33 +1,47 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ChevronDown,
+  ChevronUp,
   CloudRain,
   Crosshair,
   Eye,
   EyeOff,
   Flame,
   Heart,
-  Image as ImageIcon,
   Layers,
   MapPin,
   MousePointer,
   Navigation,
+  Play,
   Plus,
+  RotateCcw,
   RotateCw,
   Ruler,
+  Shield,
   Sparkles,
   Swords,
   Trash2,
   Users,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import {
+  calculateMovementCostMeters,
   computeCharacterStats,
+  DAMAGE_TYPE_OPTIONS,
+  doesTokenCollideAt,
+  doSquaresOverlap,
+  evaluateLineOfSightAndCover,
+  evaluateTacticalAttackModifiers,
+  findNearestFreeGridCell,
   formatFormulaForDisplay,
   getGridSpanDistance,
+  getMonsterWoundStatus,
   parseAttackRangeMeters,
   parseAttackRangeSquares,
+  resolveDragTargetCell,
 } from '../shared/rulesEngine';
 import {
   AoETemplate,
@@ -36,12 +50,23 @@ import {
   MapToken,
   PendingAttackChoice,
   TacticalMap,
+  TerrainCellKind,
 } from '../shared/types';
 import { FileUploadButton } from './FileUploadButton';
 import { SculptedHealthBar } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
 
-type StageTool = 'select' | 'pointer' | 'ruler' | 'ping' | 'fog-reveal' | 'fog-hide';
+type StageTool =
+  | 'select'
+  | 'pointer'
+  | 'ruler'
+  | 'ping'
+  | 'fog-reveal'
+  | 'fog-hide'
+  | 'terrain-wall'
+  | 'terrain-cover'
+  | 'terrain-difficult'
+  | 'terrain-erase';
 
 const PRESET_GRADIENTS: Record<TacticalMap['themePreset'], string> = {
   crypt: 'radial-gradient(circle at 50% 45%, #23273a 0%, #141621 55%, #090b10 100%)',
@@ -177,9 +202,11 @@ export const StageCanvas: React.FC = () => {
     role,
     myCharacter,
     activeCharacterId,
+    setActiveCharacterId,
     targetTokenId,
     setTargetTokenId,
     updateCampaign,
+    rollCharacterAction,
     sendPing,
     pings,
     activePointers,
@@ -194,16 +221,42 @@ export const StageCanvas: React.FC = () => {
     deleteCharacter,
     assistDeathSave,
     gmResolveDeathSave,
+    claimTreasureMarker,
     resolveAssetUrl,
     showTacticalAlert,
+    opportunityPrompt,
     triggerOpportunityPrompt,
+    activeDuel,
+    advantageMode,
+    setCharacterNextAttackOverride,
+    triggerTrapOnToken,
+    triggerAoESavePrompt,
+    startCombatFromMap,
   } = useCampaign();
 
   const activeMap =
     campaign.maps.find((m) => m.id === campaign.activeMapId) || campaign.maps[0];
 
+  const hasActiveOpportunityPrompt = Boolean(
+    opportunityPrompt &&
+      activeMap?.tokens.some((t) => t.id === opportunityPrompt.targetTokenId) &&
+      activeMap?.tokens.some((t) => t.id === opportunityPrompt.reactorTokenId)
+  );
+
   const [tool, setTool] = useState<StageTool>('select');
+  const [gmDrawerTab, setGmDrawerTab] = useState<
+    'aoe' | 'terrain' | 'secrets' | 'monsters-map' | null
+  >(null);
   const [zoom, setZoom] = useState(1);
+  const [cameraPan, setCameraPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isPanningWorld, setIsPanningWorld] = useState(false);
+  const panDragRef = useRef<{
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
+  const spacePressedRef = useRef(false);
   const [draggingTokenId, setDraggingTokenId] = useState<string | null>(null);
   const [dragOrigin, setDragOrigin] = useState<{
     tokenId: string;
@@ -216,6 +269,13 @@ export const StageCanvas: React.FC = () => {
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
   const [draggingTemplateId, setDraggingTemplateId] = useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [showAoESaveForm, setShowAoESaveForm] = useState(false);
+  const [aoeTitle, setAoeTitle] = useState('Bola de Fogo');
+  const [aoeDc, setAoeDc] = useState(14);
+  const [aoeSaveSkill, setAoeSaveSkill] = useState('reflexos');
+  const [aoeDamageFormula, setAoeDamageFormula] = useState('6d6');
+  const [aoeDamageType, setAoeDamageType] = useState('Fogo');
+  const [aoeHalfOnSuccess, setAoeHalfOnSuccess] = useState(true);
   const [rulerStart, setRulerStart] = useState<{ x: number; y: number } | null>(null);
   const [rulerEnd, setRulerEnd] = useState<{ x: number; y: number } | null>(null);
   const [showMapConfig, setShowMapConfig] = useState(false);
@@ -225,6 +285,9 @@ export const StageCanvas: React.FC = () => {
   const [spawnHidden, setSpawnHidden] = useState(false);
   const [secretMarkerKind, setSecretMarkerKind] = useState<GmMarkerKind | null>(null);
   const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
+  const [treasureDraftItemId, setTreasureDraftItemId] = useState(
+    campaign.compendium.items[0]?.id || ''
+  );
   const [pointerTrails, setPointerTrails] = useState<
     Array<{
       id: string;
@@ -392,14 +455,62 @@ export const StageCanvas: React.FC = () => {
 
   const finalizeTokenDrag = () => {
     const origin = dragOrigin;
+    const pathSnapshot = dragPath;
     setDraggingTokenId(null);
     setDragOrigin(null);
     setDragPath([]);
-    if (!origin || !activeMap || !campaign.combat.active || origin.shiftFree) return;
+    if (!origin || !activeMap) return;
 
-    const finalTok = activeMap.tokens.find((t) => t.id === origin.tokenId);
-    if (!finalTok) return;
-    const { squares, meters } = getGridSpanDistance(
+    const currentTok = activeMap.tokens.find((t) => t.id === origin.tokenId);
+    if (!currentTok) return;
+
+    // Guarantee final position never collides with another token or wall cell
+    let finalTok = currentTok;
+    if (
+      doesTokenCollideAt(
+        activeMap.tokens,
+        currentTok.x,
+        currentTok.y,
+        currentTok.size,
+        currentTok.id,
+        role === 'gm',
+        activeMap.terrainCells
+      )
+    ) {
+      const snapped = findNearestFreeGridCell(
+        activeMap,
+        currentTok.x,
+        currentTok.y,
+        currentTok.size,
+        currentTok.id,
+        role === 'gm'
+      );
+      finalTok = { ...currentTok, x: snapped.x, y: snapped.y };
+      updateActiveMap((m) => ({
+        ...m,
+        tokens: m.tokens.map((t) =>
+          t.id === finalTok.id ? { ...t, x: snapped.x, y: snapped.y } : t
+        ),
+      }));
+    }
+
+    // Automatic Trap Trigger when a token steps onto an untriggered trap marker!
+    const movedAny = finalTok.x !== origin.x || finalTok.y !== origin.y;
+    if (movedAny && !origin.shiftFree) {
+      const steppedTrap = (activeMap.gmMarkers || []).find(
+        (gm) =>
+          gm.kind === 'trap' &&
+          !gm.trapTriggered &&
+          doSquaresOverlap(finalTok.x, finalTok.y, finalTok.size || 1, gm.x, gm.y, 1)
+      );
+      if (steppedTrap) {
+        triggerTrapOnToken(steppedTrap.id, finalTok);
+      }
+    }
+
+    if (!campaign.combat.active || origin.shiftFree) return;
+
+    const { squares } = getGridSpanDistance(
       origin.x,
       origin.y,
       finalTok.size,
@@ -409,6 +520,15 @@ export const StageCanvas: React.FC = () => {
       sqMeters
     );
     if (squares <= 0) return;
+
+    const { meters: movementCostMeters } = calculateMovementCostMeters(
+      origin,
+      finalTok,
+      activeMap.terrainCells,
+      sqMeters,
+      pathSnapshot
+    );
+    const meters = Math.max(squares * sqMeters, movementCostMeters);
 
     const cb = findTokenCombatant(finalTok);
     if (!cb) return;
@@ -483,20 +603,18 @@ export const StageCanvas: React.FC = () => {
   };
 
   const getCellFromEvent = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!gridRef.current || !activeMap) return { gx: 0, gy: 0, xPct: 0, yPct: 0 };
+    if (!gridRef.current || !activeMap) {
+      return { gx: 0, gy: 0, rawX: 0, rawY: 0, xPct: 0, yPct: 0 };
+    }
     const rect = gridRef.current.getBoundingClientRect();
     const cellPx = activeMap.gridSizePx * zoom;
-    const gx = Math.max(
-      0,
-      Math.min(activeMap.gridWidth - 1, Math.floor((e.clientX - rect.left) / cellPx))
-    );
-    const gy = Math.max(
-      0,
-      Math.min(activeMap.gridHeight - 1, Math.floor((e.clientY - rect.top) / cellPx))
-    );
+    const rawX = (e.clientX - rect.left) / cellPx;
+    const rawY = (e.clientY - rect.top) / cellPx;
+    const gx = Math.max(0, Math.min(activeMap.gridWidth - 1, Math.floor(rawX)));
+    const gy = Math.max(0, Math.min(activeMap.gridHeight - 1, Math.floor(rawY)));
     const xPct = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
     const yPct = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
-    return { gx, gy, xPct, yPct };
+    return { gx, gy, rawX, rawY, xPct, yPct };
   };
 
   const handleGridMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -525,6 +643,15 @@ export const StageCanvas: React.FC = () => {
         kind: secretMarkerKind,
         title: defaultTitles[secretMarkerKind],
         revealed: false,
+        ...(secretMarkerKind === 'trap'
+          ? {
+              trapDc: 13,
+              trapSaveSkillId: 'reflexos',
+              trapDamageFormula: '2d6',
+              trapDamageType: 'Perfuração',
+              trapTriggered: false,
+            }
+          : {}),
       };
       updateActiveMap((m) => ({
         ...m,
@@ -559,11 +686,30 @@ export const StageCanvas: React.FC = () => {
         return { ...m, revealedCells: Array.from(set) };
       });
     }
+
+    if (role === 'gm' && tool.startsWith('terrain-')) {
+      const key = `${gx},${gy}`;
+      updateActiveMap((m) => {
+        const nextTerrain: Record<string, TerrainCellKind> = { ...(m.terrainCells || {}) };
+        if (tool === 'terrain-erase') {
+          delete nextTerrain[key];
+        } else {
+          const kind: TerrainCellKind =
+            tool === 'terrain-wall'
+              ? 'wall'
+              : tool === 'terrain-cover'
+                ? 'cover'
+                : 'difficult';
+          nextTerrain[key] = kind;
+        }
+        return { ...m, terrainCells: nextTerrain };
+      });
+    }
   };
 
   const handleGridMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeMap) return;
-    const { gx, gy, xPct, yPct } = getCellFromEvent(e);
+    const { gx, gy, rawX, rawY, xPct, yPct } = getCellFromEvent(e);
 
     // Live Colored Pointer ("Bolinha") when Pointer tool is active OR Alt key held
     if (tool === 'pointer' || e.altKey) {
@@ -576,10 +722,19 @@ export const StageCanvas: React.FC = () => {
     }
 
     if (draggingTemplateId) {
+      // Half-cell snap (0.5 increments) so Cones/Lines/Cubes/Spheres snap freely to cell centers, edges, OR vertices!
+      const snappedX = Math.max(
+        -0.5,
+        Math.min(activeMap.gridWidth - 0.5, Math.round((rawX - 0.5) * 2) / 2)
+      );
+      const snappedY = Math.max(
+        -0.5,
+        Math.min(activeMap.gridHeight - 0.5, Math.round((rawY - 0.5) * 2) / 2)
+      );
       updateActiveMap((m) => ({
         ...m,
         templates: m.templates.map((tmpl) =>
-          tmpl.id === draggingTemplateId ? { ...tmpl, x: gx, y: gy } : tmpl
+          tmpl.id === draggingTemplateId ? { ...tmpl, x: snappedX, y: snappedY } : tmpl
         ),
       }));
       return;
@@ -594,17 +749,20 @@ export const StageCanvas: React.FC = () => {
         ...m,
         tokens: m.tokens.map((t) => {
           if (t.id !== draggingTokenId) return t;
-          let targetX = gx;
-          let targetY = gy;
+          let targetX = Math.max(0, Math.min(activeMap.gridWidth - t.size, gx));
+          let targetY = Math.max(0, Math.min(activeMap.gridHeight - t.size, gy));
           if (campaign.combat.active && dragOrigin && !dragOrigin.shiftFree) {
             const cb = findTokenCombatant(t);
             const remMeters = cb ? cb.remainingMoveMeters ?? cb.speedMeters ?? 9 : 9;
             const maxSq = Math.max(0, Math.floor(remMeters / sqMeters));
-            targetX = Math.max(dragOrigin.x - maxSq, Math.min(dragOrigin.x + maxSq, gx));
-            targetY = Math.max(dragOrigin.y - maxSq, Math.min(dragOrigin.y + maxSq, gy));
+            targetX = Math.max(dragOrigin.x - maxSq, Math.min(dragOrigin.x + maxSq, targetX));
+            targetY = Math.max(dragOrigin.y - maxSq, Math.min(dragOrigin.y + maxSq, targetY));
             targetX = Math.max(0, Math.min(activeMap.gridWidth - t.size, targetX));
             targetY = Math.max(0, Math.min(activeMap.gridHeight - t.size, targetY));
           }
+          const freePos = resolveDragTargetCell(m, t, targetX, targetY, role === 'gm');
+          targetX = freePos.x;
+          targetY = freePos.y;
           if (t.x !== targetX || t.y !== targetY) {
             didDragTokenRef.current = true;
             setMoved(targetX, targetY);
@@ -636,6 +794,28 @@ export const StageCanvas: React.FC = () => {
         else set.delete(key);
         return { ...m, revealedCells: Array.from(set) };
       });
+      return;
+    }
+
+    if (role === 'gm' && e.buttons === 1 && tool.startsWith('terrain-')) {
+      const key = `${gx},${gy}`;
+      const desiredKind: TerrainCellKind | null =
+        tool === 'terrain-erase'
+          ? null
+          : tool === 'terrain-wall'
+            ? 'wall'
+            : tool === 'terrain-cover'
+              ? 'cover'
+              : 'difficult';
+      const currentVal = activeMap.terrainCells?.[key] || null;
+      if (currentVal !== desiredKind) {
+        updateActiveMap((m) => {
+          const nextTerrain: Record<string, TerrainCellKind> = { ...(m.terrainCells || {}) };
+          if (!desiredKind) delete nextTerrain[key];
+          else nextTerrain[key] = desiredKind;
+          return { ...m, terrainCells: nextTerrain };
+        });
+      }
     }
   };
 
@@ -656,14 +836,21 @@ export const StageCanvas: React.FC = () => {
     const mon = campaign.compendium.monsters.find((m) => m.id === spawnMonsterId);
     if (!mon || !activeMap) return;
     const existingCount = activeMap.tokens.filter((t) => t.referenceId === mon.id).length;
+    const size = mon.size === 'Grande' || mon.size === 'Enorme' ? 2 : 1;
+    const spawnPos = findNearestFreeGridCell(
+      activeMap,
+      Math.floor(activeMap.gridWidth / 2),
+      Math.floor(activeMap.gridHeight / 2),
+      size
+    );
     const newToken: MapToken = {
       id: `tok-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       name: `${mon.name} #${existingCount + 1}`,
       type: 'monster',
       referenceId: mon.id,
-      x: Math.floor(activeMap.gridWidth / 2),
-      y: Math.floor(activeMap.gridHeight / 2),
-      size: mon.size === 'Grande' || mon.size === 'Enorme' ? 2 : 1,
+      x: spawnPos.x,
+      y: spawnPos.y,
+      size,
       hp: mon.maxHp,
       maxHp: mon.maxHp,
       defense: mon.defense,
@@ -680,28 +867,6 @@ export const StageCanvas: React.FC = () => {
     updateActiveMap((m) => {
       const existingCharIds = new Set(m.tokens.map((t) => t.referenceId));
       const newTokens: MapToken[] = [];
-      campaign.characters.forEach((ch, idx) => {
-        const stats = computeCharacterStats(ch, campaign);
-        if (!existingCharIds.has(ch.id)) {
-          newTokens.push({
-            id: `tok-${ch.id}-${Date.now()}`,
-            name: ch.name.split(' ')[0],
-            type: 'character',
-            referenceId: ch.id,
-            x: 2 + (idx % 2),
-            y: 4 + idx,
-            size: 1,
-            hp: ch.hp,
-            maxHp: stats.maxHp,
-            defense: stats.defense,
-            activeConditionIds: ch.activeConditionIds,
-            isHidden: false,
-            color: ch.playerColor || ch.tokenColor,
-            frameStyle: ch.tokenFrameStyle || 'gold',
-            imageUrl: ch.portraitUrl,
-          });
-        }
-      });
       const refreshed = m.tokens.map((tok) => {
         if (tok.type !== 'character' || !tok.referenceId) return tok;
         const ch = campaign.characters.find((c) => c.id === tok.referenceId);
@@ -717,6 +882,38 @@ export const StageCanvas: React.FC = () => {
           imageUrl: ch.portraitUrl,
           activeConditionIds: ch.activeConditionIds,
         };
+      });
+      campaign.characters.forEach((ch, idx) => {
+        const stats = computeCharacterStats(ch, campaign);
+        if (!existingCharIds.has(ch.id)) {
+          const spawnPos = findNearestFreeGridCell(
+            {
+              gridWidth: m.gridWidth,
+              gridHeight: m.gridHeight,
+              tokens: [...refreshed, ...newTokens],
+            },
+            2 + (idx % 2),
+            4 + idx,
+            1
+          );
+          newTokens.push({
+            id: `tok-${ch.id}-${Date.now()}`,
+            name: ch.name.split(' ')[0],
+            type: 'character',
+            referenceId: ch.id,
+            x: spawnPos.x,
+            y: spawnPos.y,
+            size: 1,
+            hp: ch.hp,
+            maxHp: stats.maxHp,
+            defense: stats.defense,
+            activeConditionIds: ch.activeConditionIds,
+            isHidden: false,
+            color: ch.playerColor || ch.tokenColor,
+            frameStyle: ch.tokenFrameStyle || 'gold',
+            imageUrl: ch.portraitUrl,
+          });
+        }
       });
       return { ...m, tokens: [...refreshed, ...newTokens] };
     });
@@ -736,17 +933,24 @@ export const StageCanvas: React.FC = () => {
       line: 'rgba(56, 189, 248, 0.28)',
       cube: 'rgba(168, 85, 247, 0.28)',
     };
+    const defaultRadius: Record<AoETemplate['shape'], number> = {
+      sphere: 4,
+      cone: 3,
+      line: 3,
+      cube: 1.5, // 3x3 squares (4,5m / 15 ft side)
+    };
     const tmpl: AoETemplate = {
       id: `aoe-${Date.now()}`,
       shape,
       x: Math.floor(activeMap.gridWidth / 2),
       y: Math.floor(activeMap.gridHeight / 2),
-      radiusSquares: shape === 'sphere' ? 4 : 3,
+      radiusSquares: defaultRadius[shape],
       angleDeg: 0,
       color: colors[shape],
       label: labels[shape],
     };
     updateActiveMap((m) => ({ ...m, templates: [...m.templates, tmpl] }));
+    setSelectedTemplateId(tmpl.id);
   };
 
   const createNewMap = () => {
@@ -781,8 +985,64 @@ export const StageCanvas: React.FC = () => {
     const dy = Math.abs(rulerEnd.y - rulerStart.y);
     const squares = Math.max(dx, dy);
     const meters = Math.round(squares * campaign.settings.gridSquareMeters * 10) / 10;
-    return { squares, meters };
+    const feet = Math.round((meters / 1.5) * 5);
+    return { squares, meters, feet };
   }, [rulerStart, rulerEnd, activeMap, campaign.settings.gridSquareMeters]);
+
+  useEffect(() => {
+    setCameraPan({ x: 0, y: 0 });
+  }, [activeMap?.id]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.code === 'Space') {
+        spacePressedRef.current = true;
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        spacePressedRef.current = false;
+      }
+    };
+    const onWinMouseMove = (e: MouseEvent) => {
+      if (!panDragRef.current) return;
+      const dx = e.clientX - panDragRef.current.startX;
+      const dy = e.clientY - panDragRef.current.startY;
+      setCameraPan({
+        x: panDragRef.current.origX + dx,
+        y: panDragRef.current.origY + dy,
+      });
+    };
+    const onWinMouseUp = () => {
+      if (panDragRef.current) {
+        panDragRef.current = null;
+        setIsPanningWorld(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('mousemove', onWinMouseMove);
+    window.addEventListener('mouseup', onWinMouseUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('mousemove', onWinMouseMove);
+      window.removeEventListener('mouseup', onWinMouseUp);
+    };
+  }, []);
+
+  const beginWorldPan = (e: React.MouseEvent) => {
+    e.preventDefault();
+    panDragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: cameraPan.x,
+      origY: cameraPan.y,
+    };
+    setIsPanningWorld(true);
+  };
 
   if (!activeMap) return null;
 
@@ -813,143 +1073,265 @@ export const StageCanvas: React.FC = () => {
 
   return (
     <div className="flex-1 flex flex-col min-w-0 min-h-0 relative overflow-hidden z-10">
-      {/* Clean Floating Stage Toolbar */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-25 max-w-[96%] flex flex-col items-center gap-2 pointer-events-none">
-        <div className="rpg-glass-panel rounded-xl px-3 py-1.5 flex items-center gap-2 flex-wrap justify-center pointer-events-auto shadow-2xl">
-          <div className="flex items-center gap-1.5">
+      {/* Flow-Anchored Tactical Stage Toolbar (Row 1: Lean Core + Inline Start Combat; Row 2: Collapsible GM Drawer) */}
+      <div
+        className="flex-none px-3 py-1.5 border-b z-25 flex flex-col items-center gap-1.5"
+        style={{
+          borderColor: 'var(--border-subtle)',
+          background: 'rgba(10, 12, 18, 0.92)',
+          backdropFilter: 'blur(10px)',
+        }}
+      >
+        {/* ROW 1: Compact Always-Visible Core Bar (Zero Overlap!) */}
+        <div className="w-full max-w-[99%] flex items-center justify-between gap-2 flex-wrap">
+          {/* Left: Inline Start Combat (GM) + Map Selector */}
+          <div className="flex items-center gap-2 min-w-0">
+            {role === 'gm' && !campaign.combat.active && (
+              <button
+                onClick={startCombatFromMap}
+                className="rpg-btn-crimson px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer shadow-lg shrink-0"
+                title="Puxar tokens do mapa e iniciar ordem de turnos"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>Iniciar Combate</span>
+              </button>
+            )}
+
             {role === 'gm' ? (
               <select
                 value={activeMap.id}
                 onChange={(e) =>
                   updateCampaign((prev) => ({ ...prev, activeMapId: e.target.value }))
                 }
-                className="rpg-input text-xs py-1 rounded-md font-display font-semibold"
+                className="rpg-input text-xs py-1 rounded-md font-display font-semibold max-w-[220px] truncate"
               >
                 {campaign.maps.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.mode === 'tactical' ? '🗺️' : '🎭'} {m.name}
+                    🗺️ {m.name}
                   </option>
                 ))}
               </select>
             ) : (
-              <span className="text-xs font-display font-bold px-2">
-                {activeMap.mode === 'tactical' ? '🗺️' : '🎭'} {activeMap.name}
+              <span className="text-xs font-display font-bold px-2 truncate max-w-[220px]">
+                🗺️ {activeMap.name}
               </span>
-            )}
-
-            {role === 'gm' && (
-              <>
-                <button
-                  onClick={createNewMap}
-                  className="rpg-card px-2 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
-                  title="Criar novo Mapa ou Cena"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-
-                <FileUploadButton
-                  accept="image/*"
-                  label="Subir Mapa"
-                  onUploaded={(url) => updateActiveMap((m) => ({ ...m, backgroundUrl: url }))}
-                  className="rounded-md"
-                />
-
-                <button
-                  onClick={() =>
-                    updateActiveMap((m) => ({
-                      ...m,
-                      mode: m.mode === 'tactical' ? 'scene' : 'tactical',
-                    }))
-                  }
-                  className="rpg-card px-2.5 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
-                  title="Alternar entre Mapa Tático e Cena"
-                >
-                  {activeMap.mode === 'tactical' ? (
-                    <>
-                      <ImageIcon className="w-3.5 h-3.5" />
-                      <span className="hidden xl:inline">Cena</span>
-                    </>
-                  ) : (
-                    <>
-                      <Layers className="w-3.5 h-3.5" />
-                      <span className="hidden xl:inline">Grid</span>
-                    </>
-                  )}
-                </button>
-
-                <button
-                  onClick={() => setShowMapConfig((v) => !v)}
-                  className={`px-2 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
-                    showMapConfig ? 'rpg-btn-primary' : 'rpg-card'
-                  }`}
-                  title="Clima e Aparência"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                </button>
-              </>
             )}
           </div>
 
-          {/* Tactical Tools */}
-          {activeMap.mode === 'tactical' && (
-            <div className="flex items-center gap-1 pl-2 border-l" style={{ borderColor: 'var(--border-subtle)' }}>
-              <button
-                onClick={() => {
-                  setTool('select');
-                  emitPointerHide();
-                }}
-                className={`px-2.5 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
-                  tool === 'select' ? 'rpg-btn-primary' : 'rpg-card'
-                }`}
-                title="Mover Tokens e Áreas"
-              >
-                <MousePointer className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">Mover</span>
-              </button>
+          {/* Center: Core Interaction Tools + GM Contextual Drawer Tabs */}
+          <div className="flex items-center gap-1 flex-wrap justify-center">
+            <button
+              onClick={() => {
+                setTool('select');
+                setSecretMarkerKind(null);
+                emitPointerHide();
+              }}
+              className={`px-2.5 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
+                tool === 'select' && !secretMarkerKind ? 'rpg-btn-primary' : 'rpg-card'
+              }`}
+              title="Mover Tokens e Áreas"
+            >
+              <MousePointer className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Mover</span>
+            </button>
 
-              <button
-                onClick={() => setTool(tool === 'pointer' ? 'select' : 'pointer')}
-                className={`px-2.5 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
-                  tool === 'pointer' ? 'rpg-btn-primary' : 'rpg-card'
-                }`}
-                title="Apontar no Mapa com sua Bolinha Colorida"
-              >
-                <Navigation className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">Bolinha</span>
-              </button>
+            <button
+              onClick={() => {
+                setSecretMarkerKind(null);
+                setTool(tool === 'pointer' ? 'select' : 'pointer');
+              }}
+              className={`px-2.5 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
+                tool === 'pointer' ? 'rpg-btn-primary' : 'rpg-card'
+              }`}
+              title="Apontar no Mapa com sua Bolinha Colorida"
+            >
+              <Navigation className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Bolinha</span>
+            </button>
 
-              <button
-                onClick={() => {
-                  setTool('ruler');
-                  setRulerStart(null);
-                  setRulerEnd(null);
-                  emitPointerHide();
-                }}
-                className={`px-2.5 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
-                  tool === 'ruler' ? 'rpg-btn-primary' : 'rpg-card'
-                }`}
-                title="Medir Distância"
-              >
-                <Ruler className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">Medir</span>
-              </button>
+            <button
+              onClick={() => {
+                setSecretMarkerKind(null);
+                setTool('ruler');
+                setRulerStart(null);
+                setRulerEnd(null);
+                emitPointerHide();
+              }}
+              className={`px-2.5 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
+                tool === 'ruler' ? 'rpg-btn-primary' : 'rpg-card'
+              }`}
+              title="Medir Distância"
+            >
+              <Ruler className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Medir</span>
+            </button>
 
-              <button
-                onClick={() => setTool('ping')}
-                className={`px-2 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
-                  tool === 'ping' ? 'rpg-btn-primary' : 'rpg-card'
-                }`}
-                title="Ping Visual no mapa"
-              >
-                <MapPin className="w-3.5 h-3.5" />
-              </button>
+            <button
+              onClick={() => {
+                setSecretMarkerKind(null);
+                setTool('ping');
+              }}
+              className={`px-2 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
+                tool === 'ping' ? 'rpg-btn-primary' : 'rpg-card'
+              }`}
+              title="Ping Visual no mapa"
+            >
+              <MapPin className="w-3.5 h-3.5" />
+            </button>
 
-              {/* AoE quick buttons */}
-              <div className="flex items-center gap-1 pl-1 border-l" style={{ borderColor: 'var(--border-subtle)' }}>
+            {/* Player Quick AoE Buttons */}
+            {role !== 'gm' && (
+              <div className="flex items-center gap-1 pl-1.5 ml-0.5 border-l" style={{ borderColor: 'var(--border-subtle)' }}>
+                <button
+                  onClick={() => addAoETemplate('sphere')}
+                  className="rpg-card px-2 py-1 rounded-md text-[11px] cursor-pointer hover:border-amber-400/60"
+                  title="Adicionar Esfera de Magia"
+                >
+                  <Flame className="w-3.5 h-3.5 inline mr-1 text-orange-400" />
+                  Esfera
+                </button>
+                <button
+                  onClick={() => addAoETemplate('cone')}
+                  className="rpg-card px-2 py-1 rounded-md text-[11px] cursor-pointer hover:border-amber-400/60"
+                  title="Adicionar Cone de Magia"
+                >
+                  Cone
+                </button>
+              </div>
+            )}
+
+            {/* GM Contextual Drawer Tabs (Click to expand Row 2, click again to collapse) */}
+            {role === 'gm' && (() => {
+              const isTerrainActive =
+                tool === 'terrain-wall' ||
+                tool === 'terrain-cover' ||
+                tool === 'terrain-difficult' ||
+                tool === 'terrain-erase' ||
+                tool === 'fog-reveal' ||
+                tool === 'fog-hide';
+              const isSecretsActive = Boolean(secretMarkerKind);
+              const tabs: Array<{
+                id: 'aoe' | 'terrain' | 'secrets' | 'monsters-map';
+                label: string;
+                icon: React.ReactNode;
+                hasActiveTool?: boolean;
+              }> = [
+                {
+                  id: 'aoe',
+                  label: 'Áreas',
+                  icon: <Flame className="w-3.5 h-3.5 text-orange-400" />,
+                  hasActiveTool: activeMap.templates.length > 0,
+                },
+                {
+                  id: 'terrain',
+                  label: 'Terreno & Névoa',
+                  icon: <Layers className="w-3.5 h-3.5 text-amber-300" />,
+                  hasActiveTool: isTerrainActive || activeMap.fogEnabled,
+                },
+                {
+                  id: 'secrets',
+                  label: 'Segredos',
+                  icon: <EyeOff className="w-3.5 h-3.5 text-purple-300" />,
+                  hasActiveTool: isSecretsActive,
+                },
+                {
+                  id: 'monsters-map',
+                  label: 'Monstros & Mapa',
+                  icon: <Swords className="w-3.5 h-3.5 text-red-400" />,
+                  hasActiveTool: showMapConfig,
+                },
+              ];
+
+              return (
+                <div
+                  className="flex items-center gap-1 pl-2 ml-1 border-l"
+                  style={{ borderColor: 'var(--border-subtle)' }}
+                >
+                  {tabs.map((t) => {
+                    const isOpen = gmDrawerTab === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => setGmDrawerTab((curr) => (curr === t.id ? null : t.id))}
+                        className={`px-2.5 py-1 rounded-md text-[11px] font-display font-bold flex items-center gap-1.5 cursor-pointer transition ${
+                          isOpen
+                            ? 'rpg-btn-primary shadow-sm'
+                            : t.hasActiveTool
+                              ? 'rpg-card border-amber-400/75 text-amber-200'
+                              : 'rpg-card hover:border-amber-400/50'
+                        }`}
+                        title={
+                          isOpen
+                            ? `Recolher aba ${t.label}`
+                            : `Abrir ferramentas de ${t.label}`
+                        }
+                      >
+                        {t.icon}
+                        <span>{t.label}</span>
+                        {t.hasActiveTool && !isOpen && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                        )}
+                        {isOpen ? (
+                          <ChevronUp className="w-3 h-3 opacity-80" />
+                        ) : (
+                          <ChevronDown className="w-3 h-3 opacity-60" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Right: Compact Zoom + Recenter Camera */}
+          <div className="flex items-center gap-1 shrink-0">
+            {(cameraPan.x !== 0 || cameraPan.y !== 0) && (
+              <button
+                onClick={() => setCameraPan({ x: 0, y: 0 })}
+                className="rpg-card px-2 py-1 rounded-md text-[10px] font-display font-bold flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
+                title="Centralizar câmera no mapa"
+              >
+                <RotateCcw className="w-3 h-3 text-amber-300" />
+                <span className="hidden sm:inline">Centralizar</span>
+              </button>
+            )}
+            <div className="flex items-center gap-0.5 rpg-socket rounded-md px-1.5 py-0.5">
+              <button
+                onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.15).toFixed(2))))}
+                className="p-0.5 cursor-pointer hover:opacity-75"
+                title="Diminuir Zoom"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+              <span className="text-[11px] px-1 font-mono-dice">
+                {Math.round(zoom * 100)}%
+              </span>
+              <button
+                onClick={() => setZoom((z) => Math.min(1.8, Number((z + 0.15).toFixed(2))))}
+                className="p-0.5 cursor-pointer hover:opacity-75"
+                title="Aumentar Zoom"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* ROW 2: Collapsible Contextual Sub-Bar (Only visible when GM opens a category tab) */}
+        {role === 'gm' && gmDrawerTab && (
+          <div
+            className="w-full max-w-[99%] pt-1.5 border-t flex items-center justify-center gap-2 flex-wrap animate-modal-unfurl"
+            style={{ borderColor: 'rgba(212, 170, 72, 0.22)' }}
+          >
+            {gmDrawerTab === 'aoe' && (
+              <>
+                <span className="text-[10px] font-display uppercase tracking-wider text-amber-300/80 font-bold">
+                  Moldes de Área (AoE):
+                </span>
                 <button
                   onClick={() => addAoETemplate('sphere')}
                   className="rpg-card px-2.5 py-1 rounded-md text-[11px] cursor-pointer hover:border-amber-400/60"
-                  title="Adicionar Esfera de Magia (Arrastável)"
                 >
                   <Flame className="w-3.5 h-3.5 inline mr-1 text-orange-400" />
                   Esfera
@@ -957,181 +1339,281 @@ export const StageCanvas: React.FC = () => {
                 <button
                   onClick={() => addAoETemplate('cone')}
                   className="rpg-card px-2.5 py-1 rounded-md text-[11px] cursor-pointer hover:border-amber-400/60"
-                  title="Adicionar Cone de Magia (Arrastável e Rotacionável)"
                 >
                   Cone
+                </button>
+                <button
+                  onClick={() => addAoETemplate('line')}
+                  className="rpg-card px-2.5 py-1 rounded-md text-[11px] cursor-pointer hover:border-amber-400/60"
+                >
+                  Linha
+                </button>
+                <button
+                  onClick={() => addAoETemplate('cube')}
+                  className="rpg-card px-2.5 py-1 rounded-md text-[11px] cursor-pointer hover:border-amber-400/60"
+                >
+                  Cubo
                 </button>
                 {activeMap.templates.length > 0 && (
                   <button
                     onClick={() => updateActiveMap((m) => ({ ...m, templates: [] }))}
-                    className="rpg-card px-1.5 py-1 rounded-md text-[11px] text-red-400 cursor-pointer"
-                    title="Limpar Áreas"
+                    className="rpg-card px-2 py-1 rounded-md text-[11px] text-red-400 hover:border-red-400/60 flex items-center gap-1 cursor-pointer"
                   >
                     <Trash2 className="w-3 h-3" />
+                    Limpar Áreas ({activeMap.templates.length})
                   </button>
                 )}
-              </div>
-
-              {/* Fog of War Controls (GM) */}
-              {role === 'gm' && (
-                <div className="flex items-center gap-1 pl-1 border-l" style={{ borderColor: 'var(--border-subtle)' }}>
-                  <button
-                    onClick={() =>
-                      updateActiveMap((m) => ({ ...m, fogEnabled: !m.fogEnabled }))
-                    }
-                    className={`px-2 py-1 rounded-md text-xs flex items-center gap-1 cursor-pointer ${
-                      activeMap.fogEnabled ? 'rpg-btn-crimson' : 'rpg-card'
-                    }`}
-                    title="Névoa de Guerra"
-                  >
-                    {activeMap.fogEnabled ? (
-                      <EyeOff className="w-3.5 h-3.5" />
-                    ) : (
-                      <Eye className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                  {activeMap.fogEnabled && (
-                    <>
-                      <button
-                        onClick={() => setTool('fog-reveal')}
-                        className={`px-2 py-1 rounded-md text-[11px] cursor-pointer ${
-                          tool === 'fog-reveal' ? 'rpg-btn-primary' : 'rpg-card'
-                        }`}
-                      >
-                        Revelar
-                      </button>
-                      <button
-                        onClick={() => setTool('fog-hide')}
-                        className={`px-2 py-1 rounded-md text-[11px] cursor-pointer ${
-                          tool === 'fog-hide' ? 'rpg-btn-primary' : 'rpg-card'
-                        }`}
-                      >
-                        Ocultar
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* GM Secret Map Layer (Hidden Items, Chests, Traps, Secret Passages) */}
-              {role === 'gm' && (
-                <div
-                  className="flex items-center gap-1 pl-1 border-l"
-                  style={{ borderColor: 'var(--border-subtle)' }}
-                >
-                  {(
-                    [
-                      { kind: 'chest' as const, label: 'Baú', title: 'Colocar Baú Escondido (Só o Mestre vê)' },
-                      { kind: 'item' as const, label: 'Item', title: 'Colocar Item Escondido (Só o Mestre vê)' },
-                      { kind: 'trap' as const, label: 'Armadilha', title: 'Colocar Armadilha Oculta (Só o Mestre vê)' },
-                      { kind: 'secret' as const, label: 'Segredo', title: 'Colocar Passagem Secreta (Só o Mestre vê)' },
-                    ] as const
-                  ).map((btn) => {
-                    const active = secretMarkerKind === btn.kind;
-                    return (
-                      <button
-                        key={btn.kind}
-                        onClick={() =>
-                          setSecretMarkerKind((curr) => (curr === btn.kind ? null : btn.kind))
-                        }
-                        className={`px-2 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer ${
-                          active
-                            ? 'ring-2 ring-amber-400 bg-amber-500/25 text-amber-200 font-bold'
-                            : 'rpg-card hover:border-amber-400/60'
-                        }`}
-                        title={
-                          active
-                            ? `Clique em qualquer célula do mapa para esconder ${btn.label} (ou clique aqui para sair)`
-                            : btn.title
-                        }
-                      >
-                        <EyeOff className="w-3 h-3 text-amber-400 shrink-0" />
-                        <span>+{btn.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Right: Spawn + Zoom */}
-          <div className="flex items-center gap-1.5 pl-2 border-l" style={{ borderColor: 'var(--border-subtle)' }}>
-            {role === 'gm' && activeMap.mode === 'tactical' && (
-              <div className="flex items-center gap-1">
-                <select
-                  value={spawnMonsterId}
-                  onChange={(e) => setSpawnMonsterId(e.target.value)}
-                  className="rpg-input text-xs py-1 rounded-md max-w-[115px]"
-                >
-                  {campaign.compendium.monsters.map((mon) => (
-                    <option key={mon.id} value={mon.id}>
-                      {mon.name}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  onClick={() => setSpawnHidden((v) => !v)}
-                  className={`px-2 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer ${
-                    spawnHidden
-                      ? 'ring-2 ring-amber-400 bg-amber-500/25 text-amber-200 font-bold'
-                      : 'rpg-card opacity-80 hover:opacity-100'
-                  }`}
-                  title={
-                    spawnHidden
-                      ? 'Modo Emboscada Ativo: Monstros adicionados nascem invisíveis para os jogadores (Só o Mestre vê)'
-                      : 'Alternar: Colocar monstros escondidos (invisíveis para jogadores)'
-                  }
-                >
-                  {spawnHidden ? (
-                    <EyeOff className="w-3.5 h-3.5 text-amber-300" />
-                  ) : (
-                    <Eye className="w-3.5 h-3.5 opacity-70" />
-                  )}
-                  <span className="hidden lg:inline">{spawnHidden ? 'Escondido' : 'Visível'}</span>
-                </button>
-                <button
-                  onClick={handleSpawnMonster}
-                  className="rpg-btn-crimson px-2.5 py-1 rounded-md text-xs cursor-pointer"
-                  title={
-                    spawnHidden
-                      ? 'Colocar monstro ESCONDIDO no mapa (só o Mestre vê até revelar)'
-                      : 'Colocar monstro no mapa'
-                  }
-                >
-                  + Monstro
-                </button>
-                <button
-                  onClick={handleSyncPartyTokens}
-                  className="rpg-card p-1.5 rounded-md text-xs flex items-center cursor-pointer"
-                  title="Puxar heróis para o mapa"
-                >
-                  <Users className="w-3.5 h-3.5" />
-                </button>
-              </div>
+              </>
             )}
 
-            {activeMap.mode === 'tactical' && (
-              <div className="flex items-center gap-0.5 rpg-socket rounded-md px-1.5 py-0.5">
-                <button
-                  onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.15).toFixed(2))))}
-                  className="p-0.5 cursor-pointer hover:opacity-75"
-                >
-                  <ZoomOut className="w-3.5 h-3.5" />
-                </button>
-                <span className="text-[11px] px-1 font-mono-dice">
-                  {Math.round(zoom * 100)}%
+            {gmDrawerTab === 'terrain' && (
+              <>
+                <span className="text-[10px] font-display uppercase tracking-wider text-amber-300/80 font-bold">
+                  Pincel de Terreno:
+                </span>
+                {(
+                  [
+                    {
+                      id: 'terrain-wall' as const,
+                      label: 'Parede',
+                      title: 'Pintar Parede/Pilar (bloqueia movimento e linha de visão)',
+                    },
+                    {
+                      id: 'terrain-cover' as const,
+                      label: 'Cobertura (+2/+5 CA)',
+                      title: 'Pintar Cobertura (+2 CA automático na linha de tiro; 2+ dá +5 CA)',
+                    },
+                    {
+                      id: 'terrain-difficult' as const,
+                      label: 'Terreno Difícil (2x)',
+                      title: 'Pintar Terreno Difícil (custa 3m por quadrado)',
+                    },
+                    {
+                      id: 'terrain-erase' as const,
+                      label: 'Apagar Terreno',
+                      title: 'Apagar Parede/Cobertura/Terreno Difícil',
+                    },
+                  ] as const
+                ).map((tb) => {
+                  const active = tool === tb.id;
+                  return (
+                    <button
+                      key={tb.id}
+                      onClick={() => {
+                        setSecretMarkerKind(null);
+                        setTool(active ? 'select' : tb.id);
+                      }}
+                      className={`px-2.5 py-1 rounded-md text-[11px] cursor-pointer transition ${
+                        active ? 'rpg-btn-primary font-bold' : 'rpg-card hover:border-amber-400/60'
+                      }`}
+                      title={tb.title}
+                    >
+                      {tb.label}
+                    </button>
+                  );
+                })}
+
+                <span className="h-4 w-px bg-white/15 mx-1" />
+
+                <span className="text-[10px] font-display uppercase tracking-wider text-amber-300/80 font-bold">
+                  Névoa:
                 </span>
                 <button
-                  onClick={() => setZoom((z) => Math.min(1.8, Number((z + 0.15).toFixed(2))))}
-                  className="p-0.5 cursor-pointer hover:opacity-75"
+                  onClick={() =>
+                    updateActiveMap((m) => ({ ...m, fogEnabled: !m.fogEnabled }))
+                  }
+                  className={`px-2.5 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer ${
+                    activeMap.fogEnabled ? 'rpg-btn-crimson' : 'rpg-card'
+                  }`}
                 >
-                  <ZoomIn className="w-3.5 h-3.5" />
+                  {activeMap.fogEnabled ? (
+                    <EyeOff className="w-3.5 h-3.5" />
+                  ) : (
+                    <Eye className="w-3.5 h-3.5" />
+                  )}
+                  <span>{activeMap.fogEnabled ? 'Névoa Ligada' : 'Ligar Névoa'}</span>
                 </button>
-              </div>
+                {activeMap.fogEnabled && (
+                  <>
+                    <button
+                      onClick={() => setTool(tool === 'fog-reveal' ? 'select' : 'fog-reveal')}
+                      className={`px-2.5 py-1 rounded-md text-[11px] cursor-pointer ${
+                        tool === 'fog-reveal' ? 'rpg-btn-primary' : 'rpg-card'
+                      }`}
+                    >
+                      Revelar
+                    </button>
+                    <button
+                      onClick={() => setTool(tool === 'fog-hide' ? 'select' : 'fog-hide')}
+                      className={`px-2.5 py-1 rounded-md text-[11px] cursor-pointer ${
+                        tool === 'fog-hide' ? 'rpg-btn-primary' : 'rpg-card'
+                      }`}
+                    >
+                      Ocultar
+                    </button>
+                  </>
+                )}
+              </>
             )}
+
+            {gmDrawerTab === 'secrets' && (
+              <>
+                <span className="text-[10px] font-display uppercase tracking-wider text-purple-300 font-bold">
+                  Esconder no Mapa (Só o Mestre vê):
+                </span>
+                {(
+                  [
+                    { kind: 'chest' as const, label: 'Baú', title: 'Colocar Baú Escondido (Só o Mestre vê)' },
+                    { kind: 'item' as const, label: 'Item', title: 'Colocar Item Escondido (Só o Mestre vê)' },
+                    { kind: 'trap' as const, label: 'Armadilha', title: 'Colocar Armadilha Automática Oculta (Só o Mestre vê)' },
+                    { kind: 'secret' as const, label: 'Passagem Secreta', title: 'Colocar Passagem Secreta (Só o Mestre vê)' },
+                  ] as const
+                ).map((btn) => {
+                  const active = secretMarkerKind === btn.kind;
+                  return (
+                    <button
+                      key={btn.kind}
+                      onClick={() => {
+                        setTool('select');
+                        setSecretMarkerKind((curr) => (curr === btn.kind ? null : btn.kind));
+                      }}
+                      className={`px-2.5 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer ${
+                        active
+                          ? 'ring-2 ring-amber-400 bg-amber-500/25 text-amber-200 font-bold'
+                          : 'rpg-card hover:border-amber-400/60'
+                      }`}
+                      title={
+                        active
+                          ? `Clique em qualquer célula do mapa para esconder ${btn.label}`
+                          : btn.title
+                      }
+                    >
+                      <EyeOff className="w-3 h-3 text-amber-400 shrink-0" />
+                      <span>+{btn.label}</span>
+                    </button>
+                  );
+                })}
+                {secretMarkerKind && (
+                  <button
+                    onClick={() => setSecretMarkerKind(null)}
+                    className="rpg-card px-2 py-1 rounded-md text-[11px] text-red-300 cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                )}
+              </>
+            )}
+
+            {gmDrawerTab === 'monsters-map' && (
+              <>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <select
+                    value={spawnMonsterId}
+                    onChange={(e) => setSpawnMonsterId(e.target.value)}
+                    className="rpg-input text-xs py-1 rounded-md max-w-[155px]"
+                  >
+                    {campaign.compendium.monsters.map((mon) => (
+                      <option key={mon.id} value={mon.id}>
+                        {mon.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => setSpawnHidden((v) => !v)}
+                    className={`px-2 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer ${
+                      spawnHidden
+                        ? 'ring-2 ring-amber-400 bg-amber-500/25 text-amber-200 font-bold'
+                        : 'rpg-card opacity-85 hover:opacity-100'
+                    }`}
+                    title={
+                      spawnHidden
+                        ? 'Modo Emboscada: monstros nascem invisíveis para jogadores'
+                        : 'Alternar: colocar monstros escondidos'
+                    }
+                  >
+                    {spawnHidden ? (
+                      <EyeOff className="w-3.5 h-3.5 text-amber-300" />
+                    ) : (
+                      <Eye className="w-3.5 h-3.5 opacity-70" />
+                    )}
+                    <span>{spawnHidden ? 'Escondido' : 'Visível'}</span>
+                  </button>
+                  <button
+                    onClick={handleSpawnMonster}
+                    className="rpg-btn-crimson px-2.5 py-1 rounded-md text-xs cursor-pointer"
+                  >
+                    + Monstro
+                  </button>
+                  <button
+                    onClick={handleSyncPartyTokens}
+                    className="rpg-card px-2.5 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
+                    title="Puxar heróis para o mapa"
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    <span>Puxar Heróis</span>
+                  </button>
+                  <button
+                    onClick={() =>
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...prev.settings,
+                          showEnemyAcToPlayers: !prev.settings.showEnemyAcToPlayers,
+                        },
+                      }))
+                    }
+                    className={`px-2.5 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer ${
+                      campaign.settings.showEnemyAcToPlayers
+                        ? 'rpg-btn-primary'
+                        : 'rpg-card text-amber-200/85'
+                    }`}
+                    title="Controla se jogadores veem CA e PV exatos de monstros"
+                  >
+                    <Shield className="w-3.5 h-3.5" />
+                    <span>
+                      {campaign.settings.showEnemyAcToPlayers ? 'CA Inimigos: Visível' : 'CA Inimigos: Oculta'}
+                    </span>
+                  </button>
+                </div>
+
+                <span className="h-4 w-px bg-white/15 mx-1 hidden md:inline-block" />
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <button
+                    onClick={createNewMap}
+                    className="rpg-card px-2.5 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Novo Mapa</span>
+                  </button>
+                  <FileUploadButton
+                    accept="image/*"
+                    label="Subir Mapa"
+                    onUploaded={(url) => updateActiveMap((m) => ({ ...m, backgroundUrl: url }))}
+                    className="rounded-md"
+                  />
+                  <button
+                    onClick={() => setShowMapConfig((v) => !v)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] flex items-center gap-1 cursor-pointer ${
+                      showMapConfig ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Clima &amp; Bioma</span>
+                  </button>
+                </div>
+              </>
+            )}
+
+            <button
+              onClick={() => setGmDrawerTab(null)}
+              className="rpg-card p-1 rounded-md opacity-70 hover:opacity-100 cursor-pointer ml-1"
+              title="Recolher sub-barra"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
-        </div>
+        )}
 
         {/* GM Map / Scene Settings Floating Drawer */}
         {showMapConfig && role === 'gm' && (
@@ -1211,28 +1693,36 @@ export const StageCanvas: React.FC = () => {
       )}
 
       {/* Selected Target Banner */}
-      {targetToken && (
-        <div className="absolute bottom-24 left-4 z-20 rpg-glass-panel rounded-md px-3.5 py-1.5 flex items-center gap-3 text-xs shadow-xl">
-          <div className="flex items-center gap-1.5">
-            <Crosshair className="w-4 h-4 text-red-400" />
-            <span>
-              Alvo Selecionado: <strong>{targetToken.name}</strong> (CA {targetToken.defense}
-              {role === 'gm' ? ` • PV ${targetToken.hp}/${targetToken.maxHp}` : ''})
-            </span>
+      {targetToken && (() => {
+        const hideAc =
+          role !== 'gm' &&
+          targetToken.type === 'monster' &&
+          !campaign.settings.showEnemyAcToPlayers;
+        return (
+          <div className="absolute bottom-24 left-4 z-20 rpg-glass-panel rounded-md px-3.5 py-1.5 flex items-center gap-3 text-xs shadow-xl">
+            <div className="flex items-center gap-1.5">
+              <Crosshair className="w-4 h-4 text-red-400" />
+              <span>
+                Alvo Selecionado: <strong>{targetToken.name}</strong> (CA{' '}
+                {hideAc ? '??' : targetToken.defense}
+                {role === 'gm' ? ` • PV ${targetToken.hp}/${targetToken.maxHp}` : ''})
+              </span>
+            </div>
+            <button
+              onClick={() => setTargetTokenId(null)}
+              className="text-[11px] underline opacity-75 hover:opacity-100 cursor-pointer"
+            >
+              Limpar
+            </button>
           </div>
-          <button
-            onClick={() => setTargetTokenId(null)}
-            className="text-[11px] underline opacity-75 hover:opacity-100 cursor-pointer"
-          >
-            Limpar
-          </button>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Ruler Distance Indicator */}
       {tool === 'ruler' && rulerMetrics && (
         <div className="absolute top-14 left-3 z-20 rpg-glass-panel rounded-lg px-3 py-1.5 text-xs font-mono-dice">
-          📏 Distância: <strong>{rulerMetrics.meters}m</strong> ({rulerMetrics.squares} quadrados)
+          📏 Distância: <strong>{rulerMetrics.meters}m</strong> •{' '}
+          <strong className="text-amber-300">{rulerMetrics.feet} ft</strong> ({rulerMetrics.squares} quadrados)
         </div>
       )}
 
@@ -1243,99 +1733,45 @@ export const StageCanvas: React.FC = () => {
         </div>
       )}
 
-      {/* MAIN VIEWPORT */}
-      {activeMap.mode === 'scene' ? (
-        <div
-          className="flex-1 relative flex flex-col justify-between p-6 overflow-y-auto"
-          style={{
-            background: resolvedMapBg
-              ? `linear-gradient(rgba(0,0,0,0.45), rgba(0,0,0,0.65)), url(${resolvedMapBg}) center/cover no-repeat`
-              : PRESET_GRADIENTS[activeMap.themePreset],
-          }}
-        >
-          {weatherClass && (
-            <div className={`absolute inset-0 pointer-events-none ${weatherClass}`} />
-          )}
-
-          <div className="relative z-10 max-w-3xl">
-            <span className="text-xs uppercase tracking-widest px-2.5 py-1 rounded bg-black/50 text-amber-300 border border-amber-400/30">
-              Modo Cena — Teatro da Mente
-            </span>
-            <h2 className="font-display text-3xl font-bold text-white mt-3 drop-shadow">
-              {activeMap.name}
-            </h2>
-          </div>
-
-          <div className="relative z-10 mt-auto pt-6">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-amber-200">
-                Personagens / NPCs na Cena
-              </h3>
-              {role === 'gm' && (
-                <select
-                  value=""
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    if (!id) return;
-                    updateActiveMap((m) => ({
-                      ...m,
-                      sceneNpcIds: m.sceneNpcIds.includes(id)
-                        ? m.sceneNpcIds.filter((x) => x !== id)
-                        : [...m.sceneNpcIds, id],
-                    }));
-                  }}
-                  className="rpg-input text-xs py-1"
-                >
-                  <option value="">+ Alternar NPC na Cena...</option>
-                  {campaign.npcs.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {activeMap.sceneNpcIds.includes(n.id) ? '✓ ' : ''}
-                      {n.name}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {campaign.npcs
-                .filter((n) => activeMap.sceneNpcIds.includes(n.id))
-                .map((npc) => (
-                  <div
-                    key={npc.id}
-                    className="rpg-glass-panel rounded-xl p-3 flex items-start gap-3"
-                  >
-                    <TokenPortrait
-                      name={npc.name}
-                      imageUrl={npc.imageUrl}
-                      playerColor="#e0b84c"
-                      frameStyle="gold"
-                      sizePx={48}
-                    />
-                    <div className="min-w-0">
-                      <div className="font-display font-bold text-sm truncate">
-                        {npc.name}
-                      </div>
-                      <div className="text-[11px]" style={{ color: 'var(--accent-primary)' }}>
-                        {npc.role} • {npc.disposition}
-                      </div>
-                      <p className="text-xs mt-1 line-clamp-3" style={{ color: 'var(--text-secondary)' }}>
-                        {npc.publicBio}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-            </div>
-          </div>
-        </div>
-      ) : (
-        /* TACTICAL GRID MAP MODE */
-        <div
-          className="flex-1 overflow-auto relative flex items-center justify-center p-6"
-          style={{ backgroundColor: 'var(--canvas-bg)' }}
-        >
+      {/* MAIN VIEWPORT: Pan the World by dragging outside the map, Middle-Click, or Space+Drag */}
+      <div
+        onMouseDown={(e) => {
+          // Pan world when clicking outside the map grid, or middle-click anywhere, or holding Space
+          const isMiddle = e.button === 1;
+          const isOutsideMap = e.button === 0 && e.target === e.currentTarget;
+          const isSpaceDrag = e.button === 0 && spacePressedRef.current;
+          if (isMiddle || isOutsideMap || isSpaceDrag) {
+            beginWorldPan(e);
+          }
+        }}
+        onDoubleClick={(e) => {
+          if (e.target === e.currentTarget) {
+            setCameraPan({ x: 0, y: 0 });
+          }
+        }}
+        className={`flex-1 overflow-hidden relative flex items-center justify-center p-6 select-none ${
+          isPanningWorld ? 'cursor-grabbing' : 'cursor-grab'
+        }`}
+        style={{ backgroundColor: 'var(--canvas-bg)' }}
+        title="Segure o mouse fora do mapa (ou botão do meio / Espaço) para mover a câmera • Duplo clique fora para centralizar"
+      >
           {/* Sculpted Brass & Obsidian Coordinate Tabletop Rim */}
-          <div className="rpg-panel rounded-lg p-2.5 sm:p-3 shadow-[0_30px_85px_rgba(0,0,0,0.95)] shrink-0 relative">
+          <div
+            onMouseDown={(e) => {
+              if (
+                e.button === 1 ||
+                (e.button === 0 && (spacePressedRef.current || e.target === e.currentTarget))
+              ) {
+                e.stopPropagation();
+                beginWorldPan(e);
+              }
+            }}
+            className="rpg-panel rounded-lg p-2.5 sm:p-3 shadow-[0_30px_85px_rgba(0,0,0,0.95)] shrink-0 relative cursor-default"
+            style={{
+              transform: `translate3d(${cameraPan.x}px, ${cameraPan.y}px, 0)`,
+              willChange: isPanningWorld ? 'transform' : 'auto',
+            }}
+          >
             {/* Column Coordinates (A, B, C...) */}
             <div className="flex pl-5 mb-1 select-none pointer-events-none">
               {Array.from({ length: activeMap.gridWidth }).map((_, idx) => (
@@ -1385,7 +1821,7 @@ export const StageCanvas: React.FC = () => {
                   cursor:
                     secretMarkerKind || tool === 'ruler' || tool === 'ping' || tool === 'pointer'
                       ? 'crosshair'
-                      : tool.startsWith('fog')
+                      : tool.startsWith('fog') || tool.startsWith('terrain-')
                       ? 'cell'
                       : 'default',
                 }}
@@ -1403,6 +1839,71 @@ export const StageCanvas: React.FC = () => {
                     backgroundSize: `${cellPx}px ${cellPx}px`,
                   }}
                 />
+
+                {/* Tactical Terrain Cells: Walls, Cover (+2/+5 CA), Difficult Terrain (2x) */}
+                {activeMap.terrainCells &&
+                  Object.entries(activeMap.terrainCells).map(([key, kind]) => {
+                    const [cxStr, cyStr] = key.split(',');
+                    const cx = Number(cxStr);
+                    const cy = Number(cyStr);
+                    if (Number.isNaN(cx) || Number.isNaN(cy)) return null;
+                    if (kind === 'wall') {
+                      return (
+                        <div
+                          key={`ter-${key}`}
+                          className="absolute pointer-events-none z-[5] border border-slate-500/70"
+                          style={{
+                            left: cx * cellPx,
+                            top: cy * cellPx,
+                            width: cellPx,
+                            height: cellPx,
+                            background:
+                              'repeating-linear-gradient(135deg, rgba(15,23,42,0.96) 0px, rgba(15,23,42,0.96) 6px, rgba(51,65,85,0.92) 6px, rgba(51,65,85,0.92) 10px)',
+                            boxShadow:
+                              'inset 0 2px 6px rgba(255,255,255,0.14), inset 0 -3px 8px rgba(0,0,0,0.95)',
+                          }}
+                        />
+                      );
+                    }
+                    if (kind === 'cover') {
+                      return (
+                        <div
+                          key={`ter-${key}`}
+                          className="absolute pointer-events-none z-[5] border border-amber-500/70 flex items-center justify-center"
+                          style={{
+                            left: cx * cellPx,
+                            top: cy * cellPx,
+                            width: cellPx,
+                            height: cellPx,
+                            background:
+                              'repeating-linear-gradient(45deg, rgba(120,53,15,0.52) 0px, rgba(120,53,15,0.52) 5px, rgba(180,83,9,0.28) 5px, rgba(180,83,9,0.28) 10px)',
+                          }}
+                        >
+                          <span className="text-[8px] font-display font-bold text-amber-200/90 bg-black/65 px-1 rounded">
+                            +2
+                          </span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        key={`ter-${key}`}
+                        className="absolute pointer-events-none z-[5] border border-amber-700/45 flex items-end justify-end p-0.5"
+                        style={{
+                          left: cx * cellPx,
+                          top: cy * cellPx,
+                          width: cellPx,
+                          height: cellPx,
+                          background:
+                            'radial-gradient(circle at 30% 35%, rgba(217,119,6,0.34), rgba(69,26,3,0.42))',
+                        }}
+                      >
+                        <span className="text-[8px] font-mono-dice font-bold text-amber-300/85">
+                          2x
+                        </span>
+                      </div>
+                    );
+                  })}
 
                 {/* Choreographed Movement Path Trail SVG while dragging */}
                 {draggingTokenId && dragOrigin && dragPath.length > 0 && (() => {
@@ -1478,7 +1979,52 @@ export const StageCanvas: React.FC = () => {
                     sqMeters
                   );
                   const inRange = distM <= maxM + 0.05;
-                  const strokeCol = inRange ? '#f59e0b' : '#ef4444';
+                  const isRangedSightline =
+                    pendingAttackChoice.actionCost !== 'Reação' && maxM > sqMeters + 0.05;
+                  const losSightline = evaluateLineOfSightAndCover(
+                    activeMap,
+                    atkTok,
+                    hovTok,
+                    isRangedSightline
+                  );
+                  const atkChar = pendingAttackChoice.attackerCharacterId
+                    ? campaign.characters.find(
+                        (c) => c.id === pendingAttackChoice.attackerCharacterId
+                      )
+                    : undefined;
+                  const defChar =
+                    hovTok.type === 'character' && hovTok.referenceId
+                      ? campaign.characters.find((c) => c.id === hovTok.referenceId)
+                      : undefined;
+                  const defCb = campaign.combat.active
+                    ? campaign.combat.combatants.find((cb) => cb.tokenId === hovTok.id)
+                    : undefined;
+                  const sightlineMods = evaluateTacticalAttackModifiers({
+                    map: activeMap,
+                    attackerToken: atkTok,
+                    defenderToken: hovTok,
+                    attackerChar: atkChar,
+                    defenderChar: defChar,
+                    characters: campaign.characters,
+                    range: pendingAttackChoice.range,
+                    actionTitle: pendingAttackChoice.actionTitle,
+                    sqMeters,
+                    enableFlanking: campaign.settings.enableFlanking ?? true,
+                    manualAdvantageMode: advantageMode,
+                    defenderDodging: Boolean(defCb?.dodging),
+                    isReaction: pendingAttackChoice.actionCost === 'Reação',
+                  });
+                  const combinedBadges = losSightline.coverLabel
+                    ? [losSightline.coverLabel, ...sightlineMods.summaryBadges]
+                    : sightlineMods.summaryBadges;
+                  const strokeCol =
+                    !inRange || losSightline.blockedByWall
+                      ? '#ef4444'
+                      : sightlineMods.effectiveAdvantageMode === 'disadvantage'
+                        ? '#f97316'
+                        : sightlineMods.effectiveAdvantageMode === 'advantage'
+                          ? '#10b981'
+                          : '#f59e0b';
                   const midX = (x1 + x2) / 2;
                   const midY = (y1 + y2) / 2;
 
@@ -1511,14 +2057,38 @@ export const StageCanvas: React.FC = () => {
                         />
                       </svg>
                       <div
-                        className={`absolute pointer-events-none z-35 -translate-x-1/2 -translate-y-1/2 px-2 py-0.5 rounded border text-[10px] font-display font-bold whitespace-nowrap shadow-xl ${
-                          inRange
-                            ? 'bg-[#121620]/95 border-amber-400 text-amber-200'
-                            : 'bg-red-950/95 border-red-400 text-red-200'
-                        }`}
+                        className="absolute pointer-events-none z-35 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-1"
                         style={{ left: midX, top: midY }}
                       >
-                        {distM}m • {inRange ? 'NO ALCANCE' : `FORA (Máx ${maxM}m)`}
+                        <div
+                          className={`px-2 py-0.5 rounded border text-[10px] font-display font-bold whitespace-nowrap shadow-xl ${
+                            inRange && !losSightline.blockedByWall
+                              ? 'bg-[#121620]/95 border-amber-400 text-amber-200'
+                              : 'bg-red-950/95 border-red-400 text-red-200'
+                          }`}
+                        >
+                          {losSightline.blockedByWall
+                            ? 'BLOQUEADO POR PAREDE'
+                            : `${distM}m • ${inRange ? 'NO ALCANCE' : `FORA (Máx ${maxM}m)`}`}
+                        </div>
+                        {inRange && !losSightline.blockedByWall && combinedBadges.length > 0 && (
+                          <div className="flex flex-col items-center gap-0.5">
+                            {combinedBadges.slice(0, 4).map((b, i) => (
+                              <span
+                                key={i}
+                                className={`px-2 py-0.5 rounded text-[9px] font-display font-bold whitespace-nowrap border shadow-lg ${
+                                  b.startsWith('-Desv:')
+                                    ? 'bg-red-950/95 border-red-400/80 text-red-200'
+                                    : b.startsWith('+Vant:')
+                                      ? 'bg-emerald-950/95 border-emerald-400/80 text-emerald-200'
+                                      : 'bg-amber-950/95 border-amber-400/80 text-amber-200'
+                                }`}
+                              >
+                                {b}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </>
                   );
@@ -1564,7 +2134,7 @@ export const StageCanvas: React.FC = () => {
                       transform: 'translateX(-50%)',
                     }}
                   >
-                    {used.meters}m / {remMeters}m ({used.squares}q)
+                    {used.meters}m / {remMeters}m • {Math.round((used.meters / 1.5) * 5)} ft ({used.squares}q)
                   </div>
                 </>
               );
@@ -1602,70 +2172,183 @@ export const StageCanvas: React.FC = () => {
               );
             })()}
 
-            {/* AoE Templates (Draggable, Resizable & 360° Rotatable) */}
+            {/* AoE Templates (Sphere, Cube, Cone, Line — Half-Cell Snap, Resizable & 360° Rotatable) */}
             {activeMap.templates.map((tmpl) => {
-              const sizePx = tmpl.radiusSquares * 2 * cellPx;
+              const isLine = tmpl.shape === 'line';
+              const isCube = tmpl.shape === 'cube';
+              const isCone = tmpl.shape === 'cone';
+              const isRotatable = isCone || isLine;
+              const extentSquares = isLine ? tmpl.radiusSquares * 2 : tmpl.radiusSquares;
+              const sizePx = extentSquares * 2 * cellPx;
               const isSelected = selectedTemplateId === tmpl.id;
+              const originPxX = (tmpl.x + 0.5) * cellPx;
+              const originPxY = (tmpl.y + 0.5) * cellPx;
+
+              const metricSquares = isCube || isLine ? tmpl.radiusSquares * 2 : tmpl.radiusSquares;
               const meters =
-                Math.round(tmpl.radiusSquares * campaign.settings.gridSquareMeters * 10) / 10;
+                Math.round(metricSquares * campaign.settings.gridSquareMeters * 10) / 10;
+              const feet = Math.round((meters / 1.5) * 5);
+              const shapeLabel = isCone
+                ? `Cone ${meters}m • ${feet} ft`
+                : isLine
+                  ? `Linha ${meters}m • ${feet} ft`
+                  : isCube
+                    ? `Cubo ${meters}m • ${feet} ft`
+                    : `Esfera ${meters}m • ${feet} ft`;
+
+              const handleTemplateDown = (e: React.MouseEvent) => {
+                e.stopPropagation();
+                if (e.button === 0) {
+                  setSelectedTemplateId(tmpl.id);
+                  setDraggingTemplateId(tmpl.id);
+                }
+              };
+              const handleTemplateWheel = (e: React.WheelEvent) => {
+                if (!isRotatable) return;
+                e.stopPropagation();
+                const delta = e.deltaY > 0 ? 15 : -15;
+                updateActiveMap((m) => ({
+                  ...m,
+                  templates: m.templates.map((t) =>
+                    t.id === tmpl.id ? { ...t, angleDeg: (t.angleDeg + delta + 360) % 360 } : t
+                  ),
+                }));
+              };
+              const handleTemplateContext = (e: React.MouseEvent) => {
+                e.preventDefault();
+                e.stopPropagation();
+                updateActiveMap((m) => ({
+                  ...m,
+                  templates: m.templates.filter((t) => t.id !== tmpl.id),
+                }));
+              };
+
+              // Line beam thickness in viewBox (200x200) matching ~1 grid square width
+              const lineHalfThickVb = Math.max(5, Math.min(22, 50 / Math.max(1, extentSquares)));
 
               return (
                 <div
                   key={tmpl.id}
-                  onMouseDown={(e) => {
-                    e.stopPropagation();
-                    if (e.button === 0) {
-                      setSelectedTemplateId(tmpl.id);
-                      setDraggingTemplateId(tmpl.id);
-                    }
-                  }}
-                  onWheel={(e) => {
-                    if (tmpl.shape !== 'cone') return;
-                    e.stopPropagation();
-                    const delta = e.deltaY > 0 ? 15 : -15;
-                    updateActiveMap((m) => ({
-                      ...m,
-                      templates: m.templates.map((t) =>
-                        t.id === tmpl.id ? { ...t, angleDeg: (t.angleDeg + delta + 360) % 360 } : t
-                      ),
-                    }));
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    updateActiveMap((m) => ({
-                      ...m,
-                      templates: m.templates.filter((t) => t.id !== tmpl.id),
-                    }));
-                  }}
-                  title="Arraste para mover • Clique para Girar / Redimensionar • Botão direito para remover"
-                  className="absolute cursor-grab active:cursor-grabbing select-none"
+                  onWheel={handleTemplateWheel}
+                  className="absolute select-none pointer-events-none"
                   style={{
-                    left: (tmpl.x - tmpl.radiusSquares) * cellPx,
-                    top: (tmpl.y - tmpl.radiusSquares) * cellPx,
+                    left: originPxX - sizePx / 2,
+                    top: originPxY - sizePx / 2,
                     width: sizePx,
                     height: sizePx,
                     zIndex: isSelected ? 14 : 8,
                   }}
                 >
-                  {tmpl.shape === 'cone' ? (
+                  {isCone ? (
                     <svg
                       viewBox="0 0 200 200"
                       className="w-full h-full pointer-events-none"
                       style={{
                         transform: `rotate(${tmpl.angleDeg}deg)`,
-                        transition: 'transform 0.12s ease-out',
+                        transition: 'transform 0.1s ease-out',
                       }}
                     >
-                      {/* 60-degree directional cone originating at center (100,100) pointing right */}
+                      {/* 60-degree directional cone originating at (100,100) pointing right */}
                       <path
                         d="M 100 100 L 186.6 50 A 100 100 0 0 1 186.6 150 Z"
                         fill={tmpl.color}
                         stroke="#fb923c"
                         strokeWidth="3"
                         strokeDasharray="6 4"
+                        className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                        onMouseDown={handleTemplateDown}
+                        onContextMenu={handleTemplateContext}
+                      >
+                        <title>Cone: Arraste (centros, bordas ou vértices) • Roda do mouse para girar • Botão direito remove</title>
+                      </path>
+                      <circle
+                        cx="100"
+                        cy="100"
+                        r="7"
+                        fill="#fbbf24"
+                        stroke="#090b10"
+                        strokeWidth="2"
+                        className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                        onMouseDown={handleTemplateDown}
+                        onContextMenu={handleTemplateContext}
                       />
-                      <circle cx="100" cy="100" r="6" fill="#fbbf24" />
+                    </svg>
+                  ) : isLine ? (
+                    <svg
+                      viewBox="0 0 200 200"
+                      className="w-full h-full pointer-events-none"
+                      style={{
+                        transform: `rotate(${tmpl.angleDeg}deg)`,
+                        transition: 'transform 0.1s ease-out',
+                      }}
+                    >
+                      {/* Directional Line beam originating at (100,100) extending right */}
+                      <rect
+                        x="100"
+                        y={100 - lineHalfThickVb}
+                        width="98"
+                        height={lineHalfThickVb * 2}
+                        rx="3"
+                        fill={tmpl.color}
+                        stroke="#38bdf8"
+                        strokeWidth="2.5"
+                        strokeDasharray="6 4"
+                        className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                        onMouseDown={handleTemplateDown}
+                        onContextMenu={handleTemplateContext}
+                      >
+                        <title>Linha: Arraste (centros, bordas ou vértices) • Roda do mouse para girar • Botão direito remove</title>
+                      </rect>
+                      <line
+                        x1="100"
+                        y1="100"
+                        x2="196"
+                        y2="100"
+                        stroke="rgba(224,242,254,0.45)"
+                        strokeWidth="1.2"
+                        strokeDasharray="4 4"
+                        className="pointer-events-none"
+                      />
+                      <circle
+                        cx="100"
+                        cy="100"
+                        r="6.5"
+                        fill="#38bdf8"
+                        stroke="#090b10"
+                        strokeWidth="2"
+                        className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                        onMouseDown={handleTemplateDown}
+                        onContextMenu={handleTemplateContext}
+                      />
+                    </svg>
+                  ) : isCube ? (
+                    <svg viewBox="0 0 200 200" className="w-full h-full pointer-events-none">
+                      <rect
+                        x="4"
+                        y="4"
+                        width="192"
+                        height="192"
+                        rx="4"
+                        fill={tmpl.color}
+                        stroke="#c084fc"
+                        strokeWidth="3.5"
+                        strokeDasharray="8 5"
+                        className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                        onMouseDown={handleTemplateDown}
+                        onContextMenu={handleTemplateContext}
+                      >
+                        <title>Cubo: Arraste para mover • Clique para redimensionar ou disparar salvaguarda • Botão direito remove</title>
+                      </rect>
+                      <rect
+                        x="38"
+                        y="38"
+                        width="124"
+                        height="124"
+                        fill="none"
+                        stroke="rgba(255,255,255,0.2)"
+                        strokeWidth="1.5"
+                        className="pointer-events-none"
+                      />
                     </svg>
                   ) : (
                     <svg viewBox="0 0 200 200" className="w-full h-full pointer-events-none">
@@ -1677,7 +2360,12 @@ export const StageCanvas: React.FC = () => {
                         stroke="#f87171"
                         strokeWidth="3"
                         strokeDasharray="8 5"
-                      />
+                        className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                        onMouseDown={handleTemplateDown}
+                        onContextMenu={handleTemplateContext}
+                      >
+                        <title>Esfera: Arraste para mover • Clique para redimensionar ou disparar salvaguarda • Botão direito remove</title>
+                      </circle>
                       <circle
                         cx="100"
                         cy="100"
@@ -1685,14 +2373,15 @@ export const StageCanvas: React.FC = () => {
                         fill="none"
                         stroke="rgba(255,255,255,0.25)"
                         strokeWidth="1.5"
+                        className="pointer-events-none"
                       />
                     </svg>
                   )}
 
                   {/* Center label */}
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                    <span className="bg-black/75 px-2 py-0.5 rounded-full text-[10px] font-bold text-white border border-white/25">
-                      {tmpl.shape === 'cone' ? `Cone ${meters}m` : `Esfera ${meters}m`}
+                    <span className="bg-black/80 px-2 py-0.5 rounded-md text-[10px] font-mono-dice font-bold text-white border border-white/25 whitespace-nowrap">
+                      {shapeLabel}
                     </span>
                   </div>
 
@@ -1700,9 +2389,9 @@ export const StageCanvas: React.FC = () => {
                   {isSelected && (
                     <div
                       onMouseDown={(e) => e.stopPropagation()}
-                      className="absolute -top-9 left-1/2 -translate-x-1/2 rpg-glass-panel rounded-full px-2 py-1 flex items-center gap-1.5 text-[11px] whitespace-nowrap z-30 shadow-xl"
+                      className="pointer-events-auto absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-[calc(50%+34px)] rpg-glass-panel rounded-md px-2 py-1 flex items-center gap-1.5 text-[11px] whitespace-nowrap z-30 shadow-xl"
                     >
-                      {tmpl.shape === 'cone' && (
+                      {isRotatable && (
                         <button
                           type="button"
                           onClick={() =>
@@ -1716,23 +2405,25 @@ export const StageCanvas: React.FC = () => {
                             }))
                           }
                           className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 flex items-center gap-0.5 cursor-pointer hover:bg-amber-500/35"
-                          title="Girar Cone 45°"
+                          title="Girar 45° (ou use a roda do mouse)"
                         >
                           <RotateCw className="w-3 h-3" /> Girar
                         </button>
                       )}
                       <button
                         type="button"
-                        onClick={() =>
+                        onClick={() => {
+                          const step = isCube ? 0.5 : 1;
+                          const minVal = isCube ? 0.5 : 1;
                           updateActiveMap((m) => ({
                             ...m,
                             templates: m.templates.map((t) =>
                               t.id === tmpl.id
-                                ? { ...t, radiusSquares: Math.max(1, t.radiusSquares - 1) }
+                                ? { ...t, radiusSquares: Math.max(minVal, t.radiusSquares - step) }
                                 : t
                             ),
-                          }))
-                        }
+                          }));
+                        }}
                         className="px-1.5 py-0.5 rounded bg-black/40 cursor-pointer"
                         title="Diminuir tamanho"
                       >
@@ -1740,20 +2431,30 @@ export const StageCanvas: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
+                        onClick={() => {
+                          const step = isCube ? 0.5 : 1;
                           updateActiveMap((m) => ({
                             ...m,
                             templates: m.templates.map((t) =>
                               t.id === tmpl.id
-                                ? { ...t, radiusSquares: Math.min(10, t.radiusSquares + 1) }
+                                ? { ...t, radiusSquares: Math.min(10, t.radiusSquares + step) }
                                 : t
                             ),
-                          }))
-                        }
+                          }));
+                        }}
                         className="px-1.5 py-0.5 rounded bg-black/40 cursor-pointer"
                         title="Aumentar tamanho"
                       >
                         +
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowAoESaveForm((v) => !v)}
+                        className="px-2 py-0.5 rounded bg-red-950/90 border border-red-500/60 text-red-200 font-display font-bold text-[10px] flex items-center gap-1 cursor-pointer hover:bg-red-900"
+                        title="Disparar Salvaguarda em todos os tokens dentro desta área"
+                      >
+                        <Flame className="w-3 h-3 text-amber-300" />
+                        <span>Salvaguarda AoE</span>
                       </button>
                       <button
                         type="button"
@@ -1763,11 +2464,118 @@ export const StageCanvas: React.FC = () => {
                             templates: m.templates.filter((t) => t.id !== tmpl.id),
                           }));
                           setSelectedTemplateId(null);
+                          setShowAoESaveForm(false);
                         }}
                         className="px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/20 cursor-pointer"
                         title="Remover área"
                       >
                         ✕
+                      </button>
+                    </div>
+                  )}
+
+                  {/* AoE Batch Saving Throw Config Popover */}
+                  {isSelected && showAoESaveForm && (
+                    <div
+                      onMouseDown={(e) => e.stopPropagation()}
+                      className="pointer-events-auto absolute top-1/2 left-1/2 -translate-x-1/2 translate-y-4 w-64 rpg-glass-panel rounded-lg p-3 space-y-2 text-[11px] z-40 shadow-2xl cursor-default"
+                    >
+                      <div className="flex items-center justify-between border-b pb-1" style={{ borderColor: 'var(--border-subtle)' }}>
+                        <span className="font-display font-bold text-amber-300">
+                          Disparar Magia em Área (AoE)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setShowAoESaveForm(false)}
+                          className="opacity-70 hover:opacity-100 cursor-pointer"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <input
+                        value={aoeTitle}
+                        onChange={(e) => setAoeTitle(e.target.value)}
+                        placeholder="Nome (ex: Bola de Fogo)"
+                        className="rpg-input w-full py-1"
+                      />
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <div>
+                          <label className="block text-[9px] opacity-75 mb-0.5">Salvaguarda</label>
+                          <select
+                            value={aoeSaveSkill}
+                            onChange={(e) => setAoeSaveSkill(e.target.value)}
+                            className="rpg-input w-full py-1 text-[10px]"
+                          >
+                            <option value="reflexos">Reflexos (DES)</option>
+                            <option value="fortitude">Fortitude (CON)</option>
+                            <option value="vontade">Vontade (SAB)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[9px] opacity-75 mb-0.5">CD</label>
+                          <input
+                            type="number"
+                            value={aoeDc}
+                            onChange={(e) => setAoeDc(Number(e.target.value) || 10)}
+                            className="rpg-input w-full py-1 text-center"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <div>
+                          <label className="block text-[9px] opacity-75 mb-0.5">Dano</label>
+                          <input
+                            value={aoeDamageFormula}
+                            onChange={(e) => setAoeDamageFormula(e.target.value)}
+                            placeholder="6d6"
+                            className="rpg-input w-full py-1 font-mono-dice"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] opacity-75 mb-0.5">Tipo</label>
+                          <select
+                            value={aoeDamageType}
+                            onChange={(e) => setAoeDamageType(e.target.value)}
+                            className="rpg-input w-full py-1 text-[10px]"
+                          >
+                            {DAMAGE_TYPE_OPTIONS.map((dt) => (
+                              <option key={dt} value={dt}>
+                                {dt}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <label className="flex items-center gap-1.5 text-[10px] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={aoeHalfOnSuccess}
+                          onChange={(e) => setAoeHalfOnSuccess(e.target.checked)}
+                        />
+                        <span>Metade do dano se passar na salvaguarda</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const labelMap: Record<string, string> = {
+                            reflexos: 'Reflexos (DES)',
+                            fortitude: 'Fortitude (CON)',
+                            vontade: 'Vontade (SAB)',
+                          };
+                          triggerAoESavePrompt(tmpl.id, {
+                            title: aoeTitle.trim() || tmpl.label,
+                            saveSkillId: aoeSaveSkill,
+                            saveLabel: labelMap[aoeSaveSkill] || 'Reflexos (DES)',
+                            dc: aoeDc,
+                            damageFormula: aoeDamageFormula,
+                            damageType: aoeDamageType,
+                            halfOnSuccess: aoeHalfOnSuccess,
+                          });
+                          setShowAoESaveForm(false);
+                        }}
+                        className="w-full rpg-btn-crimson py-1.5 rounded-md font-display font-bold text-xs cursor-pointer"
+                      >
+                        🔥 Disparar Salvaguarda nos Alvos
                       </button>
                     </div>
                   )}
@@ -1943,27 +2751,41 @@ export const StageCanvas: React.FC = () => {
                       return;
                     }
                     if (tool === 'select') {
-                      if (role === 'player' && tok.hp <= 0) {
-                        showTacticalAlert('Seu personagem está caído (0 PV) e não pode se mover!');
+                      if (hasActiveOpportunityPrompt && opportunityPrompt) {
+                        didDragTokenRef.current = false;
+                        showTacticalAlert(
+                          `Ataque de Oportunidade em aberto (${opportunityPrompt.reactorName} → ${opportunityPrompt.targetName})! Resolva ou passe a reação antes de mover.`
+                        );
                         return;
                       }
-                      if (campaign.combat.active && role === 'player') {
-                        const isOwnTok =
+                      if (activeDuel) {
+                        didDragTokenRef.current = false;
+                        return;
+                      }
+                      if (role === 'player') {
+                        const isOwnTok = Boolean(
                           tok.type === 'character' &&
-                          myCharacter &&
-                          tok.referenceId === myCharacter.id;
+                            myCharacter &&
+                            tok.referenceId === myCharacter.id
+                        );
                         if (!isOwnTok) {
-                          showTacticalAlert('Você só pode mover o seu próprio personagem durante o combate.');
+                          // Players can click other tokens to open context actions/attacks, but never drag them
                           return;
                         }
-                        const cb = findTokenCombatant(tok);
-                        if (activeTurnCombatant && cb && activeTurnCombatant.id !== cb.id) {
-                          showTacticalAlert(`Aguarde seu turno na iniciativa (${activeTurnCombatant.name} está agindo).`);
+                        if (tok.hp <= 0) {
+                          showTacticalAlert('Seu personagem está caído (0 PV) e não pode se mover!');
                           return;
                         }
-                        if (cb && (cb.remainingMoveMeters ?? cb.speedMeters ?? 9) < sqMeters) {
-                          showTacticalAlert('Deslocamento esgotado neste turno! Use Disparada (Dash) ou encerre o turno.');
-                          return;
+                        if (campaign.combat.active) {
+                          const cb = findTokenCombatant(tok);
+                          if (activeTurnCombatant && cb && activeTurnCombatant.id !== cb.id) {
+                            showTacticalAlert(`Aguarde seu turno na iniciativa (${activeTurnCombatant.name} está agindo).`);
+                            return;
+                          }
+                          if (cb && (cb.remainingMoveMeters ?? cb.speedMeters ?? 9) < sqMeters) {
+                            showTacticalAlert('Deslocamento esgotado neste turno! Use Disparada (Dash) ou encerre o turno.');
+                            return;
+                          }
                         }
                       }
                       didDragTokenRef.current = false;
@@ -1989,6 +2811,13 @@ export const StageCanvas: React.FC = () => {
                       !pendingAttackChoice
                     ) {
                       setTargetTokenId(tok.id);
+                      if (
+                        tok.type === 'character' &&
+                        tok.referenceId &&
+                        (role === 'gm' || tok.referenceId === myCharacter?.id)
+                      ) {
+                        setActiveCharacterId(tok.referenceId);
+                      }
                       setSelectedTokenId(isMenuOpen ? null : tok.id);
                     }
                     finalizeTokenDrag();
@@ -2002,13 +2831,31 @@ export const StageCanvas: React.FC = () => {
                     }
                     setTargetTokenId(isTarget ? null : tok.id);
                   }}
-                  title={`${tok.name} | CA ${tok.defense} | Clique para abrir ações • Arraste para mover`}
+                  title={`${tok.name} | CA ${
+                    role !== 'gm' &&
+                    tok.type === 'monster' &&
+                    !campaign.settings.showEnemyAcToPlayers
+                      ? '??'
+                      : tok.defense
+                  } | Clique para abrir ações${
+                    role === 'gm' ||
+                    (tok.type === 'character' &&
+                      myCharacter &&
+                      tok.referenceId === myCharacter.id)
+                      ? ' • Arraste para mover'
+                      : ''
+                  }`}
                   className={`absolute flex flex-col items-center justify-center ${
                     pendingAttackChoice
                       ? isOutOfPendingRange || isSelfPendingTarget
                         ? 'cursor-not-allowed opacity-60'
                         : 'cursor-crosshair hover:scale-108'
-                      : 'cursor-grab active:cursor-grabbing'
+                      : role === 'gm' ||
+                          (tok.type === 'character' &&
+                            myCharacter &&
+                            tok.referenceId === myCharacter.id)
+                        ? 'cursor-grab active:cursor-grabbing'
+                        : 'cursor-pointer'
                   } ${tok.isHidden ? 'opacity-60 ring-1 ring-amber-400/50 rounded-full' : ''} ${hasHitSlash ? 'animate-crit-shake' : ''}`}
                   style={{
                     left: tok.x * cellPx,
@@ -2047,6 +2894,21 @@ export const StageCanvas: React.FC = () => {
                     </svg>
                   )}
 
+                  {/* Active Opportunity Attack Pause Ring */}
+                  {hasActiveOpportunityPrompt &&
+                    opportunityPrompt &&
+                    (opportunityPrompt.targetTokenId === tok.id ||
+                      opportunityPrompt.reactorTokenId === tok.id) && (
+                      <div
+                        className="absolute rounded-full border-2 border-amber-400 pointer-events-none"
+                        style={{
+                          width: Math.max(30, Math.round(tokPx * 1.02)),
+                          height: Math.max(30, Math.round(tokPx * 1.02)),
+                          boxShadow: '0 0 18px rgba(245, 158, 11, 0.8)',
+                        }}
+                      />
+                    )}
+
                   {/* Selected / Targeted Ring */}
                   {isTarget && (
                     <div
@@ -2077,13 +2939,17 @@ export const StageCanvas: React.FC = () => {
                       isDead={tok.hp <= 0}
                       iconHint={linkedMonster?.type || linkedChar?.classId}
                     />
-                    {/* Engraved Mini CA Shield Pill on Coin Rim */}
-                    <span
-                      className="absolute -bottom-0.5 -right-1 px-1 rounded bg-[#0c0e16]/95 border border-amber-400/60 text-[8px] font-display font-bold text-amber-200 leading-tight pointer-events-none shadow"
-                      title={`Classe de Armadura: ${tok.defense}`}
-                    >
-                      {tok.defense}
-                    </span>
+                    {/* Engraved Mini CA Shield Pill on Coin Rim (Hidden for Monsters when GM hides enemy AC) */}
+                    {(role === 'gm' ||
+                      tok.type !== 'monster' ||
+                      campaign.settings.showEnemyAcToPlayers) && (
+                      <span
+                        className="absolute -bottom-0.5 -right-1 px-1 rounded bg-[#0c0e16]/95 border border-amber-400/60 text-[8px] font-display font-bold text-amber-200 leading-tight pointer-events-none shadow"
+                        title={`Classe de Armadura: ${tok.defense}`}
+                      >
+                        {tok.defense}
+                      </span>
+                    )}
                   </div>
 
                   {/* Slash / Block / Heal VFX Overlay */}
@@ -2143,11 +3009,18 @@ export const StageCanvas: React.FC = () => {
                   {tokenVfx.map((v) => (
                     <div
                       key={v.id}
-                      className={`absolute -top-6 left-1/2 font-chronicle font-black text-lg drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)] pointer-events-none animate-floating-combat ${
-                        v.isHeal ? 'text-emerald-400' : 'text-red-500'
+                      className={`absolute -top-7 left-1/2 flex flex-col items-center pointer-events-none animate-floating-combat ${
+                        v.isHeal ? 'text-emerald-400' : v.amount === 0 ? 'text-slate-300' : 'text-red-500'
                       }`}
                     >
-                      {v.isHeal ? `+${v.amount}` : `-${v.amount}`}
+                      <span className="font-chronicle font-black text-lg leading-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)]">
+                        {v.isHeal ? `+${v.amount}` : v.amount === 0 ? 'IMUNE' : `-${v.amount}`}
+                      </span>
+                      {v.note && (
+                        <span className="px-1.5 py-0.2 mt-0.5 rounded bg-black/85 border border-amber-400/50 text-[8px] font-display font-bold text-amber-200 whitespace-nowrap">
+                          {v.note}
+                        </span>
+                      )}
                     </div>
                   ))}
 
@@ -2162,8 +3035,22 @@ export const StageCanvas: React.FC = () => {
                         <div>
                           <div className="font-display font-bold text-sm">{tok.name}</div>
                           <div className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
-                            CA {tok.defense}
-                            {(role === 'gm' || tok.type === 'character') && ` • PV ${tok.hp}/${tok.maxHp}`}
+                            CA{' '}
+                            {role !== 'gm' &&
+                            tok.type === 'monster' &&
+                            !campaign.settings.showEnemyAcToPlayers
+                              ? '??'
+                              : tok.defense}
+                            {role === 'gm' || tok.type === 'character' ? (
+                              ` • PV ${tok.hp}/${tok.maxHp}`
+                            ) : (
+                              <>
+                                {' • '}
+                                <span className={getMonsterWoundStatus(tok.hp, tok.maxHp).colorClass}>
+                                  {getMonsterWoundStatus(tok.hp, tok.maxHp).label}
+                                </span>
+                              </>
+                            )}
                           </div>
                         </div>
                         <button
@@ -2173,6 +3060,141 @@ export const StageCanvas: React.FC = () => {
                           ✕
                         </button>
                       </div>
+
+                      {/* Own Character / GM Controlled Character Attacks (Click to aim on map) */}
+                      {linkedChar &&
+                        linkedChar.hp > 0 &&
+                        (role === 'gm' || linkedChar.id === myCharacter?.id) &&
+                        (() => {
+                          const charStats = computeCharacterStats(linkedChar, campaign);
+                          const eqWeapons = (linkedChar.inventory || [])
+                            .filter((inv) => inv.equipped)
+                            .flatMap((inv) => {
+                              const def = campaign.compendium.items.find(
+                                (i) => i.id === inv.itemId
+                              );
+                              return def && def.attackFormula ? [def] : [];
+                            });
+                          const knownAbs = (linkedChar.knownAbilityIds || [])
+                            .map((id) => campaign.compendium.abilities.find((a) => a.id === id))
+                            .filter((a): a is NonNullable<typeof a> => Boolean(a))
+                            .filter((a) => a.actionType !== 'Passiva');
+
+                          if (
+                            linkedChar.customAttacks.length === 0 &&
+                            eqWeapons.length === 0 &&
+                            linkedChar.customAbilities.length === 0 &&
+                            knownAbs.length === 0
+                          ) {
+                            return null;
+                          }
+
+                          return (
+                            <div className="space-y-1">
+                              <div className="text-[10px] uppercase tracking-wider text-amber-300 font-display font-bold">
+                                Ataques de {linkedChar.name}:
+                              </div>
+                              <div className="space-y-1 max-h-32 overflow-y-auto">
+                                {linkedChar.customAttacks.map((atk) => (
+                                  <button
+                                    key={atk.id}
+                                    onClick={() => {
+                                      setSelectedTokenId(null);
+                                      rollCharacterAction({
+                                        characterId: linkedChar.id,
+                                        title: atk.name,
+                                        attackFormula: atk.attackBonusFormula,
+                                        damageFormula: atk.damageFormula,
+                                        damageType: atk.damageType,
+                                        range: atk.range,
+                                        actionCost: 'Padrão',
+                                      });
+                                    }}
+                                    className="w-full rpg-btn-crimson px-2.5 py-1.5 rounded-lg text-[11px] flex items-center justify-between gap-1 cursor-pointer"
+                                  >
+                                    <span className="truncate flex items-center gap-1">
+                                      <Swords className="w-3 h-3 shrink-0" />
+                                      {atk.name}
+                                    </span>
+                                    <span className="font-mono-dice text-[10px] opacity-90 shrink-0">
+                                      {formatFormulaForDisplay(
+                                        atk.damageFormula,
+                                        charStats,
+                                        linkedChar
+                                      )}
+                                    </span>
+                                  </button>
+                                ))}
+                                {eqWeapons.map((wp) => (
+                                  <button
+                                    key={wp.id}
+                                    onClick={() => {
+                                      setSelectedTokenId(null);
+                                      rollCharacterAction({
+                                        characterId: linkedChar.id,
+                                        title: wp.name,
+                                        attackFormula: wp.attackFormula,
+                                        damageFormula: wp.damageFormula,
+                                        damageType: wp.damageType,
+                                        range: wp.range,
+                                        actionCost: 'Padrão',
+                                      });
+                                    }}
+                                    className="w-full rpg-card hover:border-amber-400 px-2.5 py-1.5 rounded-lg text-[11px] flex items-center justify-between gap-1 cursor-pointer"
+                                  >
+                                    <span className="truncate flex items-center gap-1">
+                                      <Swords className="w-3 h-3 text-amber-300 shrink-0" />
+                                      {wp.name}
+                                    </span>
+                                    <span className="font-mono-dice text-[10px] text-amber-200 shrink-0">
+                                      {wp.range || '1,5m'}
+                                    </span>
+                                  </button>
+                                ))}
+                                {knownAbs.slice(0, 3).map((ab) => (
+                                  <button
+                                    key={ab.id}
+                                    onClick={() => {
+                                      setSelectedTokenId(null);
+                                      rollCharacterAction({
+                                        characterId: linkedChar.id,
+                                        title: ab.name,
+                                        attackFormula: ab.attackFormula,
+                                        damageFormula: ab.damageFormula,
+                                        damageType: ab.damageType,
+                                        range: ab.range,
+                                        actionCost:
+                                          ab.actionType === 'Bônus'
+                                            ? 'Bônus'
+                                            : ab.actionType === 'Reação'
+                                              ? 'Reação'
+                                              : ab.actionType === 'Livre'
+                                                ? 'Livre'
+                                                : 'Padrão',
+                                        saveSkillId: ab.saveSkillId,
+                                        saveDcFormula: ab.saveDcFormula,
+                                        costMp: ab.costMp,
+                                        applyConditionId: ab.applyConditionId,
+                                        conditionDurationRounds: ab.conditionDurationRounds,
+                                      });
+                                    }}
+                                    className="w-full rpg-card hover:border-amber-400 px-2.5 py-1.5 rounded-lg text-[11px] flex items-center justify-between gap-1 cursor-pointer"
+                                  >
+                                    <span className="truncate flex items-center gap-1 text-amber-200">
+                                      <Sparkles className="w-3 h-3 text-amber-300 shrink-0" />
+                                      {ab.name}
+                                    </span>
+                                    <span className="font-mono-dice text-[10px] text-sky-300 shrink-0">
+                                      {ab.costMp > 0
+                                        ? `${ab.costMp} ${campaign.settings.resourceShort}`
+                                        : ab.actionType}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                       {/* Quick Attack Buttons against this token (Never against self or when dead) */}
                       {heroAttacks.length > 0 &&
@@ -2255,9 +3277,42 @@ export const StageCanvas: React.FC = () => {
                           </button>
                         )}
 
-                      {/* GM Controls: Monster Attacks, Death Save Rescue, Quick HP, Hide, Delete */}
+                      {/* GM Controls: Next-Attack Adv/Disadv, Monster Attacks, Death Save Rescue, Quick HP, Hide, Delete */}
                       {role === 'gm' && (
                         <div className="space-y-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                          {linkedChar && (
+                            <div className="space-y-1">
+                              <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/90">
+                                Dado do Mestre (Próximo Ataque):
+                              </div>
+                              <div className="grid grid-cols-2 gap-1">
+                                <button
+                                  onClick={() =>
+                                    setCharacterNextAttackOverride(linkedChar.id, 'advantage')
+                                  }
+                                  className={`px-2 py-1 rounded text-[10px] font-display font-bold border cursor-pointer transition ${
+                                    linkedChar.nextAttackRollOverride === 'advantage'
+                                      ? 'bg-emerald-900/90 border-emerald-400 text-emerald-100'
+                                      : 'rpg-card hover:border-emerald-400/60 text-emerald-200'
+                                  }`}
+                                >
+                                  + Vantagem
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    setCharacterNextAttackOverride(linkedChar.id, 'disadvantage')
+                                  }
+                                  className={`px-2 py-1 rounded text-[10px] font-display font-bold border cursor-pointer transition ${
+                                    linkedChar.nextAttackRollOverride === 'disadvantage'
+                                      ? 'bg-red-900/90 border-red-400 text-red-100'
+                                      : 'rpg-card hover:border-red-400/60 text-red-200'
+                                  }`}
+                                >
+                                  + Desvant.
+                                </button>
+                              </div>
+                            </div>
+                          )}
                           {linkedChar && linkedChar.hp <= 0 && (() => {
                             const ds = linkedChar.deathSaves || { successes: 0, failures: 0 };
                             const isCharDead = Boolean(ds.dead || (ds.failures || 0) >= 3);
@@ -2433,41 +3488,60 @@ export const StageCanvas: React.FC = () => {
               );
             })}
 
-            {/* Ruler Line Overlay */}
+            {/* Ruler Line Overlay + Midpoint Metric Pill (m, ft, squares) */}
             {tool === 'ruler' && rulerStart && rulerEnd && (
-              <svg
-                className="absolute inset-0 pointer-events-none z-20"
-                width={totalW}
-                height={totalH}
-              >
-                <line
-                  x1={(rulerStart.x + 0.5) * cellPx}
-                  y1={(rulerStart.y + 0.5) * cellPx}
-                  x2={(rulerEnd.x + 0.5) * cellPx}
-                  y2={(rulerEnd.y + 0.5) * cellPx}
-                  stroke="#fbbf24"
-                  strokeWidth="3"
-                  strokeDasharray="6 4"
-                />
-                <circle
-                  cx={(rulerStart.x + 0.5) * cellPx}
-                  cy={(rulerStart.y + 0.5) * cellPx}
-                  r="5"
-                  fill="#fbbf24"
-                />
-                <circle
-                  cx={(rulerEnd.x + 0.5) * cellPx}
-                  cy={(rulerEnd.y + 0.5) * cellPx}
-                  r="5"
-                  fill="#ef4444"
-                />
-              </svg>
+              <>
+                <svg
+                  className="absolute inset-0 pointer-events-none z-20"
+                  width={totalW}
+                  height={totalH}
+                >
+                  <line
+                    x1={(rulerStart.x + 0.5) * cellPx}
+                    y1={(rulerStart.y + 0.5) * cellPx}
+                    x2={(rulerEnd.x + 0.5) * cellPx}
+                    y2={(rulerEnd.y + 0.5) * cellPx}
+                    stroke="#fbbf24"
+                    strokeWidth="3"
+                    strokeDasharray="6 4"
+                  />
+                  <circle
+                    cx={(rulerStart.x + 0.5) * cellPx}
+                    cy={(rulerStart.y + 0.5) * cellPx}
+                    r="5"
+                    fill="#fbbf24"
+                  />
+                  <circle
+                    cx={(rulerEnd.x + 0.5) * cellPx}
+                    cy={(rulerEnd.y + 0.5) * cellPx}
+                    r="5"
+                    fill="#ef4444"
+                  />
+                </svg>
+                {rulerMetrics && (
+                  <div
+                    className="absolute pointer-events-none z-25 bg-[#090b12]/92 border border-amber-400/75 text-amber-100 px-2 py-0.5 rounded-md text-[10px] font-mono-dice font-bold whitespace-nowrap shadow-xl"
+                    style={{
+                      left: ((rulerStart.x + rulerEnd.x + 1) / 2) * cellPx,
+                      top: ((rulerStart.y + rulerEnd.y + 1) / 2) * cellPx - 14,
+                      transform: 'translate(-50%, -100%)',
+                    }}
+                  >
+                    {rulerMetrics.meters}m • {rulerMetrics.feet} ft ({rulerMetrics.squares}q)
+                  </div>
+                )}
+              </>
             )}
 
-            {/* GM Secret Map Markers Layer (Hidden Items, Chests, Traps, Secret Passages) */}
+            {/* GM Secret Map Markers & Interactive Treasures Layer */}
             {(activeMap.gmMarkers || []).map((marker) => {
               if (!marker.revealed && role !== 'gm') return null;
               const isSelected = selectedMarkerId === marker.id;
+              const hasLoot =
+                (marker.lootItems && marker.lootItems.length > 0) ||
+                (marker.lootGold ?? 0) > 0;
+              const canPlayerClick =
+                marker.revealed && (marker.kind === 'chest' || marker.kind === 'item' || hasLoot);
               const markerAccent =
                 marker.kind === 'chest'
                   ? '#f59e0b'
@@ -2481,7 +3555,7 @@ export const StageCanvas: React.FC = () => {
                   key={marker.id}
                   onMouseDown={(e) => {
                     e.stopPropagation();
-                    if (role === 'gm') {
+                    if (role === 'gm' || canPlayerClick) {
                       setSelectedMarkerId((curr) => (curr === marker.id ? null : marker.id));
                     }
                   }}
@@ -2492,12 +3566,12 @@ export const StageCanvas: React.FC = () => {
                     height: cellPx,
                   }}
                   className={`absolute flex flex-col items-center justify-center z-20 ${
-                    role === 'gm' ? 'cursor-pointer' : 'pointer-events-none'
+                    role === 'gm' || canPlayerClick ? 'cursor-pointer' : 'pointer-events-none'
                   } ${!marker.revealed ? 'opacity-85' : ''}`}
                   title={
                     role === 'gm'
                       ? `${marker.title} (${marker.revealed ? 'Visível para Jogadores' : 'Escondido — Só o Mestre vê'})`
-                      : marker.title
+                      : `${marker.title} — Clique para abrir/pegar`
                   }
                 >
                   {/* Ornate Medallion Icon for Secret Marker */}
@@ -2572,7 +3646,7 @@ export const StageCanvas: React.FC = () => {
                     </svg>
                   </div>
 
-                  {/* Marker Nameplate + Secret Status Badge */}
+                  {/* Marker Nameplate + Secret/Loot Badge */}
                   <div
                     className="absolute -top-3.5 px-1.5 py-0.2 rounded-xs bg-[#090b12]/95 border text-[8px] font-display font-bold whitespace-nowrap flex items-center gap-1 pointer-events-none shadow"
                     style={{ borderColor: markerAccent, color: '#fef3c7' }}
@@ -2581,17 +3655,76 @@ export const StageCanvas: React.FC = () => {
                       <span className="text-amber-300">[SECRETO]</span>
                     )}
                     <span>{marker.title}</span>
+                    {hasLoot && (
+                      <span className="text-emerald-300">
+                        •{(marker.lootItems?.length || 0) + ((marker.lootGold || 0) > 0 ? 1 : 0)}
+                      </span>
+                    )}
                   </div>
 
-                  {/* GM Interactive Popover to Rename, Reveal/Hide to Players, or Remove */}
+                  {/* Player Treasure Claim Popover */}
+                  {role !== 'gm' && isSelected && marker.revealed && (
+                    <div
+                      onMouseDown={(e) => e.stopPropagation()}
+                      className="absolute bottom-[110%] left-1/2 -translate-x-1/2 w-60 rpg-glass-panel rounded-lg p-3 space-y-2 text-xs shadow-2xl z-50 cursor-default"
+                    >
+                      <div className="flex items-center justify-between border-b pb-1" style={{ borderColor: 'var(--border-subtle)' }}>
+                        <span className="font-display font-bold text-amber-300 truncate">
+                          {marker.title}
+                        </span>
+                        <button
+                          onClick={() => setSelectedMarkerId(null)}
+                          className="text-xs opacity-65 hover:opacity-100 cursor-pointer"
+                        >
+                          ✕
+                        </button>
+                      </div>
+
+                      {hasLoot ? (
+                        <div className="space-y-1 text-[11px]">
+                          {(marker.lootGold ?? 0) > 0 && (
+                            <div className="text-amber-300 font-mono-dice font-bold">
+                              🪙 {marker.lootGold} PO
+                            </div>
+                          )}
+                          {(marker.lootItems || []).map((li) => {
+                            const itemDef = campaign.compendium.items.find(
+                              (it) => it.id === li.itemId
+                            );
+                            return (
+                              <div key={li.itemId} className="flex items-center justify-between">
+                                <span className="truncate">{itemDef?.name || 'Item'}</span>
+                                <span className="font-mono-dice text-emerald-300">x{li.quantity}</span>
+                              </div>
+                            );
+                          })}
+                          <button
+                            onClick={() => {
+                              claimTreasureMarker(marker.id);
+                              setSelectedMarkerId(null);
+                            }}
+                            className="w-full rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-xs cursor-pointer mt-1"
+                          >
+                            ✨ Pegar Tesouro
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] font-lore italic opacity-75">
+                          Baú vazio no momento.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* GM Interactive Popover to Rename, Add Loot/Gold, Reveal/Hide, or Remove */}
                   {role === 'gm' && isSelected && (
                     <div
                       onMouseDown={(e) => e.stopPropagation()}
-                      className="absolute bottom-[110%] left-1/2 -translate-x-1/2 w-52 rpg-glass-panel rounded-lg p-2.5 space-y-2 text-xs shadow-2xl z-50 cursor-default"
+                      className="absolute bottom-[110%] left-1/2 -translate-x-1/2 w-64 rpg-glass-panel rounded-lg p-2.5 space-y-2 text-xs shadow-2xl z-50 cursor-default"
                     >
                       <div className="flex items-center justify-between border-b pb-1" style={{ borderColor: 'var(--border-subtle)' }}>
                         <span className="text-[10px] font-display font-bold uppercase tracking-wider text-amber-300">
-                          Segredo do Mestre
+                          Segredo / Tesouro do Mestre
                         </span>
                         <button
                           onClick={() => setSelectedMarkerId(null)}
@@ -2615,6 +3748,220 @@ export const StageCanvas: React.FC = () => {
                         className="rpg-input w-full text-xs px-2 py-1 rounded"
                         placeholder="Nome do segredo..."
                       />
+
+                      {marker.kind === 'trap' && (
+                        <div className="space-y-1.5 p-2 rounded bg-red-950/35 border border-red-500/35 text-[10px]">
+                          <div className="flex items-center justify-between font-display font-bold text-red-300">
+                            <span>Armadilha Automática</span>
+                            <span>{marker.trapTriggered ? 'Disparada' : 'Armada'}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <label className="block">
+                              <span className="opacity-75">CD</span>
+                              <input
+                                type="number"
+                                value={marker.trapDc ?? 13}
+                                onChange={(e) => {
+                                  const v = Math.max(5, Number(e.target.value) || 13);
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id ? { ...gm, trapDc: v } : gm
+                                    ),
+                                  }));
+                                }}
+                                className="rpg-input w-full py-0.5 text-center"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="opacity-75">Salvaguarda</span>
+                              <select
+                                value={marker.trapSaveSkillId || 'reflexos'}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id ? { ...gm, trapSaveSkillId: v } : gm
+                                    ),
+                                  }));
+                                }}
+                                className="rpg-input w-full py-0.5 text-[10px]"
+                              >
+                                <option value="reflexos">Reflexos</option>
+                                <option value="fortitude">Fortitude</option>
+                                <option value="vontade">Vontade</option>
+                              </select>
+                            </label>
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <label className="block">
+                              <span className="opacity-75">Dano</span>
+                              <input
+                                value={marker.trapDamageFormula || '2d6'}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id ? { ...gm, trapDamageFormula: v } : gm
+                                    ),
+                                  }));
+                                }}
+                                className="rpg-input w-full py-0.5 font-mono-dice"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="opacity-75">Tipo</span>
+                              <select
+                                value={marker.trapDamageType || 'Perfuração'}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id ? { ...gm, trapDamageType: v } : gm
+                                    ),
+                                  }));
+                                }}
+                                className="rpg-input w-full py-0.5 text-[10px]"
+                              >
+                                {DAMAGE_TYPE_OPTIONS.map((dt) => (
+                                  <option key={dt} value={dt}>
+                                    {dt}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          {marker.trapTriggered && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateActiveMap((m) => ({
+                                  ...m,
+                                  gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                    gm.id === marker.id
+                                      ? { ...gm, trapTriggered: false, revealed: false }
+                                      : gm
+                                  ),
+                                }))
+                              }
+                              className="w-full rpg-card py-1 rounded font-display font-bold text-amber-200 cursor-pointer hover:border-amber-400/60"
+                            >
+                              Rearmar &amp; Ocultar Armadilha
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {(marker.kind === 'chest' || marker.kind === 'item') && (
+                        <div className="space-y-1.5 p-2 rounded bg-black/35 border border-amber-500/30">
+                          <div className="flex items-center justify-between text-[10px] font-display font-bold text-amber-300">
+                            <span>Conteúdo do Tesouro</span>
+                            <label className="flex items-center gap-1 font-mono-dice">
+                              <span>PO:</span>
+                              <input
+                                type="number"
+                                min={0}
+                                value={marker.lootGold ?? 0}
+                                onChange={(e) => {
+                                  const goldVal = Math.max(0, Number(e.target.value) || 0);
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id ? { ...gm, lootGold: goldVal } : gm
+                                    ),
+                                  }));
+                                }}
+                                className="rpg-input w-14 text-[11px] px-1 py-0.5 text-center"
+                              />
+                            </label>
+                          </div>
+
+                          {(marker.lootItems || []).length > 0 && (
+                            <div className="space-y-1 max-h-20 overflow-y-auto">
+                              {(marker.lootItems || []).map((li) => {
+                                const itDef = campaign.compendium.items.find(
+                                  (it) => it.id === li.itemId
+                                );
+                                return (
+                                  <div
+                                    key={li.itemId}
+                                    className="flex items-center justify-between gap-1 text-[10px] bg-black/30 px-1.5 py-0.5 rounded"
+                                  >
+                                    <span className="truncate">
+                                      {li.quantity}x {itDef?.name || li.itemId}
+                                    </span>
+                                    <button
+                                      onClick={() =>
+                                        updateActiveMap((m) => ({
+                                          ...m,
+                                          gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                            gm.id === marker.id
+                                              ? {
+                                                  ...gm,
+                                                  lootItems: (gm.lootItems || []).filter(
+                                                    (x) => x.itemId !== li.itemId
+                                                  ),
+                                                }
+                                              : gm
+                                          ),
+                                        }))
+                                      }
+                                      className="text-red-400 hover:text-red-200 cursor-pointer"
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          <div className="flex items-center gap-1">
+                            <select
+                              value={treasureDraftItemId}
+                              onChange={(e) => setTreasureDraftItemId(e.target.value)}
+                              className="rpg-input flex-1 text-[10px] py-1"
+                            >
+                              {campaign.compendium.items.map((it) => (
+                                <option key={it.id} value={it.id}>
+                                  {it.name}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              onClick={() => {
+                                if (!treasureDraftItemId) return;
+                                updateActiveMap((m) => ({
+                                  ...m,
+                                  gmMarkers: (m.gmMarkers || []).map((gm) => {
+                                    if (gm.id !== marker.id) return gm;
+                                    const list = [...(gm.lootItems || [])];
+                                    const idx = list.findIndex(
+                                      (x) => x.itemId === treasureDraftItemId
+                                    );
+                                    if (idx >= 0) {
+                                      list[idx] = {
+                                        ...list[idx],
+                                        quantity: list[idx].quantity + 1,
+                                      };
+                                    } else {
+                                      list.push({ itemId: treasureDraftItemId, quantity: 1 });
+                                    }
+                                    return { ...gm, lootItems: list };
+                                  }),
+                                }));
+                              }}
+                              className="rpg-btn-primary px-2 py-1 rounded text-[10px] font-bold cursor-pointer shrink-0"
+                            >
+                              + Item
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
                       <div className="flex items-center gap-1.5">
                         <button
                           onClick={() =>
@@ -2804,7 +4151,6 @@ export const StageCanvas: React.FC = () => {
           </div>
           </div>
         </div>
-      )}
     </div>
   );
 };

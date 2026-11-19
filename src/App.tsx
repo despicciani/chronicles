@@ -135,12 +135,17 @@ const TabletopWorkspace: React.FC = () => {
         <SoundboardModal onClose={() => setActiveModal(null)} />
       )}
 
-      {needsCharacterOnboarding && <PlayerCharacterSetupModal />}
-      <CinematicOverlays />
-      <InitiativeCeremonyOverlay />
-      <CombatDuelOverlay />
-      <PolyhedralDiceOverlay />
-      <HandoutOverlay />
+      {needsCharacterOnboarding ? (
+        <PlayerCharacterSetupModal />
+      ) : (
+        <>
+          <CinematicOverlays />
+          <InitiativeCeremonyOverlay />
+          <CombatDuelOverlay />
+          <PolyhedralDiceOverlay />
+          <HandoutOverlay />
+        </>
+      )}
     </div>
   );
 };

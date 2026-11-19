@@ -17,6 +17,7 @@ import {
   Footprints,
   Heart,
   Moon,
+  Save,
   Shield,
   ShieldAlert,
   Skull,
@@ -34,6 +35,7 @@ import {
   formatFormulaForDisplay,
 } from '../shared/rulesEngine';
 import { ActionEconomyCost } from '../shared/types';
+import { DraggablePanel, DragGripBadge } from './DraggablePanel';
 import { OrnateFrame, SculptedHealthBar } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
 
@@ -78,10 +80,20 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     pendingAttackChoice,
     setPendingAttackChoice,
     applyDamage,
+    setCharacterNextAttackOverride,
+    saveCharacterToVault,
+    lastSavedHeroFeedback,
+    activeSavePrompt,
+    rollSavePromptTarget,
+    rollAllPendingSaveTargets,
+    applySavePromptDamages,
+    dismissSavePrompt,
+    setCharacterConcentration,
+    unreadChatCount,
   } = useCampaign();
 
   const [showRestMenu, setShowRestMenu] = useState(false);
-  const [gmRosterCollapsed, setGmRosterCollapsed] = useState(false);
+  const [gmRosterCollapsed, setGmRosterCollapsed] = useState(true);
   const [gmRosterTab, setGmRosterTab] = useState<'heroes' | 'monsters'>('heroes');
   const [expandedHeroId, setExpandedHeroId] = useState<string | null>(null);
 
@@ -262,9 +274,19 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
       : undefined;
 
   const gmInspectedChar =
-    gmInspectedToken?.type === 'character' && gmInspectedToken.referenceId
-      ? campaign.characters.find((c) => c.id === gmInspectedToken.referenceId)
+    role === 'gm'
+      ? (gmInspectedToken?.type === 'character' && gmInspectedToken.referenceId
+          ? campaign.characters.find((c) => c.id === gmInspectedToken.referenceId)
+          : undefined) ||
+        (!gmInspectedMonster
+          ? campaign.characters.find((c) => c.id === activeCharacterId) ||
+            campaign.characters[0]
+          : undefined)
       : undefined;
+
+  const gmInspectedCharStats = gmInspectedChar
+    ? computeCharacterStats(gmInspectedChar, campaign)
+    : null;
 
   const gmMapMonsters = (activeMap?.tokens || []).filter((t) => t.type === 'monster');
 
@@ -290,7 +312,10 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     <>
       {/* GM Floating Pending Requests from Players */}
       {role === 'gm' && pendingRequests.length > 0 && (
-        <div className="fixed top-20 right-4 z-40 w-80 space-y-2 pointer-events-auto">
+        <DraggablePanel
+          storageKey="gm-pending-requests"
+          className="fixed top-20 right-4 z-40 w-80 space-y-2 pointer-events-auto"
+        >
           {pendingRequests.map((req) => (
             <div
               key={req.id}
@@ -327,12 +352,12 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               </div>
             </div>
           ))}
-        </div>
+        </DraggablePanel>
       )}
 
-      {/* Opportunity Attack Reaction Prompt */}
-      {opportunityPrompt && canRespondOpportunity && opportunityTargetToken && (
-        <div className="fixed bottom-32 left-1/2 -translate-x-1/2 z-45 max-w-md w-[92vw] pointer-events-auto animate-dice-tumble">
+      {/* Opportunity Attack Reaction Prompt (locks movement while open!) */}
+      {opportunityPrompt && opportunityTargetToken && canRespondOpportunity && (
+        <div className="fixed bottom-32 left-1/2 -translate-x-1/2 z-45 max-w-md w-[92vw] pointer-events-auto animate-modal-unfurl">
           <OrnateFrame
             accentColor="#e4ba52"
             className="rpg-glass-panel rounded-lg p-3.5 shadow-[0_18px_50px_rgba(0,0,0,0.92)] space-y-2"
@@ -349,7 +374,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     <strong style={{ color: opportunityPrompt.reactorColor }}>
                       {opportunityPrompt.reactorName}
                     </strong>
-                    .
+                    . Movimentação travada até resolver.
                   </div>
                 </div>
               </div>
@@ -383,6 +408,200 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
             </div>
           </OrnateFrame>
         </div>
+      )}
+
+      {opportunityPrompt && opportunityTargetToken && !canRespondOpportunity && (
+        <div className="fixed bottom-32 left-1/2 -translate-x-1/2 z-45 max-w-md w-[92vw] pointer-events-none animate-modal-unfurl">
+          <OrnateFrame
+            accentColor="#e4ba52"
+            className="rpg-glass-panel rounded-lg px-4 py-2.5 shadow-[0_18px_50px_rgba(0,0,0,0.92)] flex items-center gap-2.5 text-xs"
+          >
+            <Zap className="w-4 h-4 text-amber-400 shrink-0" />
+            <div>
+              <div className="font-display font-bold text-amber-300 uppercase tracking-wider text-[11px]">
+                Reação em Andamento — Movimento Travado
+              </div>
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                Aguarde <strong style={{ color: opportunityPrompt.reactorColor }}>{opportunityPrompt.reactorName}</strong> resolver ou passar o Ataque de Oportunidade contra <strong>{opportunityPrompt.targetName}</strong>.
+              </div>
+            </div>
+          </OrnateFrame>
+        </div>
+      )}
+
+      {/* Unified Hybrid Save Prompt Overlay (Automatic Traps, AoE Spells, & Spell Concentration) */}
+      {activeSavePrompt && (
+        <DraggablePanel
+          storageKey="tactical-save-prompt"
+          className="fixed bottom-36 left-1/2 -translate-x-1/2 z-50 max-w-lg w-[94vw] pointer-events-auto animate-modal-unfurl"
+        >
+          <OrnateFrame
+            accentColor={
+              activeSavePrompt.kind === 'concentration'
+                ? '#a855f7'
+                : activeSavePrompt.kind === 'trap'
+                  ? '#ef4444'
+                  : '#f59e0b'
+            }
+            className="rpg-glass-panel rounded-lg p-4 shadow-[0_22px_60px_rgba(0,0,0,0.95)] space-y-3 text-xs"
+          >
+            <div className="flex items-start justify-between gap-2 border-b pb-2" style={{ borderColor: 'var(--border-subtle)' }}>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 font-display font-bold text-[10px] uppercase tracking-widest text-amber-300">
+                  {activeSavePrompt.kind === 'concentration' ? (
+                    <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                  ) : activeSavePrompt.kind === 'trap' ? (
+                    <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                  ) : (
+                    <Flame className="w-3.5 h-3.5 text-amber-400" />
+                  )}
+                  <span>
+                    {activeSavePrompt.kind === 'concentration'
+                      ? 'Teste de Concentração'
+                      : activeSavePrompt.kind === 'trap'
+                        ? 'Armadilha Disparada!'
+                        : 'Salvaguarda em Área (AoE)'}
+                  </span>
+                </div>
+                <div className="font-chronicle font-bold text-base text-amber-100 truncate mt-0.5">
+                  {activeSavePrompt.title}
+                </div>
+                {activeSavePrompt.subtitle && (
+                  <p className="text-[11px] font-lore opacity-85 leading-snug">
+                    {activeSavePrompt.subtitle}
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <DragGripBadge />
+                <button
+                  onClick={dismissSavePrompt}
+                  className="rpg-card p-1 rounded cursor-pointer"
+                  title="Fechar painel"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="rpg-socket px-2 py-0.5 rounded font-display font-bold text-amber-200 border border-amber-500/40">
+                {activeSavePrompt.saveLabel} • CD {activeSavePrompt.dc}
+              </span>
+              {activeSavePrompt.rolledRawDamage !== undefined && activeSavePrompt.rolledRawDamage > 0 && (
+                <span className="rpg-socket px-2 py-0.5 rounded font-mono-dice font-bold text-red-300 border border-red-500/40">
+                  Dano Base: {activeSavePrompt.rolledRawDamage} ({activeSavePrompt.damageType || 'Dano'})
+                  {activeSavePrompt.halfOnSuccess ? ' • ½ se passar' : ''}
+                </span>
+              )}
+            </div>
+
+            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+              {activeSavePrompt.targets.map((t) => {
+                const canPlayerRoll =
+                  t.status === 'pending' &&
+                  (role === 'gm' || (myCharacter && t.characterId === myCharacter.id));
+                return (
+                  <div
+                    key={t.tokenId}
+                    className="rpg-card rounded-md px-2.5 py-2 flex items-center justify-between gap-2"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <TokenPortrait
+                        name={t.name}
+                        imageUrl={t.imageUrl}
+                        playerColor={t.color}
+                        sizePx={32}
+                      />
+                      <div className="min-w-0">
+                        <div className="font-display font-bold text-xs text-amber-100 truncate">
+                          {t.name}
+                        </div>
+                        {t.status === 'pending' ? (
+                          <div className="text-[10px] text-amber-300/80">
+                            Aguardando rolagem de {activeSavePrompt.saveLabel}...
+                          </div>
+                        ) : (
+                          <div className="text-[10px] font-mono-dice">
+                            d20 ({t.d20}) {t.bonus !== undefined && (t.bonus >= 0 ? `+ ${t.bonus}` : `- ${Math.abs(t.bonus)}`)} ={' '}
+                            <strong>{t.total}</strong> vs CD {activeSavePrompt.dc}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {t.status === 'pending' ? (
+                        canPlayerRoll ? (
+                          <button
+                            onClick={() => rollSavePromptTarget(t.tokenId)}
+                            className="rpg-btn-primary px-3 py-1 rounded-md text-[11px] font-display font-bold flex items-center gap-1 cursor-pointer"
+                          >
+                            <Dices className="w-3.5 h-3.5" />
+                            <span>Rolar d20</span>
+                          </button>
+                        ) : (
+                          <span className="text-[10px] opacity-65 italic">Pendente</span>
+                        )
+                      ) : (
+                        <div className="text-right">
+                          <div
+                            className={`px-2 py-0.5 rounded text-[10px] font-display font-bold border ${
+                              t.status === 'passed'
+                                ? 'bg-emerald-950/85 border-emerald-400/70 text-emerald-200'
+                                : 'bg-red-950/85 border-red-400/70 text-red-200'
+                            }`}
+                          >
+                            {activeSavePrompt.kind === 'concentration'
+                              ? t.status === 'passed'
+                                ? 'Manteve ✓'
+                                : 'Perdeu!'
+                              : t.status === 'passed'
+                                ? `Passou${t.damageToApply > 0 ? ` (-${t.damageToApply})` : ' (0)'}`
+                                : `Falhou (-${t.damageToApply})`}
+                          </div>
+                          {t.applied && (
+                            <div className="text-[9px] text-emerald-300 mt-0.5">Aplicado ✓</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {role === 'gm' && (
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                {activeSavePrompt.targets.some((t) => t.status === 'pending') && (
+                  <button
+                    onClick={rollAllPendingSaveTargets}
+                    className="rpg-card px-3 py-1.5 rounded-md text-[11px] font-display font-bold cursor-pointer hover:border-amber-400/60"
+                  >
+                    Rolar Pendentes (Mestre)
+                  </button>
+                )}
+                {activeSavePrompt.kind !== 'concentration' &&
+                  activeSavePrompt.targets.some(
+                    (t) => t.status !== 'pending' && !t.applied && t.damageToApply > 0
+                  ) && (
+                    <button
+                      onClick={applySavePromptDamages}
+                      className="rpg-btn-crimson px-3.5 py-1.5 rounded-md text-[11px] font-display font-bold cursor-pointer"
+                    >
+                      Aplicar Dano em Todos
+                    </button>
+                  )}
+                <button
+                  onClick={dismissSavePrompt}
+                  className="rpg-card px-3 py-1.5 rounded-md text-[11px] cursor-pointer"
+                >
+                  Fechar
+                </button>
+              </div>
+            )}
+          </OrnateFrame>
+        </DraggablePanel>
       )}
 
       {/* Tactical Rule Alert (Range / Action Economy / Turn Guard) */}
@@ -419,7 +638,10 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
           MODE A-LEFT: GM LEFT VERTICAL COMMAND ROSTER (Heróis & Criaturas)
          ===================================================================== */}
       {role === 'gm' && (
-        <div className="fixed left-3 top-28 bottom-36 z-25 pointer-events-none flex items-start">
+        <DraggablePanel
+          storageKey="gm-left-command-roster"
+          className="fixed left-3 top-36 bottom-28 z-25 pointer-events-none flex items-start"
+        >
           {gmRosterCollapsed ? (
             <button
               onClick={() => setGmRosterCollapsed(false)}
@@ -434,7 +656,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
             <OrnateFrame
               accentColor="#d4aa48"
               cornerSize={14}
-              className="pointer-events-auto w-[285px] max-h-full rpg-glass-panel rounded-lg flex flex-col shadow-[0_22px_60px_rgba(0,0,0,0.92)] animate-modal-unfurl overflow-hidden"
+              className="pointer-events-auto w-[264px] max-h-full rpg-glass-panel rounded-lg flex flex-col shadow-[0_22px_60px_rgba(0,0,0,0.92)] animate-modal-unfurl overflow-hidden"
             >
               {/* Header + Tabs */}
               <div
@@ -447,13 +669,16 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     Comandados do Mestre
                   </span>
                 </div>
-                <button
-                  onClick={() => setGmRosterCollapsed(true)}
-                  className="rpg-card p-1 rounded hover:border-amber-400/60 cursor-pointer shrink-0"
-                  title="Recolher Painel Esquerdo"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  <DragGripBadge />
+                  <button
+                    onClick={() => setGmRosterCollapsed(true)}
+                    className="rpg-card p-1 rounded hover:border-amber-400/60 cursor-pointer shrink-0"
+                    title="Recolher Painel Esquerdo"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
 
               <div
@@ -501,7 +726,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         (t) => t.type === 'character' && t.referenceId === ch.id
                       );
                       const isSelected = ch.id === activeCharacterId;
-                      const isExpanded = expandedHeroId === ch.id;
+                      const isExpanded = isSelected || expandedHeroId === ch.id;
                       const isDead = ch.hp <= 0;
 
                       const heroWeapons = (ch.inventory || [])
@@ -749,6 +974,32 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                                 />
                               </div>
                             )}
+                          </div>
+
+                          {/* GM 1-Click Next-Attack Advantage / Disadvantage Override */}
+                          <div className="flex items-center gap-1 text-[9px]">
+                            <button
+                              onClick={() => setCharacterNextAttackOverride(ch.id, 'advantage')}
+                              className={`flex-1 px-1.5 py-0.5 rounded font-display font-bold border cursor-pointer transition ${
+                                ch.nextAttackRollOverride === 'advantage'
+                                  ? 'bg-emerald-900/90 border-emerald-400 text-emerald-100'
+                                  : 'rpg-card text-emerald-300/85 hover:border-emerald-400/60'
+                              }`}
+                              title="Conceder Vantagem no próximo ataque deste jogador"
+                            >
+                              +Vant Próx.
+                            </button>
+                            <button
+                              onClick={() => setCharacterNextAttackOverride(ch.id, 'disadvantage')}
+                              className={`flex-1 px-1.5 py-0.5 rounded font-display font-bold border cursor-pointer transition ${
+                                ch.nextAttackRollOverride === 'disadvantage'
+                                  ? 'bg-red-900/90 border-red-400 text-red-100'
+                                  : 'rpg-card text-red-300/85 hover:border-red-400/60'
+                              }`}
+                              title="Impor Desvantagem no próximo ataque deste jogador"
+                            >
+                              +Desv Próx.
+                            </button>
                           </div>
 
                           {/* Card Footer Actions */}
@@ -1081,34 +1332,33 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               </div>
             </OrnateFrame>
           )}
-        </div>
+        </DraggablePanel>
       )}
 
       {/* =====================================================================
           MODE A: GM TACTICAL COMMAND DOCK (Mestre)
          ===================================================================== */}
       {role === 'gm' && (
-        <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[96vw] pointer-events-auto">
+        <DraggablePanel
+          storageKey="gm-bottom-command-dock"
+          className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[96vw] pointer-events-auto"
+        >
           <OrnateFrame
             accentColor="#d4aa48"
             cornerSize={16}
             className="rpg-glass-panel rounded-lg px-4 py-2 flex items-center gap-3 shadow-[0_22px_60px_rgba(0,0,0,0.92)]"
           >
-            {/* GM Badge & Selected Map Token Inspector */}
-            {gmInspectedToken ? (
+            {/* GM Badge & Selected Map Monster OR Active Character Inspector */}
+            {gmInspectedMonster && gmInspectedToken ? (
               <div className="flex items-center gap-3 pr-3 border-r" style={{ borderColor: 'var(--border-subtle)' }}>
                 <TokenPortrait
                   name={gmInspectedToken.name}
-                  imageUrl={gmInspectedChar?.portraitUrl || gmInspectedToken.imageUrl}
-                  playerColor={gmInspectedChar?.playerColor || gmInspectedToken.color}
-                  frameStyle={
-                    gmInspectedChar?.tokenFrameStyle ||
-                    gmInspectedToken.frameStyle ||
-                    (gmInspectedToken.type === 'character' ? 'gold' : 'crimson')
-                  }
+                  imageUrl={gmInspectedToken.imageUrl}
+                  playerColor={gmInspectedToken.color}
+                  frameStyle={gmInspectedToken.frameStyle || 'crimson'}
                   sizePx={46}
                   isDead={gmInspectedToken.hp <= 0}
-                  iconHint={gmInspectedMonster?.type}
+                  iconHint={gmInspectedMonster.type}
                 />
 
                 <div className="min-w-[130px] max-w-[180px]">
@@ -1121,7 +1371,6 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     </span>
                   </div>
 
-                  {/* Sculpted HP Bar */}
                   <div className="w-full h-2 rounded-xs bg-black/80 border border-amber-500/30 overflow-hidden mt-1">
                     <div
                       className="h-full transition-all duration-300"
@@ -1173,8 +1422,8 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 </div>
 
                 {/* 1-Click Monster Attacks right in the GM Dock */}
-                {gmInspectedMonster && gmInspectedMonster.attacks.length > 0 && (
-                  <div className="hidden md:flex items-center gap-1.5">
+                {gmInspectedMonster.attacks.length > 0 && (
+                  <div className="flex items-center gap-1.5 overflow-x-auto max-w-[440px]">
                     {gmInspectedMonster.attacks.map((matk, idx) => {
                       const isTokenDead = gmInspectedToken.hp <= 0;
                       const isMonsterSkillSelected = Boolean(
@@ -1206,7 +1455,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                               actionCost: 'Padrão',
                             });
                           }}
-                          className={`rpg-card hover:border-red-400 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 cursor-pointer text-left transition disabled:opacity-35 disabled:cursor-not-allowed ${
+                          className={`rpg-card hover:border-red-400 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left transition disabled:opacity-35 disabled:cursor-not-allowed ${
                             isMonsterSkillSelected ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
                           }`}
                           title={
@@ -1234,6 +1483,319 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                   </div>
                 )}
               </div>
+            ) : gmInspectedChar && gmInspectedCharStats ? (
+              (() => {
+                const gmCharWeapons = (gmInspectedChar.inventory || [])
+                  .filter((inv) => inv.equipped)
+                  .flatMap((inv) => {
+                    const def = campaign.compendium.items.find((i) => i.id === inv.itemId);
+                    return def && def.attackFormula ? [def] : [];
+                  });
+                const gmCharAbilities = (gmInspectedChar.knownAbilityIds || [])
+                  .map((id) => campaign.compendium.abilities.find((a) => a.id === id))
+                  .filter((a): a is NonNullable<typeof a> => Boolean(a))
+                  .filter((a) => a.actionType !== 'Passiva');
+                const isCharDead = gmInspectedChar.hp <= 0;
+
+                return (
+                  <div className="flex items-center gap-3 pr-3 border-r" style={{ borderColor: 'var(--border-subtle)' }}>
+                    <button
+                      onClick={() => {
+                        setActiveCharacterId(gmInspectedChar.id);
+                        onOpenSheet();
+                      }}
+                      className="cursor-pointer hover:scale-105 transition-transform shrink-0"
+                      title={`Abrir Ficha de ${gmInspectedChar.name}`}
+                    >
+                      <TokenPortrait
+                        name={gmInspectedChar.name}
+                        imageUrl={gmInspectedChar.portraitUrl}
+                        playerColor={gmInspectedChar.playerColor || gmInspectedChar.tokenColor}
+                        frameStyle={gmInspectedChar.tokenFrameStyle || 'gold'}
+                        sizePx={46}
+                        isDead={isCharDead}
+                        iconHint={gmInspectedChar.classId}
+                      />
+                    </button>
+
+                    <div className="min-w-[135px] max-w-[185px]">
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span className="font-display font-bold text-xs truncate text-amber-100">
+                          {gmInspectedChar.name}
+                        </span>
+                        <span className="px-1.5 py-0.2 rounded bg-black/70 border border-amber-400/50 text-[10px] font-display font-bold text-amber-300 shrink-0">
+                          CA {gmInspectedCharStats.defense}
+                        </span>
+                      </div>
+
+                      <div className="w-full h-2 rounded-xs bg-black/80 border border-amber-500/30 overflow-hidden mt-1">
+                        <div
+                          className="h-full transition-all duration-300"
+                          style={{
+                            width: `${Math.max(
+                              0,
+                              Math.min(
+                                100,
+                                (gmInspectedChar.hp / Math.max(1, gmInspectedCharStats.maxHp)) * 100
+                              )
+                            )}%`,
+                            background: 'linear-gradient(90deg, #991b1b, #ef4444)',
+                          }}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10px] mt-1 font-mono-dice">
+                        <span className="text-red-200 font-bold">
+                          PV {gmInspectedChar.hp}/{gmInspectedCharStats.maxHp}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() =>
+                              adjustHeroHp(gmInspectedChar.id, gmInspectedCharStats.maxHp, -5)
+                            }
+                            className="px-1 rounded bg-red-950/90 border border-red-500/40 text-red-200 hover:bg-red-800 cursor-pointer"
+                            title="-5 PV"
+                          >
+                            -5
+                          </button>
+                          <button
+                            onClick={() =>
+                              adjustHeroHp(gmInspectedChar.id, gmInspectedCharStats.maxHp, -1)
+                            }
+                            className="px-1 rounded bg-red-950/70 border border-red-500/30 text-red-200 hover:bg-red-800 cursor-pointer"
+                            title="-1 PV"
+                          >
+                            -1
+                          </button>
+                          <button
+                            onClick={() =>
+                              adjustHeroHp(gmInspectedChar.id, gmInspectedCharStats.maxHp, 1)
+                            }
+                            className="px-1 rounded bg-emerald-950/70 border border-emerald-500/30 text-emerald-200 hover:bg-emerald-800 cursor-pointer"
+                            title="+1 PV"
+                          >
+                            +1
+                          </button>
+                          <button
+                            onClick={() =>
+                              adjustHeroHp(gmInspectedChar.id, gmInspectedCharStats.maxHp, 5)
+                            }
+                            className="px-1 rounded bg-emerald-950/90 border border-emerald-500/40 text-emerald-200 hover:bg-emerald-800 cursor-pointer"
+                            title="+5 PV"
+                          >
+                            +5
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 mt-1 text-[9px]">
+                        <button
+                          onClick={() =>
+                            setCharacterNextAttackOverride(gmInspectedChar.id, 'advantage')
+                          }
+                          className={`flex-1 px-1.5 py-0.5 rounded font-display font-bold border cursor-pointer transition ${
+                            gmInspectedChar.nextAttackRollOverride === 'advantage'
+                              ? 'bg-emerald-900/90 border-emerald-400 text-emerald-100'
+                              : 'rpg-card text-emerald-300/85 hover:border-emerald-400/60'
+                          }`}
+                          title="Adicionar Vantagem ao próximo ataque"
+                        >
+                          +Vant Próx.
+                        </button>
+                        <button
+                          onClick={() =>
+                            setCharacterNextAttackOverride(gmInspectedChar.id, 'disadvantage')
+                          }
+                          className={`flex-1 px-1.5 py-0.5 rounded font-display font-bold border cursor-pointer transition ${
+                            gmInspectedChar.nextAttackRollOverride === 'disadvantage'
+                              ? 'bg-red-900/90 border-red-400 text-red-100'
+                              : 'rpg-card text-red-300/85 hover:border-red-400/60'
+                          }`}
+                          title="Adicionar Desvantagem ao próximo ataque"
+                        >
+                          +Desv Próx.
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Direct 1-Click Attacks & Abilities of the Selected Character in GM Dock */}
+                    <div className="flex items-center gap-1.5 overflow-x-auto max-w-[460px] py-0.5">
+                      {(gmInspectedChar.customAttacks || []).map((atk) => {
+                        const isSel = Boolean(
+                          pendingAttackChoice &&
+                            pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
+                            pendingAttackChoice.actionTitle === atk.name
+                        );
+                        return (
+                          <button
+                            key={atk.id}
+                            disabled={isCharDead}
+                            onClick={() =>
+                              rollCharacterAction({
+                                characterId: gmInspectedChar.id,
+                                title: atk.name,
+                                attackFormula: atk.attackBonusFormula,
+                                damageFormula: atk.damageFormula,
+                                damageType: atk.damageType,
+                                range: atk.range,
+                                actionCost: 'Padrão',
+                              })
+                            }
+                            className={`rpg-card rpg-magic-card rarity-${atk.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
+                              isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                            }`}
+                          >
+                            <Swords className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                            <div className="leading-tight">
+                              <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
+                                {atk.name}
+                              </div>
+                              <div className="text-[9px] font-mono-dice opacity-75">
+                                {isSel
+                                  ? '✕ Cancelar'
+                                  : formatFormulaForDisplay(
+                                      atk.damageFormula,
+                                      gmInspectedCharStats,
+                                      gmInspectedChar
+                                    )}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+
+                      {gmCharWeapons.map((wp) => {
+                        const isSel = Boolean(
+                          pendingAttackChoice &&
+                            pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
+                            pendingAttackChoice.actionTitle === wp.name
+                        );
+                        return (
+                          <button
+                            key={wp.id}
+                            disabled={isCharDead}
+                            onClick={() =>
+                              rollCharacterAction({
+                                characterId: gmInspectedChar.id,
+                                title: wp.name,
+                                attackFormula: wp.attackFormula,
+                                damageFormula: wp.damageFormula,
+                                damageType: wp.damageType,
+                                range: wp.range,
+                                actionCost: 'Padrão',
+                              })
+                            }
+                            className={`rpg-card rpg-magic-card rarity-comum px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
+                              isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                            }`}
+                          >
+                            <Swords className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                            <div className="leading-tight">
+                              <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
+                                {wp.name}
+                              </div>
+                              <div className="text-[9px] font-mono-dice opacity-75">
+                                {isSel ? '✕ Cancelar' : wp.range || '1,5m'}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+
+                      {(gmInspectedChar.customAbilities || []).map((ab) => {
+                        const cost = toEconomyCost(ab.actionType);
+                        const isSel = Boolean(
+                          pendingAttackChoice &&
+                            pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
+                            pendingAttackChoice.actionTitle === ab.name
+                        );
+                        return (
+                          <button
+                            key={ab.id}
+                            disabled={isCharDead}
+                            onClick={() =>
+                              rollCharacterAction({
+                                characterId: gmInspectedChar.id,
+                                title: ab.name,
+                                attackFormula: ab.attackFormula,
+                                damageFormula: ab.damageFormula,
+                                damageType: ab.damageType,
+                                range: ab.range,
+                                actionCost: cost,
+                                costMp: ab.costMp,
+                              })
+                            }
+                            className={`rpg-card rpg-magic-card rarity-${ab.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
+                              isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                            }`}
+                          >
+                            <Flame className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                            <div className="leading-tight">
+                              <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
+                                {ab.name}
+                              </div>
+                              <div className="text-[9px] font-mono-dice text-amber-300">
+                                {isSel
+                                  ? '✕ Cancelar'
+                                  : ab.costMp > 0
+                                    ? `${ab.costMp} ${campaign.settings.resourceShort}`
+                                    : ab.actionType}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+
+                      {gmCharAbilities.slice(0, 3).map((ab) => {
+                        const cost = toEconomyCost(ab.actionType);
+                        const isSel = Boolean(
+                          pendingAttackChoice &&
+                            pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
+                            pendingAttackChoice.actionTitle === ab.name
+                        );
+                        return (
+                          <button
+                            key={ab.id}
+                            disabled={isCharDead}
+                            onClick={() =>
+                              rollCharacterAction({
+                                characterId: gmInspectedChar.id,
+                                title: ab.name,
+                                attackFormula: ab.attackFormula,
+                                damageFormula: ab.damageFormula,
+                                damageType: ab.damageType,
+                                range: ab.range,
+                                actionCost: cost,
+                                saveSkillId: ab.saveSkillId,
+                                saveDcFormula: ab.saveDcFormula,
+                                costMp: ab.costMp,
+                                applyConditionId: ab.applyConditionId,
+                                conditionDurationRounds: ab.conditionDurationRounds,
+                              })
+                            }
+                            className={`rpg-card rpg-magic-card rarity-raro px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
+                              isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                            }`}
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                            <div className="leading-tight">
+                              <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
+                                {ab.name}
+                              </div>
+                              <div className="text-[9px] font-mono-dice text-amber-200/80">
+                                {isSel
+                                  ? '✕ Cancelar'
+                                  : ab.costMp > 0
+                                    ? `${ab.costMp} ${campaign.settings.resourceShort}`
+                                    : ab.actionType}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()
             ) : (
               <div
                 className="flex items-center gap-2 pr-3 border-r text-xs"
@@ -1253,8 +1815,9 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               </div>
             )}
 
-            {/* Right: Dice Mode + Open Sheets + Dice Tray */}
+            {/* Right: Dice Mode + Open Sheets + Dice Tray + Drag Grip */}
             <div className="flex items-center gap-1.5 shrink-0">
+              <DragGripBadge />
               <button
                 onClick={() =>
                   setAdvantageMode(
@@ -1293,24 +1856,32 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
 
               <button
                 onClick={onToggleDiceDrawer}
-                className={`px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1 cursor-pointer transition ${
+                className={`relative px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1 cursor-pointer transition ${
                   diceDrawerOpen ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
                 }`}
-                title="Abrir/Fechar Bandeja de Dados & Histórico"
+                title="Abrir/Fechar Bandeja de Dados, Histórico & Chat RP"
               >
                 <Dices className="w-4 h-4" />
-                <span className="hidden md:inline">Dados</span>
+                <span className="hidden md:inline">Dados / Chat</span>
+                {unreadChatCount > 0 && !diceDrawerOpen && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 border border-amber-200 text-white text-[9px] font-bold flex items-center justify-center">
+                    {unreadChatCount}
+                  </span>
+                )}
               </button>
             </div>
           </OrnateFrame>
-        </div>
+        </DraggablePanel>
       )}
 
       {/* =====================================================================
           MODE B: PLAYER RELIQUARY ACTION HUD (Jogador com Personagem Próprio)
          ===================================================================== */}
       {role === 'player' && hero && stats && (
-        <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[95vw] pointer-events-auto flex flex-col items-center gap-1.5">
+        <DraggablePanel
+          storageKey="player-bottom-hud"
+          className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[95vw] pointer-events-auto flex flex-col items-center gap-1.5"
+        >
           {/* Player Death's Door HUD Panel when hero is at 0 PV */}
           {hero.hp <= 0 && (() => {
             const ds = hero.deathSaves || { successes: 0, failures: 0 };
@@ -1514,6 +2085,24 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
             </div>
           )}
 
+          {/* GM Next-Attack Advantage/Disadvantage Banner for Player */}
+          {hero.nextAttackRollOverride && (
+            <div
+              className={`rpg-glass-panel rounded-md px-3.5 py-1 text-[11px] font-display font-bold flex items-center gap-1.5 border shadow-lg ${
+                hero.nextAttackRollOverride === 'advantage'
+                  ? 'border-emerald-400/75 text-emerald-200 bg-emerald-950/80'
+                  : 'border-red-400/75 text-red-200 bg-red-950/80'
+              }`}
+            >
+              <Crown className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span>
+                {hero.nextAttackRollOverride === 'advantage'
+                  ? 'Mestre concedeu: VANTAGEM no seu próximo ataque!'
+                  : 'Mestre impôs: DESVANTAGEM no seu próximo ataque!'}
+              </span>
+            </div>
+          )}
+
           <OrnateFrame
             accentColor={heroColor}
             cornerSize={16}
@@ -1521,33 +2110,48 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
           >
             {/* Left: Sculpted Ruby HP Globe + Hero Medallion + Sapphire MP Globe */}
             <div className="flex items-center gap-2.5 shrink-0">
-              {/* HP Liquid Globe in Brass Bezel */}
+              {/* HP Liquid Globe in Brass Bezel (Crimson Skull Crest at 0 PV — never flat black ball) */}
               <div
-                className="relative w-12 h-12 rounded-full border-2 border-amber-500/70 bg-[#08090f] overflow-hidden flex flex-col items-center justify-center shadow-[inset_0_4px_10px_rgba(0,0,0,0.95),0_0_16px_rgba(220,38,38,0.35)]"
+                className={`relative w-12 h-12 rounded-full border-2 overflow-hidden flex flex-col items-center justify-center ${
+                  hero.hp <= 0
+                    ? 'border-red-500/80 bg-[#2a070b] animate-death-pulse shadow-[inset_0_2px_10px_rgba(185,28,28,0.65),0_0_18px_rgba(220,38,38,0.5)]'
+                    : 'border-amber-500/70 bg-[#1a090d] shadow-[inset_0_4px_10px_rgba(0,0,0,0.95),0_0_16px_rgba(220,38,38,0.35)]'
+                }`}
                 title={`Pontos de Vida: ${hero.hp} / ${stats.maxHp}`}
               >
-                <div
-                  className="absolute bottom-0 inset-x-0 transition-all duration-500"
-                  style={{
-                    height: `${hpPct}%`,
-                    background: 'linear-gradient(180deg, #ef4444 0%, #991b1b 65%, #450a0a 100%)',
-                  }}
-                >
-                  <div className="absolute inset-0 liquid-bar-shine" />
-                </div>
-                <div
-                  className="absolute inset-0 rounded-full pointer-events-none"
-                  style={{
-                    background:
-                      'linear-gradient(145deg, rgba(255,255,255,0.28) 0%, transparent 45%)',
-                  }}
-                />
-                <span className="relative z-10 font-display font-black text-xs text-white drop-shadow leading-none">
-                  {hero.hp}
-                </span>
-                <span className="relative z-10 text-[9px] font-display text-amber-100/90 drop-shadow leading-none mt-0.5">
-                  PV
-                </span>
+                {hero.hp <= 0 ? (
+                  <>
+                    <Skull className="w-4 h-4 text-red-300 animate-pulse" />
+                    <span className="font-display font-black text-[9px] text-red-200 leading-none mt-0.5">
+                      0 PV
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <div
+                      className="absolute bottom-0 inset-x-0 transition-all duration-500"
+                      style={{
+                        height: `${hpPct}%`,
+                        background: 'linear-gradient(180deg, #ef4444 0%, #991b1b 65%, #450a0a 100%)',
+                      }}
+                    >
+                      <div className="absolute inset-0 liquid-bar-shine" />
+                    </div>
+                    <div
+                      className="absolute inset-0 rounded-full pointer-events-none"
+                      style={{
+                        background:
+                          'linear-gradient(145deg, rgba(255,255,255,0.28) 0%, transparent 45%)',
+                      }}
+                    />
+                    <span className="relative z-10 font-display font-black text-xs text-white drop-shadow leading-none">
+                      {hero.hp}
+                    </span>
+                    <span className="relative z-10 text-[9px] font-display text-amber-100/90 drop-shadow leading-none mt-0.5">
+                      PV
+                    </span>
+                  </>
+                )}
               </div>
 
               {/* Hero Medallion */}
@@ -1889,9 +2493,14 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
 
               <div className="relative">
                 <button
+                  disabled={hero.hp <= 0}
                   onClick={() => setShowRestMenu((v) => !v)}
-                  className="rpg-card px-2.5 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
-                  title="Pedir Descanso ou Cura ao Mestre"
+                  className="rpg-card px-2.5 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer hover:border-amber-400/60 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={
+                    hero.hp <= 0
+                      ? 'Personagens caídos ou mortos (0 PV) não podem pedir descanso'
+                      : 'Pedir Descanso ou Cura ao Mestre'
+                  }
                 >
                   <Moon className="w-3.5 h-3.5 text-amber-300" />
                   <span className="hidden lg:inline">Pedir</span>
@@ -1937,6 +2546,56 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               </div>
 
               <button
+                onClick={() => {
+                  if (hero.concentratingSpell) {
+                    setCharacterConcentration(hero.id, null);
+                  } else {
+                    const spell = window.prompt(
+                      'Qual magia você está mantendo em Concentração?',
+                      'Bênção'
+                    );
+                    if (spell && spell.trim()) {
+                      setCharacterConcentration(hero.id, spell.trim());
+                    }
+                  }
+                }}
+                className={`px-2 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer transition border ${
+                  hero.concentratingSpell
+                    ? 'bg-purple-950/90 border-purple-400/80 text-purple-200'
+                    : 'rpg-card hover:border-purple-400/60'
+                }`}
+                title={
+                  hero.concentratingSpell
+                    ? `Concentrando em: ${hero.concentratingSpell} (Clique para encerrar)`
+                    : 'Ativar Concentração em uma magia (dispara teste de CON automático ao sofrer dano)'
+                }
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-300 shrink-0" />
+                <span className="hidden xl:inline max-w-[95px] truncate">
+                  {hero.concentratingSpell ? `Conc: ${hero.concentratingSpell}` : 'Concentrar'}
+                </span>
+              </button>
+
+              <button
+                onClick={() => saveCharacterToVault(hero)}
+                className={`px-2.5 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer transition border ${
+                  lastSavedHeroFeedback?.id === (hero.vaultId || hero.id)
+                    ? 'bg-emerald-950/85 border-emerald-400/70 text-emerald-200'
+                    : 'rpg-card hover:border-amber-400/60'
+                }`}
+                title="Salvar e sincronizar seu herói (Desktop + Online)"
+              >
+                {lastSavedHeroFeedback?.id === (hero.vaultId || hero.id) ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-300" />
+                ) : (
+                  <Save className="w-3.5 h-3.5 text-amber-300" />
+                )}
+                <span className="hidden lg:inline">
+                  {lastSavedHeroFeedback?.id === (hero.vaultId || hero.id) ? 'Salvo ✓' : 'Salvar'}
+                </span>
+              </button>
+
+              <button
                 onClick={onOpenSheet}
                 className="rpg-card px-2.5 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
               >
@@ -1946,17 +2605,23 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
 
               <button
                 onClick={onToggleDiceDrawer}
-                className={`px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1 cursor-pointer transition ${
+                className={`relative px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1 cursor-pointer transition ${
                   diceDrawerOpen ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
                 }`}
-                title="Abrir/Fechar Bandeja de Dados & Histórico"
+                title="Abrir/Fechar Bandeja de Dados, Histórico & Chat RP"
               >
                 <Dices className="w-4 h-4" />
-                <span className="hidden md:inline">Dados</span>
+                <span className="hidden md:inline">Dados / Chat</span>
+                {unreadChatCount > 0 && !diceDrawerOpen && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 border border-amber-200 text-white text-[9px] font-bold flex items-center justify-center">
+                    {unreadChatCount}
+                  </span>
+                )}
               </button>
+              <DragGripBadge />
             </div>
           </OrnateFrame>
-        </div>
+        </DraggablePanel>
       )}
     </>
   );

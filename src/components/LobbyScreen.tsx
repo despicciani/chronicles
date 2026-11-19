@@ -1,8 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   BookOpen,
+  CheckCircle2,
   Crown,
+  Download,
+  Globe,
   Moon,
   Plus,
   RefreshCw,
@@ -11,17 +14,20 @@ import {
   Sun,
   Swords,
   Trash2,
+  Upload,
   Wifi,
 } from 'lucide-react';
-import { useCampaign } from '../context/CampaignContext';
+import { triggerHeroJsonDownload, useCampaign } from '../context/CampaignContext';
 import {
   decodeRoomCode,
+  parseHeroPayloadFromJson,
   pickRandomPlayerColor,
   PLAYER_COLOR_PALETTE,
 } from '../shared/rulesEngine';
 import { FantasyParticlesBackground } from './FantasyEffects';
 import { FileUploadButton } from './FileUploadButton';
 import { OrnateDivider, OrnateFrame } from './OrnateFrame';
+import { TokenPortrait } from './TokenPortrait';
 
 interface DiscoveredRoom {
   url: string;
@@ -35,8 +41,15 @@ interface DiscoveredRoom {
 
 export const LobbyScreen: React.FC = () => {
   const {
+    campaign,
     savedCampaigns,
     refreshSavedCampaigns,
+    savedHeroes,
+    refreshSavedHeroes,
+    saveCharacterToVault,
+    deleteSavedHero,
+    importSavedHeroIntoCampaign,
+    isRemoteTunnelSession,
     createNewCampaign,
     loadSavedCampaign,
     deleteSavedCampaign,
@@ -50,7 +63,9 @@ export const LobbyScreen: React.FC = () => {
 
   // Top-level screen flow: 'title' -> 'player' or 'gm'
   const [screen, setScreen] = useState<'title' | 'player' | 'gm'>('title');
-  const [gmTab, setGmTab] = useState<'continue' | 'create'>('continue');
+  const [gmTab, setGmTab] = useState<'continue' | 'create' | 'heroes'>('continue');
+  const heroUploadRef = useRef<HTMLInputElement | null>(null);
+  const [heroVaultToast, setHeroVaultToast] = useState<string | null>(null);
 
   // Create Campaign State (GM)
   const [newName, setNewName] = useState('');
@@ -86,8 +101,32 @@ export const LobbyScreen: React.FC = () => {
 
   useEffect(() => {
     refreshSavedCampaigns();
+    refreshSavedHeroes();
     scanRooms();
-  }, [refreshSavedCampaigns, scanRooms]);
+  }, [refreshSavedCampaigns, refreshSavedHeroes, scanRooms]);
+
+  const handleImportHeroFileToVault = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        const hero = parseHeroPayloadFromJson(parsed, campaign);
+        if (!hero) {
+          window.alert('Arquivo de herói inválido. Selecione um .hero.json exportado pelo CHRONICLE.');
+          return;
+        }
+        await saveCharacterToVault(hero);
+        setHeroVaultToast(`${hero.name} salvo no Cofre de Heróis!`);
+        window.setTimeout(() => setHeroVaultToast(null), 3000);
+      } catch {
+        window.alert('Não foi possível ler este arquivo de personagem.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -224,8 +263,35 @@ export const LobbyScreen: React.FC = () => {
             Forje lendas, domine batalhas táticas e viva suas crônicas em tempo real.
           </p>
 
+          {isRemoteTunnelSession && (
+            <div className="mt-6 max-w-2xl w-full rpg-glass-panel rounded-lg px-5 py-3 border border-emerald-500/45 flex flex-wrap items-center justify-between gap-3 text-left">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Globe className="w-5 h-5 text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-widest font-display font-bold text-emerald-300">
+                    Mesa Online Conectada
+                  </div>
+                  <div className="font-display font-bold text-sm text-amber-100 truncate">
+                    {campaign.name} — Mestre: {campaign.gmName || 'Mestre'}
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setScreen('player');
+                  scanRooms();
+                }}
+                className="rpg-btn-primary px-4 py-1.5 rounded-md text-xs font-display font-bold cursor-pointer shrink-0"
+              >
+                Entrar Agora →
+              </button>
+            </div>
+          )}
+
           {/* The Two Ornate Portals: SOU JOGADOR | SOU MESTRE */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-3xl w-full mt-10 animate-portals-up">
+          <div
+            className={`grid grid-cols-1 ${isRemoteTunnelSession ? 'max-w-lg' : 'sm:grid-cols-2 max-w-3xl'} gap-6 w-full mt-8 animate-portals-up`}
+          >
             {/* Portal Jogador */}
             <button
               onClick={() => {
@@ -246,7 +312,7 @@ export const LobbyScreen: React.FC = () => {
                     SOU JOGADOR
                   </div>
                   <p className="font-lore text-base leading-snug" style={{ color: 'var(--text-secondary)' }}>
-                    Entre facilmente na mesa do seu Mestre, crie seu herói e role dados em batalha.
+                    Entre facilmente na mesa do seu Mestre, escolha seu herói salvo e role dados em batalha.
                   </p>
                   <span className="mt-1 px-4 py-1.5 rounded-md bg-[#162436] border border-[#7ca6c9]/45 text-xs font-display font-bold text-[#c7e0f5] group-hover:border-[#9bc4e6] transition">
                     Entrar em uma Aventura →
@@ -255,7 +321,8 @@ export const LobbyScreen: React.FC = () => {
               </OrnateFrame>
             </button>
 
-            {/* Portal Mestre */}
+            {/* Portal Mestre (Host local / Desktop apenas, para link online não expor outras campanhas) */}
+            {!isRemoteTunnelSession && (
             <button
               onClick={() => setScreen('gm')}
               className="text-left group cursor-pointer focus:outline-none"
@@ -280,6 +347,7 @@ export const LobbyScreen: React.FC = () => {
                 </div>
               </OrnateFrame>
             </button>
+            )}
           </div>
         </div>
       )}
@@ -298,7 +366,7 @@ export const LobbyScreen: React.FC = () => {
             </p>
           </div>
 
-          <div className="flex items-center justify-center gap-3">
+          <div className="flex items-center justify-center flex-wrap gap-3">
             <button
               onClick={() => setGmTab('continue')}
               className={`px-5 py-2.5 rounded-md text-xs font-display font-bold flex items-center gap-2 cursor-pointer transition ${
@@ -316,6 +384,15 @@ export const LobbyScreen: React.FC = () => {
             >
               <Plus className="w-4 h-4" />
               <span>Criar Nova Campanha</span>
+            </button>
+            <button
+              onClick={() => setGmTab('heroes')}
+              className={`px-5 py-2.5 rounded-md text-xs font-display font-bold flex items-center gap-2 cursor-pointer transition ${
+                gmTab === 'heroes' ? 'rpg-btn-primary' : 'rpg-glass-panel opacity-75 hover:opacity-100'
+              }`}
+            >
+              <Swords className="w-4 h-4" />
+              <span>Cofre de Heróis ({savedHeroes.length})</span>
             </button>
           </div>
 
@@ -523,6 +600,122 @@ export const LobbyScreen: React.FC = () => {
               </form>
             </OrnateFrame>
           )}
+
+          {gmTab === 'heroes' && (
+            <OrnateFrame className="rpg-glass-panel rounded-lg p-6 space-y-4 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-display font-bold text-base text-amber-200 flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <span>Cofre Permanente de Heróis (Sincronizado Desktop + Online)</span>
+                  </h3>
+                  <p className="font-lore text-sm opacity-80">
+                    Todos os personagens salvos ficam guardados na pasta <code>server/data/characters/</code> e podem ser trazidos para qualquer campanha.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => heroUploadRef.current?.click()}
+                    className="rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Importar Ficha (.json)</span>
+                  </button>
+                  <input
+                    ref={heroUploadRef}
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={handleImportHeroFileToVault}
+                    className="hidden"
+                  />
+                </div>
+              </div>
+
+              {heroVaultToast && (
+                <div className="p-2.5 rounded-md bg-emerald-950/60 border border-emerald-500/50 text-emerald-200 font-semibold">
+                  {heroVaultToast}
+                </div>
+              )}
+
+              {savedHeroes.length === 0 ? (
+                <div className="rpg-card rounded-lg p-6 text-center opacity-75">
+                  Nenhum herói salvo no Cofre ainda. Abra a Ficha de um personagem dentro da mesa e clique em &ldquo;Salvar Herói&rdquo;!
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {savedHeroes.map((entry) => {
+                    const ch = entry.character;
+                    const cls =
+                      campaign.compendium.classes.find((c) => c.id === ch.classId)?.name || 'Herói';
+                    return (
+                      <div
+                        key={entry.id}
+                        className="rpg-card rounded-lg p-3.5 flex flex-col justify-between gap-3 border hover:border-amber-400/60 transition"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <TokenPortrait
+                            name={ch.name}
+                            imageUrl={ch.portraitUrl}
+                            playerColor={ch.playerColor || '#f59e0b'}
+                            frameStyle={ch.tokenFrameStyle || 'gold'}
+                            sizePx={48}
+                          />
+                          <div className="min-w-0">
+                            <div className="font-display font-bold text-sm text-amber-100 truncate">
+                              {ch.name}
+                            </div>
+                            <div className="text-[11px] text-amber-300/85 truncate">
+                              Nv {ch.level} • {cls} • {ch.playerName}
+                            </div>
+                            <div className="text-[10px] opacity-65 truncate">
+                              Origem: {entry.originCampaignName || 'Cofre Local'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-1.5 pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              importSavedHeroIntoCampaign(ch);
+                              await loadSavedCampaign(campaign.id);
+                            }}
+                            className="rpg-btn-primary px-2.5 py-1 rounded-md text-[11px] font-display font-bold cursor-pointer"
+                            title="Inserir na campanha ativa e abrir mesa"
+                          >
+                            Enviar p/ Mesa Ativa
+                          </button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => triggerHeroJsonDownload(ch)}
+                              className="rpg-card px-2 py-1 rounded text-[11px] flex items-center gap-1 cursor-pointer"
+                              title="Baixar ficha .json"
+                            >
+                              <Download className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (window.confirm(`Remover "${ch.name}" do Cofre de Heróis?`)) {
+                                  deleteSavedHero(entry.id);
+                                }
+                              }}
+                              className="p-1 rounded bg-red-950/60 border border-red-500/40 text-red-200 hover:bg-red-900 cursor-pointer"
+                              title="Excluir do Cofre"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </OrnateFrame>
+          )}
         </div>
       )}
 
@@ -659,6 +852,80 @@ export const LobbyScreen: React.FC = () => {
                 Conectar
               </button>
             </form>
+
+            {/* Player Saved Hero Vault Strip */}
+            <div className="pt-3 border-t space-y-2.5" style={{ borderColor: 'var(--border-subtle)' }}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-display font-bold text-xs text-amber-200 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Meus Heróis Salvos ({savedHeroes.length}) — Sincronizado Desktop + Online</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => heroUploadRef.current?.click()}
+                    className="rpg-card px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
+                  >
+                    <Upload className="w-3 h-3" />
+                    <span>Carregar Ficha (.json)</span>
+                  </button>
+                  <input
+                    ref={heroUploadRef}
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={handleImportHeroFileToVault}
+                    className="hidden"
+                  />
+                </div>
+              </div>
+
+              {heroVaultToast && (
+                <div className="p-2 rounded-md bg-emerald-950/60 border border-emerald-500/50 text-emerald-200 text-[11px]">
+                  {heroVaultToast}
+                </div>
+              )}
+
+              {savedHeroes.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                  {savedHeroes.slice(0, 6).map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="rpg-card rounded-md px-2.5 py-2 flex items-center justify-between gap-2"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <TokenPortrait
+                          name={entry.character.name}
+                          imageUrl={entry.character.portraitUrl}
+                          playerColor={entry.character.playerColor || '#38bdf8'}
+                          frameStyle={entry.character.tokenFrameStyle || 'gold'}
+                          sizePx={34}
+                        />
+                        <div className="min-w-0">
+                          <div className="font-display font-bold text-xs text-amber-100 truncate">
+                            {entry.character.name}
+                          </div>
+                          <div className="text-[10px] opacity-75 truncate">
+                            Nv {entry.character.level} • {entry.originCampaignName || 'Salvo'}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => triggerHeroJsonDownload(entry.character)}
+                        className="rpg-card p-1.5 rounded text-[10px] cursor-pointer shrink-0"
+                        title="Baixar ficha (.json)"
+                      >
+                        <Download className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] opacity-70">
+                  Ao entrar na mesa, seus heróis criados serão salvos automaticamente no Cofre para usar no Desktop ou em futuras sessões online.
+                </p>
+              )}
+            </div>
           </OrnateFrame>
         </div>
       )}

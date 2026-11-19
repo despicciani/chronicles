@@ -1,13 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Flame, Heart, Shield, Sparkles, Swords, X } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
-import { formatFormulaForDisplay } from '../shared/rulesEngine';
+import { formatFormulaForDisplay, getMonsterWoundStatus } from '../shared/rulesEngine';
 import { OrnateDivider, OrnateFrame, OrnateHeaderBanner, SculptedHealthBar } from './OrnateFrame';
 import { PolyhedronShape } from './PolyhedralDiceOverlay';
 import { TokenPortrait } from './TokenPortrait';
 
 export const CombatDuelOverlay: React.FC = () => {
-  const { campaign, activeDuel, rollDuelDamage, dismissDuel } = useCampaign();
+  const { campaign, role, activeDuel, rollDuelDamage, advanceDuelPhase, dismissDuel } = useCampaign();
   const [tickNums, setTickNums] = useState<number[]>([20, 20, 8, 6]);
 
   useEffect(() => {
@@ -23,8 +23,16 @@ export const CombatDuelOverlay: React.FC = () => {
         Math.floor(Math.random() * 10) + 1,
       ]);
     }, 65);
-    return () => window.clearInterval(interval);
-  }, [activeDuel]);
+    const safetyReveal = window.setTimeout(() => {
+      advanceDuelPhase(
+        activeDuel.phase === 'rolling-attack' ? 'attack-result' : 'damage-result'
+      );
+    }, 780);
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(safetyReveal);
+    };
+  }, [activeDuel, advanceDuelPhase]);
 
   if (!activeDuel) return null;
 
@@ -40,6 +48,11 @@ export const CombatDuelOverlay: React.FC = () => {
   );
   const currentDefenderHp = liveDefenderToken ? liveDefenderToken.hp : activeDuel.defenderHpBefore;
   const isHeal = activeDuel.damageType?.toLowerCase() === 'cura';
+  const isDefenderMonster =
+    activeDuel.defenderType === 'monster' || liveDefenderToken?.type === 'monster';
+  const hideEnemyAc =
+    role !== 'gm' && isDefenderMonster && !campaign.settings.showEnemyAcToPlayers;
+  const displayedAc = hideEnemyAc ? '??' : activeDuel.defenderDefense;
 
   return (
     <div className="fixed inset-0 z-[72] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
@@ -67,6 +80,33 @@ export const CombatDuelOverlay: React.FC = () => {
         </div>
 
         <OrnateDivider />
+
+        {/* Situational Tactical Modifiers Banner (Ranged in Melee, Flanking, GM Grant, Conditions) */}
+        {activeDuel.situationalModifiers && activeDuel.situationalModifiers.length > 0 && (
+          <div className="flex flex-wrap items-center justify-center gap-1.5">
+            {activeDuel.situationalModifiers.map((badge, idx) => {
+              const isDisadv = badge.startsWith('-Desv:');
+              const isAdv = badge.startsWith('+Vant:');
+              const isAutoCrit = badge.toLowerCase().includes('crítico');
+              return (
+                <span
+                  key={idx}
+                  className={`px-2.5 py-0.5 rounded-md text-[10px] font-display font-bold border tracking-wide ${
+                    isAutoCrit
+                      ? 'bg-amber-950/85 border-amber-400/80 text-amber-200'
+                      : isDisadv
+                        ? 'bg-red-950/80 border-red-500/60 text-red-200'
+                        : isAdv
+                          ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-200'
+                          : 'bg-slate-900/85 border-amber-500/40 text-amber-100'
+                  }`}
+                >
+                  {badge}
+                </span>
+              );
+            })}
+          </div>
+        )}
 
         {/* Duelists Row: Attacker (with Lunge) vs CA Shield (with Shards/Block) vs Defender (with Ghost HP) */}
         <div className="grid grid-cols-1 md:grid-cols-11 gap-4 items-center">
@@ -164,7 +204,7 @@ export const CombatDuelOverlay: React.FC = () => {
                   Defesa CA
                 </span>
                 <span className="font-chronicle font-black text-2xl text-white leading-none drop-shadow">
-                  {activeDuel.defenderDefense}
+                  {displayedAc}
                 </span>
               </div>
             </div>
@@ -182,23 +222,42 @@ export const CombatDuelOverlay: React.FC = () => {
             />
             <div className="font-display font-bold text-sm">{activeDuel.defenderName}</div>
             <div className="w-full space-y-1.5">
-              <SculptedHealthBar
-                hp={currentDefenderHp}
-                maxHp={activeDuel.defenderMaxHp}
-                ghostOverride={activeDuel.defenderHpBefore}
-                heightClass="h-3"
-              />
-              <div className="text-xs font-mono-dice font-bold flex items-center justify-center gap-1">
-                <Heart className="w-3 h-3 text-red-400" />
-                <span>
-                  PV {currentDefenderHp} / {activeDuel.defenderMaxHp}
-                </span>
-                {isDamageResult && activeDuel.damageTotal !== undefined && (
-                  <span className={isHeal ? 'text-emerald-400' : 'text-red-400'}>
-                    ({isHeal ? `+${activeDuel.damageTotal}` : `-${activeDuel.damageTotal}`})
-                  </span>
-                )}
-              </div>
+              {hideEnemyAc ? (
+                (() => {
+                  const wound = getMonsterWoundStatus(currentDefenderHp, activeDuel.defenderMaxHp);
+                  return (
+                    <div className="rpg-socket rounded px-2.5 py-1.5 text-xs font-display font-bold flex items-center justify-center gap-1.5">
+                      <Heart className="w-3 h-3 text-red-400" />
+                      <span className={wound.colorClass}>{wound.label}</span>
+                      {isDamageResult && activeDuel.damageTotal !== undefined && (
+                        <span className={`font-mono-dice ${isHeal ? 'text-emerald-400' : 'text-red-400'}`}>
+                          ({isHeal ? `+${activeDuel.damageTotal}` : `-${activeDuel.damageTotal}`})
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()
+              ) : (
+                <>
+                  <SculptedHealthBar
+                    hp={currentDefenderHp}
+                    maxHp={activeDuel.defenderMaxHp}
+                    ghostOverride={activeDuel.defenderHpBefore}
+                    heightClass="h-3"
+                  />
+                  <div className="text-xs font-mono-dice font-bold flex items-center justify-center gap-1">
+                    <Heart className="w-3 h-3 text-red-400" />
+                    <span>
+                      PV {currentDefenderHp} / {activeDuel.defenderMaxHp}
+                    </span>
+                    {isDamageResult && activeDuel.damageTotal !== undefined && (
+                      <span className={isHeal ? 'text-emerald-400' : 'text-red-400'}>
+                        ({isHeal ? `+${activeDuel.damageTotal}` : `-${activeDuel.damageTotal}`})
+                      </span>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -234,7 +293,7 @@ export const CombatDuelOverlay: React.FC = () => {
                     >
                       {activeDuel.attackTotal}
                     </span>
-                    <span className="text-sm opacity-75">vs CA {activeDuel.defenderDefense}</span>
+                    <span className="text-sm opacity-75">vs CA {displayedAc}</span>
                   </div>
 
                   {activeDuel.hitSuccess ? (
@@ -243,7 +302,7 @@ export const CombatDuelOverlay: React.FC = () => {
                         <Flame className="w-4 h-4 text-amber-400" />
                         {activeDuel.isCrit
                           ? 'ACERTO CRÍTICO! (Dados de dano dobrados!)'
-                          : `ACERTOU! Superou a CA ${activeDuel.defenderDefense}!`}
+                          : `ACERTOU! Superou a CA ${displayedAc}!`}
                       </div>
                       {activeDuel.damageFormula ? (
                         <div>
@@ -270,7 +329,7 @@ export const CombatDuelOverlay: React.FC = () => {
                     <div className="space-y-2.5">
                       <div className="inline-flex items-center gap-2 px-4 py-1 rounded-md bg-slate-900/80 border border-sky-400/50 text-sky-200 font-display font-bold text-xs tracking-wider">
                         <Shield className="w-4 h-4 text-sky-400" />
-                        BLOQUEADO PELA DEFESA (CA {activeDuel.defenderDefense})!
+                        BLOQUEADO PELA DEFESA (CA {displayedAc})!
                       </div>
                       <div>
                         <button

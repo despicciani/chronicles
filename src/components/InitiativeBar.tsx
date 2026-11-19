@@ -7,14 +7,12 @@ import {
   Eye,
   EyeOff,
   Music,
-  Play,
   RotateCcw,
   Square,
   Trash2,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
-import { computeCharacterStats } from '../shared/rulesEngine';
-import { Combatant, InitiativeCeremonyEntry } from '../shared/types';
+import { getMonsterWoundStatus } from '../shared/rulesEngine';
 import { SculptedHealthBar } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
 
@@ -26,112 +24,14 @@ export const InitiativeBar: React.FC = () => {
     updateCampaign,
     sendRoll,
     playCharacterTheme,
-    showInitiativeCeremony,
     triggerOpportunityPrompt,
+    startCombatFromMap,
   } = useCampaign();
   const { combat, maps, activeMapId, characters, compendium } = campaign;
   const activeMap = maps.find((m) => m.id === activeMapId);
 
-  const startCombatFromMap = () => {
-    const tokens = activeMap?.tokens || [];
-    const ceremonyEntries: InitiativeCeremonyEntry[] = [];
-
-    const combatants: Combatant[] = tokens.map((tok) => {
-      let initBonus = 1;
-      let speedMeters = 9;
-      let portraitUrl = tok.imageUrl;
-      let frameStyle = tok.frameStyle;
-      let tokColor = tok.color;
-
-      if (tok.type === 'character' && tok.referenceId) {
-        const ch = characters.find((c) => c.id === tok.referenceId);
-        if (ch) {
-          const stats = computeCharacterStats(ch, campaign);
-          initBonus = stats.initiative;
-          speedMeters = stats.speed || 9;
-          portraitUrl = ch.portraitUrl || portraitUrl;
-          frameStyle = ch.tokenFrameStyle || frameStyle;
-          tokColor = ch.playerColor || ch.tokenColor;
-        }
-      } else if (tok.type === 'monster' && tok.referenceId) {
-        const mon = compendium.monsters.find((m) => m.id === tok.referenceId);
-        if (mon) {
-          initBonus = mon.initiativeBonus;
-          speedMeters = mon.speed || 9;
-        }
-      }
-      const d20 = Math.floor(Math.random() * 20) + 1;
-      const total = d20 + initBonus;
-
-      if (!tok.isHidden) {
-        ceremonyEntries.push({
-          id: `cer-${tok.id}`,
-          name: tok.name,
-          type: tok.type === 'character' ? 'character' : 'monster',
-          color: tokColor,
-          imageUrl: portraitUrl,
-          frameStyle,
-          d20Roll: d20,
-          bonus: initBonus,
-          total,
-        });
-      }
-
-      return {
-        id: `comb-${tok.id}`,
-        tokenId: tok.id,
-        referenceId: tok.referenceId,
-        type: tok.type === 'character' ? 'character' : 'monster',
-        name: tok.name,
-        initiative: total,
-        hp: tok.hp,
-        maxHp: tok.maxHp,
-        defense: tok.defense,
-        speedMeters,
-        remainingMoveMeters: speedMeters,
-        actionAvailable: true,
-        bonusActionAvailable: true,
-        reactionAvailable: true,
-        disengaged: false,
-        dodging: false,
-        isHidden: tok.isHidden,
-        color: tokColor,
-        effects: [],
-      };
-    });
-
-    combatants.sort((a, b) => b.initiative - a.initiative);
-
-    updateCampaign((prev) => ({
-      ...prev,
-      combat: {
-        active: true,
-        round: 1,
-        currentTurnIndex: 0,
-        combatants,
-      },
-    }));
-
-    if (ceremonyEntries.length > 0) {
-      showInitiativeCeremony({
-        id: `init-${Date.now()}`,
-        entries: ceremonyEntries,
-      });
-    }
-
-    sendRoll({
-      rollerName: 'Combate',
-      rollerRole: 'gm',
-      title: 'Iniciativa Rolada!',
-      formula: `${combatants.length} combatentes`,
-      individualRolls: combatants.map((c) => `${c.name}: ${c.initiative}`),
-      total: combatants[0]?.initiative ?? 0,
-      isSecret: false,
-      details: combatants.map((c, idx) => `${idx + 1}º ${c.name} (${c.initiative})`).join(' → '),
-    });
-  };
-
   const endCombat = () => {
+    triggerOpportunityPrompt(null);
     updateCampaign((prev) => ({
       ...prev,
       combat: {
@@ -283,19 +183,8 @@ export const InitiativeBar: React.FC = () => {
   };
 
   if (!combat.active) {
-    if (role !== 'gm') return null;
-    return (
-      <div className="fixed top-16 left-4 z-25 pointer-events-auto">
-        <button
-          onClick={startCombatFromMap}
-          className="rpg-btn-crimson px-3.5 py-1.5 rounded-md text-xs flex items-center gap-1.5 cursor-pointer shadow-xl"
-          title="Puxar tokens do mapa e iniciar ordem de turnos"
-        >
-          <Play className="w-3.5 h-3.5" />
-          Iniciar Combate
-        </button>
-      </div>
-    );
+    // Iniciar Combate now lives cleanly inline inside the StageCanvas toolbar (zero overlap!)
+    return null;
   }
 
   const visibleCombatants = combat.combatants.filter((c) => role === 'gm' || !c.isHidden);
@@ -427,8 +316,8 @@ export const InitiativeBar: React.FC = () => {
                 )}
               </div>
 
-              {/* Sculpted HP Bar with Ghost Drain */}
-              {(role === 'gm' || cb.type === 'character') && (
+              {/* Sculpted HP Bar with Ghost Drain (Exact numbers for GM & Characters; qualitative status for Monsters when hidden) */}
+              {role === 'gm' || cb.type === 'character' ? (
                 <div className="mt-1.5">
                   <SculptedHealthBar hp={cb.hp} maxHp={cb.maxHp} heightClass="h-1.5" />
                   <div className="flex items-center justify-between text-[10px] mt-0.5 font-mono-dice" style={{ color: 'var(--text-secondary)' }}>
@@ -436,6 +325,19 @@ export const InitiativeBar: React.FC = () => {
                     <span>CA {cb.defense}</span>
                   </div>
                 </div>
+              ) : (
+                (() => {
+                  const wound = getMonsterWoundStatus(cb.hp, cb.maxHp);
+                  const showAc = Boolean(campaign.settings.showEnemyAcToPlayers);
+                  return (
+                    <div className="mt-1.5 flex items-center justify-between text-[10px] font-display">
+                      <span className={`font-bold ${wound.colorClass}`}>{wound.label}</span>
+                      <span className="font-mono-dice opacity-75">
+                        CA {showAc ? cb.defense : '??'}
+                      </span>
+                    </div>
+                  );
+                })()
               )}
 
               {/* Faceted Diamond Action Economy Gems */}

@@ -227,6 +227,58 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
         <div className="flex-1 overflow-y-auto p-4 min-h-0">
           {tab === 'party' && (
             <div className="space-y-4">
+              {/* Tactical Combat Rules Toggles */}
+              <div className="rpg-glass-panel rounded-lg p-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div>
+                  <div className="font-display font-bold text-xs text-amber-200">
+                    Regras Táticas da Campanha (D&amp;D 5e)
+                  </div>
+                  <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                    Desvantagem à distância colado (1,5m), Condições automáticas e Resistências já estão ativas.
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...prev.settings,
+                          enableFlanking: !(prev.settings.enableFlanking ?? true),
+                        },
+                      }))
+                    }
+                    className={`px-3 py-1.5 rounded-md font-display font-bold text-[11px] border cursor-pointer transition ${
+                      (campaign.settings.enableFlanking ?? true)
+                        ? 'bg-emerald-950/85 border-emerald-400/70 text-emerald-200'
+                        : 'rpg-card opacity-75'
+                    }`}
+                  >
+                    Flanqueamento: {(campaign.settings.enableFlanking ?? true) ? 'Ligado (Vantagem)' : 'Desligado'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...prev.settings,
+                          showEnemyAcToPlayers: !prev.settings.showEnemyAcToPlayers,
+                        },
+                      }))
+                    }
+                    className={`px-3 py-1.5 rounded-md font-display font-bold text-[11px] border cursor-pointer transition ${
+                      campaign.settings.showEnemyAcToPlayers
+                        ? 'bg-amber-950/85 border-amber-400/70 text-amber-200'
+                        : 'rpg-card opacity-85'
+                    }`}
+                  >
+                    CA dos Inimigos: {campaign.settings.showEnemyAcToPlayers ? 'Visível' : 'Oculta (??)'}
+                  </button>
+                </div>
+              </div>
+
               {/* "O Mestre Pede um Teste!" (#1) */}
               <div className="rpg-glass-panel rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
                 <div className="flex items-center gap-2">

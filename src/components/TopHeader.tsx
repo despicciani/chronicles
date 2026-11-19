@@ -13,8 +13,10 @@ import {
   Shield,
   Sun,
   Swords,
+  Undo2,
   Upload,
   User,
+  Users,
   Volume2,
   Wifi,
   WifiOff,
@@ -22,6 +24,8 @@ import {
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import { PLAYER_COLOR_PALETTE } from '../shared/rulesEngine';
+import { DraggablePanel, DragGripBadge } from './DraggablePanel';
+import { OrnateFrame } from './OrnateFrame';
 
 export type ActiveModalType =
   | null
@@ -42,6 +46,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
     setInLobby,
     isConnected,
     connectedClients,
+    connectedPlayers,
     serverUrl,
     setServerUrl,
     networkAddresses,
@@ -60,10 +65,14 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
     activeAmbientName,
     resetCampaign,
     importCampaign,
+    canUndo,
+    undoCount,
+    undoLastAction,
   } = useCampaign();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
+  const [showOnlineRoster, setShowOnlineRoster] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [remoteInput, setRemoteInput] = useState(serverUrl);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -291,6 +300,19 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
             )}
           </div>
 
+          {/* GM Quick Undo (Ctrl+Z) */}
+          {role === 'gm' && (
+            <button
+              onClick={undoLastAction}
+              disabled={!canUndo}
+              className="rpg-card px-2 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer hover:border-amber-400/60 disabled:opacity-35 disabled:cursor-not-allowed"
+              title={`Desfazer última ação do Mestre (Ctrl+Z)${undoCount > 0 ? ` — ${undoCount} no histórico` : ''}`}
+            >
+              <Undo2 className="w-3.5 h-3.5 text-amber-300" />
+              <span className="hidden lg:inline">Desfazer</span>
+            </button>
+          )}
+
           {/* Dual Theme Switcher */}
           <button
             onClick={() => setTheme(theme === 'dark-fantasy' ? 'bright-fantasy' : 'dark-fantasy')}
@@ -342,6 +364,20 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
             )}
           </div>
 
+          {/* Online Players Roster Toggle Button */}
+          <button
+            onClick={() => setShowOnlineRoster((v) => !v)}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-display font-bold cursor-pointer transition ${
+              showOnlineRoster ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
+            }`}
+            title="Mostrar/Ocultar lista de todos os jogadores online e conectados"
+          >
+            <Users className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden md:inline">
+              Online ({connectedPlayers.length || connectedClients})
+            </span>
+          </button>
+
           {/* Room / Invite Modal Trigger */}
           <button
             onClick={() => {
@@ -356,15 +392,106 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
             ) : (
               <WifiOff className="w-3.5 h-3.5 text-amber-400" />
             )}
-            <span className="hidden sm:inline">Sala ({connectedClients})</span>
+            <span className="hidden sm:inline">Convidar</span>
           </button>
         </div>
       </header>
 
+      {/* Draggable Floating Online Players Roster Panel */}
+      {showOnlineRoster && (
+        <DraggablePanel
+          storageKey="online-players-panel"
+          className="fixed top-16 right-4 z-45 w-72 pointer-events-auto"
+        >
+          <OrnateFrame
+            accentColor="#10b981"
+            cornerSize={14}
+            className="rpg-glass-panel rounded-lg p-3 space-y-2.5 text-xs shadow-[0_18px_48px_rgba(0,0,0,0.92)]"
+          >
+            <div
+              className="flex items-center justify-between gap-2 border-b pb-2"
+              style={{ borderColor: 'var(--border-subtle)' }}
+            >
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <span className="font-display font-bold text-xs uppercase tracking-wider text-emerald-300 truncate">
+                  Jogadores Online ({connectedPlayers.length || connectedClients})
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <DragGripBadge />
+                <button
+                  onClick={() => setShowOnlineRoster(false)}
+                  className="rpg-card p-1 rounded cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 max-h-64 overflow-y-auto">
+              {connectedPlayers.length === 0 ? (
+                <div className="text-[11px] font-lore italic opacity-75 py-2 text-center">
+                  Conectado localmente ({connectedClients} na sala).
+                </div>
+              ) : (
+                connectedPlayers.map((plr) => (
+                  <div
+                    key={plr.socketId}
+                    onClick={() => {
+                      if (role === 'gm' && plr.characterId) {
+                        setActiveCharacterId(plr.characterId);
+                      }
+                    }}
+                    className={`rpg-card rounded-md px-2.5 py-2 flex items-center justify-between gap-2 ${
+                      role === 'gm' && plr.characterId ? 'cursor-pointer hover:border-amber-400/60' : ''
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className="w-3 h-3 rounded-full border border-white/70 shrink-0"
+                        style={{
+                          backgroundColor: plr.playerColor,
+                          boxShadow: `0 0 8px ${plr.playerColor}`,
+                        }}
+                      />
+                      <div className="min-w-0">
+                        <div className="font-display font-bold text-xs text-amber-100 truncate">
+                          {plr.playerName}
+                        </div>
+                        <div className="text-[10px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                          {plr.role === 'gm'
+                            ? 'Mestre da Mesa'
+                            : plr.characterName
+                              ? `Herói: ${plr.characterName}`
+                              : 'Criando Personagem...'}
+                        </div>
+                      </div>
+                    </div>
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-display font-bold shrink-0 ${
+                        plr.role === 'gm'
+                          ? 'bg-amber-500/20 border border-amber-400/50 text-amber-200'
+                          : 'bg-emerald-950/75 border border-emerald-500/40 text-emerald-200'
+                      }`}
+                    >
+                      {plr.role === 'gm' ? 'Mestre' : 'Online'}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </OrnateFrame>
+        </DraggablePanel>
+      )}
+
       {/* Network / Friendly Room Code Modal */}
       {showNetworkModal && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="rpg-glass-panel rounded-2xl max-w-lg w-full p-5 space-y-4 text-xs">
+          <DraggablePanel
+            storageKey="network-invite-modal"
+            className="rpg-glass-panel rounded-2xl max-w-lg w-full p-5 space-y-4 text-xs"
+          >
             <div className="flex items-center justify-between border-b pb-3" style={{ borderColor: 'var(--border-subtle)' }}>
               <div className="flex items-center gap-2">
                 <Globe className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
@@ -495,7 +622,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
                 </button>
               </div>
             </div>
-          </div>
+          </DraggablePanel>
         </div>
       )}
     </>

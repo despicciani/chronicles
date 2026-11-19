@@ -11,28 +11,38 @@ import { Tunnel, bin as cloudflaredBin, install as installCloudflared } from 'cl
 import { createBlankCampaign, createStarterCampaign } from '../src/shared/starterSeed';
 import {
   computeCharacterStats,
+  computeConcentrationDc,
   encodeRoomCode,
   evaluateFormula,
+  normalizeHeroCharacter,
+  resolveDamageWithAffinities,
+  syncCampaignDerivedCharacterStats,
 } from '../src/shared/rulesEngine';
 import {
   BossBannerState,
   CampaignState,
   CampaignSummary,
   CardRewardNotification,
+  Character,
+  ChatMessageEntry,
   CombatDuelState,
+  ConnectedPlayerInfo,
   HandoutPayload,
   InitiativeCeremonyState,
   MapPointerState,
   OpportunityAttackPrompt,
   PlayerRequest,
   RollLogEntry,
+  SavedHeroEntry,
   SkillCheckRequest,
+  TacticalSavePrompt,
 } from '../src/shared/types';
 
 const PORT = Number(process.env.PORT || 3001);
 const DISCOVERY_UDP_PORT = Number(process.env.DISCOVERY_UDP_PORT || 3002);
 const DATA_DIR = path.resolve(process.cwd(), 'server', 'data');
 const CAMPAIGNS_DIR = path.join(DATA_DIR, 'campaigns');
+const CHARACTERS_DIR = path.join(DATA_DIR, 'characters');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const LEGACY_DATA_FILE = path.join(DATA_DIR, 'campaign-state.json');
 const ACTIVE_ID_FILE = path.join(DATA_DIR, 'active-campaign.txt');
@@ -41,8 +51,10 @@ const DIST_DIR = path.resolve(process.cwd(), 'dist');
 let campaignState: CampaignState = createStarterCampaign();
 let saveQueue: Promise<void> = Promise.resolve();
 let activeSkillCheck: SkillCheckRequest | null = null;
+let activeSavePrompt: TacticalSavePrompt | null = null;
 let pendingRequests: PlayerRequest[] = [];
 const activePointers = new Map<string, MapPointerState>();
+const connectedPlayers = new Map<string, ConnectedPlayerInfo>();
 
 function getLocalNetworkAddresses(): Array<{
   name: string;
@@ -73,8 +85,118 @@ function getCampaignFilePath(id: string): string {
   return path.join(CAMPAIGNS_DIR, `${safeId}.json`);
 }
 
+function getSavedHeroFilePath(id: string): string {
+  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(CHARACTERS_DIR, `${safeId}.json`);
+}
+
+function isExternalTunnelRequest(req: express.Request): boolean {
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').toLowerCase();
+  return Boolean(
+    req.headers['cf-ray'] ||
+      req.headers['cf-connecting-ip'] ||
+      host.includes('trycloudflare.com')
+  );
+}
+
+async function listSavedCharacters(): Promise<SavedHeroEntry[]> {
+  await fs.mkdir(CHARACTERS_DIR, { recursive: true });
+  const files = await fs.readdir(CHARACTERS_DIR);
+  const entries: SavedHeroEntry[] = [];
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    try {
+      const raw = await fs.readFile(path.join(CHARACTERS_DIR, file), 'utf-8');
+      const parsed = JSON.parse(raw) as SavedHeroEntry;
+      if (parsed?.id && parsed?.character?.name) {
+        entries.push(parsed);
+      }
+    } catch {
+      // skip invalid file
+    }
+  }
+  entries.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  return entries;
+}
+
+async function upsertSavedCharacter(
+  char: Character,
+  meta?: { originCampaignId?: string; originCampaignName?: string }
+): Promise<SavedHeroEntry> {
+  await fs.mkdir(CHARACTERS_DIR, { recursive: true });
+  const vaultId = (char.vaultId || char.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const now = new Date().toISOString();
+  const targetFile = getSavedHeroFilePath(vaultId);
+
+  let existingSavedAt = now;
+  let existingCampId = meta?.originCampaignId;
+  let existingCampName = meta?.originCampaignName;
+  try {
+    const prevRaw = await fs.readFile(targetFile, 'utf-8');
+    const prev = JSON.parse(prevRaw) as SavedHeroEntry;
+    if (prev.savedAt) existingSavedAt = prev.savedAt;
+    if (!existingCampId) existingCampId = prev.originCampaignId;
+    if (!existingCampName) existingCampName = prev.originCampaignName;
+  } catch {
+    // brand new entry
+  }
+
+  const normalizedChar = normalizeHeroCharacter(
+    { ...char, vaultId, lastSyncedAt: now },
+    campaignState
+  );
+  const entry: SavedHeroEntry = {
+    id: vaultId,
+    character: normalizedChar,
+    savedAt: existingSavedAt,
+    updatedAt: now,
+    originCampaignId: existingCampId || campaignState.id,
+    originCampaignName: existingCampName || campaignState.name,
+  };
+  const tmpFile = `${targetFile}.tmp`;
+  await fs.writeFile(tmpFile, JSON.stringify(entry, null, 2), 'utf-8');
+  await fs.rename(tmpFile, targetFile);
+  return entry;
+}
+
+async function syncVaultLinkedCharactersToDisk(camp: CampaignState): Promise<boolean> {
+  await fs.mkdir(CHARACTERS_DIR, { recursive: true });
+  const existingFiles = new Set((await fs.readdir(CHARACTERS_DIR)).filter((f) => f.endsWith('.json')));
+  let changed = false;
+
+  for (const ch of camp.characters || []) {
+    const safeVault = (ch.vaultId || ch.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const hasVaultFile = existingFiles.has(`${safeVault}.json`);
+    if (ch.vaultId || hasVaultFile) {
+      await upsertSavedCharacter(ch, {
+        originCampaignId: camp.id,
+        originCampaignName: camp.name,
+      });
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function normalizeCampaign(c: CampaignState): CampaignState {
-  return {
+  const existingConds = c.compendium?.conditions || [];
+  const hasParalyzed = existingConds.some((cd) => cd.id === 'cond-paralisado');
+  const nextConds = hasParalyzed
+    ? existingConds
+    : [
+        ...existingConds,
+        {
+          id: 'cond-paralisado',
+          name: 'Paralisado',
+          color: '#f97316',
+          icon: '⚡',
+          description:
+            'Incapacitado: ataques contra você têm Vantagem e acertos a 1,5m são Crítico automático.',
+          modifiers: [{ target: 'speed' as const, value: -9, label: 'Paralisado' }],
+        },
+      ];
+
+  const normalized: CampaignState = {
     ...c,
     coverUrl: c.coverUrl || '',
     gmName: c.gmName || 'Mestre',
@@ -83,12 +205,20 @@ function normalizeCampaign(c: CampaignState): CampaignState {
       ...c.settings,
       attributePointBudget: c.settings?.attributePointBudget ?? 15,
       maxTrainedSkills: c.settings?.maxTrainedSkills ?? 4,
+      showEnemyAcToPlayers: c.settings?.showEnemyAcToPlayers ?? false,
+      enableFlanking: c.settings?.enableFlanking ?? true,
+    },
+    compendium: {
+      ...c.compendium,
+      conditions: nextConds,
     },
     customMusicTracks: Array.isArray(c.customMusicTracks) ? c.customMusicTracks : [],
+    chatLog: Array.isArray(c.chatLog) ? c.chatLog : [],
     activeBoss: c.activeBoss ?? null,
     maps: (c.maps || []).map((m) => ({
       ...m,
       gmMarkers: Array.isArray(m.gmMarkers) ? m.gmMarkers : [],
+      terrainCells: m.terrainCells && typeof m.terrainCells === 'object' ? m.terrainCells : {},
     })),
     characters: (c.characters || []).map((ch) => ({
       ...ch,
@@ -97,6 +227,9 @@ function normalizeCampaign(c: CampaignState): CampaignState {
       diceSkin: ch.diceSkin || 'gold',
       customAttacks: Array.isArray(ch.customAttacks) ? ch.customAttacks : [],
       customAbilities: Array.isArray(ch.customAbilities) ? ch.customAbilities : [],
+      damageResistances: Array.isArray(ch.damageResistances) ? ch.damageResistances : [],
+      damageImmunities: Array.isArray(ch.damageImmunities) ? ch.damageImmunities : [],
+      damageVulnerabilities: Array.isArray(ch.damageVulnerabilities) ? ch.damageVulnerabilities : [],
       deathSaves: ch.deathSaves || { successes: 0, failures: 0 },
     })),
     combat: c.combat
@@ -115,6 +248,7 @@ function normalizeCampaign(c: CampaignState): CampaignState {
         }
       : { active: false, round: 1, currentTurnIndex: 0, combatants: [] },
   };
+  return syncCampaignDerivedCharacterStats(normalized);
 }
 
 async function listSavedCampaigns(): Promise<CampaignSummary[]> {
@@ -147,6 +281,7 @@ async function listSavedCampaigns(): Promise<CampaignSummary[]> {
 
 async function ensureDataLoaded() {
   await fs.mkdir(CAMPAIGNS_DIR, { recursive: true });
+  await fs.mkdir(CHARACTERS_DIR, { recursive: true });
   await fs.mkdir(UPLOADS_DIR, { recursive: true });
 
   // Migrate legacy single file if campaigns directory is empty
@@ -187,12 +322,22 @@ async function ensureDataLoaded() {
 function persistState(): Promise<void> {
   campaignState.updatedAt = new Date().toISOString();
   const targetFile = getCampaignFilePath(campaignState.id);
+  const snapshot = campaignState;
   saveQueue = saveQueue.then(async () => {
     await fs.mkdir(CAMPAIGNS_DIR, { recursive: true });
     const tmpFile = `${targetFile}.tmp`;
-    await fs.writeFile(tmpFile, JSON.stringify(campaignState, null, 2), 'utf-8');
+    await fs.writeFile(tmpFile, JSON.stringify(snapshot, null, 2), 'utf-8');
     await fs.rename(tmpFile, targetFile);
-    await fs.writeFile(ACTIVE_ID_FILE, campaignState.id, 'utf-8');
+    await fs.writeFile(ACTIVE_ID_FILE, snapshot.id, 'utf-8');
+    try {
+      const vaultSynced = await syncVaultLinkedCharactersToDisk(snapshot);
+      if (vaultSynced && io.engine.clientsCount > 0) {
+        const list = await listSavedCharacters();
+        io.emit('characters:saved-updated', list);
+      }
+    } catch {
+      // non-fatal vault sync error
+    }
   });
   return saveQueue;
 }
@@ -409,10 +554,31 @@ function startUdpBeaconResponder() {
   }
 }
 
-app.get('/api/discover-rooms', async (_req, res) => {
-  const discovered = new Map<
+app.get('/api/discover-rooms', async (req, res) => {
+  // When a player opens the online link (Cloudflare Tunnel), show ONLY the single hosted campaign
+  if (isExternalTunnelRequest(req)) {
+    res.json({
+      rooms: [
+        {
+          campaignId: campaignState.id,
+          url: '',
+          roomCode: 'MESA-ONLINE',
+          campaignName: campaignState.name,
+          gmName: campaignState.gmName || 'Mestre',
+          coverUrl: campaignState.coverUrl || '',
+          characterCount: campaignState.characters.length,
+          isLocal: true,
+        },
+      ],
+    });
+    return;
+  }
+
+  // Deduplicate by campaignId so multiple network adapters (Loopback, Wi-Fi, Radmin) never create 3 duplicate cards
+  const discoveredByCampaign = new Map<
     string,
     {
+      campaignId: string;
       url: string;
       roomCode: string;
       campaignName: string;
@@ -423,8 +589,9 @@ app.get('/api/discover-rooms', async (_req, res) => {
     }
   >();
 
-  // Always include local loopback room if running
-  discovered.set(`http://127.0.0.1:${PORT}`, {
+  // Always include local loopback room for this host's active campaign
+  discoveredByCampaign.set(campaignState.id, {
+    campaignId: campaignState.id,
     url: `http://127.0.0.1:${PORT}`,
     roomCode: encodeRoomCode('127.0.0.1', PORT),
     campaignName: campaignState.name,
@@ -442,15 +609,22 @@ app.get('/api/discover-rooms', async (_req, res) => {
       try {
         const data = JSON.parse(msg.toString());
         if (data.type === 'RPG_OFFER') {
+          const cid = String(data.campaignId || `${rinfo.address}:${data.port || PORT}`);
+          const isLocalHost =
+            cid === campaignState.id ||
+            localIps.has(rinfo.address) ||
+            rinfo.address === '127.0.0.1';
+          if (discoveredByCampaign.has(cid)) return;
           const url = `http://${rinfo.address}:${data.port || PORT}`;
-          discovered.set(url, {
+          discoveredByCampaign.set(cid, {
+            campaignId: cid,
             url,
             roomCode: encodeRoomCode(rinfo.address, data.port || PORT),
             campaignName: data.campaignName,
             gmName: data.gmName || 'Mestre',
             coverUrl: data.coverUrl || '',
             characterCount: data.characterCount || 0,
-            isLocal: localIps.has(rinfo.address) || rinfo.address === '127.0.0.1',
+            isLocal: isLocalHost,
           });
         }
       } catch {
@@ -486,12 +660,29 @@ app.get('/api/discover-rooms', async (_req, res) => {
     });
   });
 
-  res.json({ rooms: Array.from(discovered.values()) });
+  res.json({ rooms: Array.from(discoveredByCampaign.values()) });
 });
 
 // Multi-Campaign Management
-app.get('/api/campaigns', async (_req, res) => {
+app.get('/api/campaigns', async (req, res) => {
   try {
+    if (isExternalTunnelRequest(req)) {
+      res.json({
+        activeId: campaignState.id,
+        campaigns: [
+          {
+            id: campaignState.id,
+            name: campaignState.name,
+            description: campaignState.description || '',
+            coverUrl: campaignState.coverUrl || '',
+            gmName: campaignState.gmName || 'Mestre',
+            updatedAt: campaignState.updatedAt || new Date().toISOString(),
+            characterCount: campaignState.characters.length,
+          },
+        ],
+      });
+      return;
+    }
     const list = await listSavedCampaigns();
     res.json({ activeId: campaignState.id, campaigns: list });
   } catch (err) {
@@ -500,6 +691,10 @@ app.get('/api/campaigns', async (_req, res) => {
 });
 
 app.post('/api/campaigns/create', async (req, res) => {
+  if (isExternalTunnelRequest(req)) {
+    res.status(403).json({ error: 'Apenas o anfitrião local pode criar novas campanhas.' });
+    return;
+  }
   try {
     const { name, description, coverUrl, gmName, attributePointBudget, maxTrainedSkills } =
       req.body as {
@@ -531,6 +726,10 @@ app.post('/api/campaigns/create', async (req, res) => {
 });
 
 app.post('/api/campaigns/load/:id', async (req, res) => {
+  if (isExternalTunnelRequest(req)) {
+    res.status(403).json({ error: 'Apenas o anfitrião local pode trocar de campanha.' });
+    return;
+  }
   try {
     const file = getCampaignFilePath(req.params.id);
     const raw = await fs.readFile(file, 'utf-8');
@@ -545,6 +744,10 @@ app.post('/api/campaigns/load/:id', async (req, res) => {
 });
 
 app.delete('/api/campaigns/:id', async (req, res) => {
+  if (isExternalTunnelRequest(req)) {
+    res.status(403).json({ error: 'Apenas o anfitrião local pode excluir campanhas salvas.' });
+    return;
+  }
   try {
     const targetId = req.params.id;
     const file = getCampaignFilePath(targetId);
@@ -636,6 +839,55 @@ app.post('/api/campaign/import', async (req, res) => {
   }
 });
 
+// Character Vault (Persistent Desktop + Online Sync)
+app.get('/api/characters/saved', async (_req, res) => {
+  try {
+    const list = await listSavedCharacters();
+    res.json({ characters: list });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post('/api/characters/save', async (req, res) => {
+  try {
+    const { character, originCampaignId, originCampaignName } = req.body as {
+      character: Character;
+      originCampaignId?: string;
+      originCampaignName?: string;
+    };
+    if (!character || !character.name) {
+      res.status(400).json({ error: 'Dados de personagem inválidos.' });
+      return;
+    }
+    const entry = await upsertSavedCharacter(character, {
+      originCampaignId,
+      originCampaignName,
+    });
+    const list = await listSavedCharacters();
+    io.emit('characters:saved-updated', list);
+    res.json({ ok: true, entry, characters: list });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.delete('/api/characters/saved/:id', async (req, res) => {
+  try {
+    const targetFile = getSavedHeroFilePath(req.params.id);
+    try {
+      await fs.unlink(targetFile);
+    } catch {
+      // ignore if already deleted
+    }
+    const list = await listSavedCharacters();
+    io.emit('characters:saved-updated', list);
+    res.json({ ok: true, characters: list });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // Serve production static files for Desktop Mode and direct IP connections
 if (fsSync.existsSync(DIST_DIR)) {
   app.use(express.static(DIST_DIR));
@@ -655,13 +907,37 @@ if (fsSync.existsSync(DIST_DIR)) {
 
 io.on('connection', (socket) => {
   socket.emit('campaign:updated', campaignState);
+  listSavedCharacters()
+    .then((list) => socket.emit('characters:saved-updated', list))
+    .catch(() => {});
   if (activeSkillCheck) {
     socket.emit('check:updated', activeSkillCheck);
+  }
+  if (activeSavePrompt) {
+    socket.emit('save-prompt:updated', activeSavePrompt);
   }
   socket.emit('request:list', pendingRequests);
   socket.emit('pointer:bulk', Array.from(activePointers.values()));
   socket.emit('tunnel:status', publicTunnelState);
+  socket.emit('presence:list', Array.from(connectedPlayers.values()));
   io.emit('presence:count', io.engine.clientsCount);
+
+  socket.on(
+    'presence:identify',
+    (info: Omit<ConnectedPlayerInfo, 'socketId'>) => {
+      if (!info || !info.playerId) return;
+      connectedPlayers.set(socket.id, {
+        socketId: socket.id,
+        playerId: info.playerId,
+        playerName: info.playerName || 'Aventureiro',
+        playerColor: info.playerColor || '#f59e0b',
+        role: info.role === 'gm' ? 'gm' : 'player',
+        characterId: info.characterId,
+        characterName: info.characterName,
+      });
+      io.emit('presence:list', Array.from(connectedPlayers.values()));
+    }
+  );
 
   socket.on('campaign:patch', async (nextState: CampaignState) => {
     if (!nextState || !nextState.compendium) return;
@@ -682,12 +958,48 @@ io.on('connection', (socket) => {
 
   socket.on(
     'combat:apply-damage',
-    async (payload: { targetTokenId: string; amount: number; isHeal?: boolean; rollId?: string }) => {
-      const { targetTokenId, amount, isHeal, rollId } = payload;
-      const delta = isHeal ? Math.abs(amount) : -Math.abs(amount);
+    async (payload: {
+      targetTokenId: string;
+      amount: number;
+      isHeal?: boolean;
+      rollId?: string;
+      damageType?: string;
+    }) => {
+      const { targetTokenId, amount, isHeal, rollId, damageType } = payload;
 
-      let matchedRefId: string | undefined;
-      let targetName = 'Alvo';
+      // Locate target token/character/monster to resolve Damage Resistances / Immunities / Vulnerabilities
+      let foundToken = campaignState.maps
+        .flatMap((m) => m.tokens)
+        .find((t) => t.id === targetTokenId);
+      let matchedRefId: string | undefined = foundToken?.referenceId;
+      let targetName = foundToken?.name || 'Alvo';
+
+      const targetChar = campaignState.characters.find(
+        (c) => c.id === matchedRefId || c.id === targetTokenId
+      );
+      const targetMonster =
+        foundToken?.type === 'monster' && matchedRefId
+          ? campaignState.compendium.monsters.find((mon) => mon.id === matchedRefId)
+          : undefined;
+
+      let effectiveAmount = Math.abs(amount);
+      let affinityNote: string | undefined;
+
+      if (!isHeal && damageType) {
+        const res = resolveDamageWithAffinities(effectiveAmount, damageType, {
+          immunities: targetChar?.damageImmunities || targetMonster?.damageImmunities,
+          resistances: targetChar?.damageResistances || targetMonster?.damageResistances,
+          vulnerabilities: targetChar?.damageVulnerabilities || targetMonster?.damageVulnerabilities,
+          activeConditionIds: [
+            ...(foundToken?.activeConditionIds || []),
+            ...(targetChar?.activeConditionIds || []),
+          ],
+        });
+        effectiveAmount = res.finalAmount;
+        affinityNote = res.modifierLabel;
+      }
+
+      const delta = isHeal ? effectiveAmount : -effectiveAmount;
 
       const updatedMaps = campaignState.maps.map((m) => ({
         ...m,
@@ -709,7 +1021,7 @@ io.on('connection', (socket) => {
 
         if (nextHp > 0) {
           nextDeathSaves = { successes: 0, failures: 0, stabilized: false, dead: false };
-        } else if (!isHeal && amount > 0 && wasDown && !nextDeathSaves.dead) {
+        } else if (!isHeal && effectiveAmount > 0 && wasDown && !nextDeathSaves.dead) {
           // D&D 5e: taking damage while at 0 PV inflicts 1 Death Save failure and breaks stabilization
           const nextFails = Math.min(3, (nextDeathSaves.failures || 0) + 1);
           nextDeathSaves = {
@@ -753,13 +1065,16 @@ io.on('connection', (socket) => {
         rollerName: 'Combate',
         rollerRole: 'gm',
         title: isHeal ? `Cura Aplicada em ${targetName}` : `Dano Aplicado em ${targetName}`,
-        formula: isHeal ? `+${Math.abs(amount)} PV` : `-${Math.abs(amount)} PV`,
+        formula: isHeal ? `+${effectiveAmount} PV` : `-${effectiveAmount} PV`,
         individualRolls: [],
-        total: Math.abs(amount),
+        total: effectiveAmount,
+        damageType,
         isSecret: false,
         details: isHeal
-          ? `${targetName} recuperou ${Math.abs(amount)} Pontos de Vida.`
-          : `${targetName} sofreu ${Math.abs(amount)} de dano.`,
+          ? `${targetName} recuperou ${effectiveAmount} Pontos de Vida.`
+          : affinityNote
+            ? `${targetName} sofreu ${effectiveAmount} de dano (${affinityNote}; bruto ${Math.abs(amount)}).`
+            : `${targetName} sofreu ${effectiveAmount} de dano${damageType ? ` (${damageType})` : ''}.`,
       };
 
       campaignState = {
@@ -777,10 +1092,56 @@ io.on('connection', (socket) => {
       await persistState();
       io.emit('floating:vfx', {
         tokenId: targetTokenId,
-        amount: Math.abs(amount),
+        amount: effectiveAmount,
         isHeal: Boolean(isHeal),
+        note: affinityNote,
       });
       io.emit('campaign:updated', campaignState);
+
+      // Automatic Spell Concentration Check trigger on damage
+      if (!isHeal && effectiveAmount > 0) {
+        const updatedTargetChar = campaignState.characters.find(
+          (c) => c.id === matchedRefId || c.id === targetTokenId
+        );
+        const updatedTargetCb = campaignState.combat.combatants.find(
+          (cb) =>
+            cb.tokenId === targetTokenId ||
+            Boolean(matchedRefId && cb.referenceId === matchedRefId)
+        );
+        const concSpell =
+          updatedTargetChar?.concentratingSpell || updatedTargetCb?.concentratingSpell;
+        const stillAlive =
+          (updatedTargetChar ? updatedTargetChar.hp > 0 : true) &&
+          (updatedTargetCb ? updatedTargetCb.hp > 0 : true);
+        if (concSpell) {
+          if (!stillAlive) {
+            // Unconscious / 0 PV automatically breaks concentration
+            campaignState = {
+              ...campaignState,
+              characters: campaignState.characters.map((c) =>
+                c.id === updatedTargetChar?.id ? { ...c, concentratingSpell: null } : c
+              ),
+              combat: {
+                ...campaignState.combat,
+                combatants: campaignState.combat.combatants.map((cb) =>
+                  cb.id === updatedTargetCb?.id ? { ...cb, concentratingSpell: null } : cb
+                ),
+              },
+            };
+            await persistState();
+            io.emit('campaign:updated', campaignState);
+          } else {
+            io.emit('concentration:trigger', {
+              tokenId: targetTokenId,
+              characterId: updatedTargetChar?.id,
+              name: targetName,
+              spellName: concSpell,
+              dc: computeConcentrationDc(effectiveAmount),
+              damageTaken: effectiveAmount,
+            });
+          }
+        }
+      }
     }
   );
 
@@ -858,6 +1219,25 @@ io.on('connection', (socket) => {
 
     if (payload.approved) {
       const char = campaignState.characters.find((c) => c.id === reqItem.characterId);
+      const isDownOrDead = Boolean(
+        char &&
+          (char.hp <= 0 ||
+            char.deathSaves?.dead ||
+            (char.deathSaves?.failures || 0) >= 3)
+      );
+      if (
+        char &&
+        isDownOrDead &&
+        (reqItem.type === 'long-rest' || reqItem.type === 'short-rest' || reqItem.type === 'heal-mp')
+      ) {
+        io.emit('request:resolved', {
+          characterId: reqItem.characterId,
+          characterName: reqItem.characterName,
+          label: `${reqItem.label} bloqueado (${char.name} está caído/morto — use Reviver/Salvar)`,
+          approved: false,
+        });
+        return;
+      }
       if (char) {
         const stats = computeCharacterStats(char, campaignState);
         const charClass = campaignState.compendium.classes.find((cl) => cl.id === char.classId);
@@ -968,6 +1348,46 @@ io.on('connection', (socket) => {
     io.emit('opportunity:prompt', prompt);
   });
 
+  // Unified Hybrid Save Prompt (Traps, AoE Spells, Concentration Checks)
+  socket.on('save-prompt:update', (prompt: TacticalSavePrompt | null) => {
+    activeSavePrompt = prompt;
+    io.emit('save-prompt:updated', activeSavePrompt);
+  });
+
+  // RP Chat & Private Whispers (/w)
+  socket.on('chat:send', async (msg: ChatMessageEntry) => {
+    if (!msg || !msg.text || !msg.text.trim()) return;
+    campaignState = {
+      ...campaignState,
+      chatLog: [...(campaignState.chatLog || []), msg].slice(-150),
+    };
+    await persistState();
+
+    if (!msg.isWhisper) {
+      io.emit('chat:new', msg);
+      return;
+    }
+
+    const targetLower = (msg.recipientName || '').trim().toLowerCase();
+    for (const [sid, s] of io.sockets.sockets) {
+      if (sid === socket.id) {
+        s.emit('chat:new', msg);
+        continue;
+      }
+      const info = connectedPlayers.get(sid);
+      const isGm = info?.role === 'gm';
+      const matchesRecipient =
+        Boolean(msg.recipientPlayerId && info?.playerId === msg.recipientPlayerId) ||
+        (targetLower !== '' &&
+          ((info?.playerName || '').toLowerCase() === targetLower ||
+            (info?.characterName || '').toLowerCase() === targetLower ||
+            (targetLower === 'mestre' && isGm)));
+      if (isGm || matchesRecipient) {
+        s.emit('chat:new', msg);
+      }
+    }
+  });
+
   // Magic Card Reward Animation
   socket.on('reward:grant', (reward: CardRewardNotification) => {
     io.emit('reward:received', reward);
@@ -1002,6 +1422,8 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    connectedPlayers.delete(socket.id);
+    io.emit('presence:list', Array.from(connectedPlayers.values()));
     io.emit('presence:count', io.engine.clientsCount);
   });
 });

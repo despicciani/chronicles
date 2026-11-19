@@ -1,32 +1,41 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   ArrowUpCircle,
   Backpack,
   BookOpen,
+  Check,
   Coffee,
   Crown,
   Dices,
+  Download,
   Flame,
   Heart,
   Info,
   Moon,
   Music,
   Plus,
+  Save,
   Shield,
   Skull,
   Sparkles,
   Swords,
   Trash2,
+  Upload,
   UserPlus,
   X,
 } from 'lucide-react';
-import { useCampaign } from '../context/CampaignContext';
+import { triggerHeroJsonDownload, useCampaign } from '../context/CampaignContext';
 import {
   computeCharacterStats,
+  DAMAGE_TYPE_OPTIONS,
+  EQUIP_SLOT_LABELS,
   evaluateFormula,
+  extractItemDefenseBonus,
   formatFormulaForDisplay,
   formatSigned,
+  parseHeroPayloadFromJson,
   PLAYER_COLOR_PALETTE,
+  resolveItemEquipSlot,
 } from '../shared/rulesEngine';
 import {
   ActionEconomyCost,
@@ -37,6 +46,8 @@ import {
   DiceSkin,
   TokenFrameStyle,
 } from '../shared/types';
+import { DraggablePanel, DragGripBadge } from './DraggablePanel';
+import { EquipmentPaperdoll } from './EquipmentPaperdoll';
 import { FileUploadButton } from './FileUploadButton';
 import { FormulaBuilderInput } from './FormulaBuilderInput';
 import { OrnateFrame, SculptedHealthBar } from './OrnateFrame';
@@ -65,7 +76,15 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     grantCardReward,
     playCharacterTheme,
     sendPlayerRequest,
+    saveCharacterToVault,
+    importSavedHeroIntoCampaign,
+    savedHeroes,
+    lastSavedHeroFeedback,
+    resolveAssetUrl,
+    setCharacterConcentration,
   } = useCampaign();
+
+  const heroFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [tab, setTab] = useState<'combat' | 'abilities' | 'inventory' | 'bio'>('combat');
   const [addAbilityId, setAddAbilityId] = useState(
@@ -205,6 +224,9 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
   };
 
   const handleShortRest = () => {
+    if (character.hp <= 0 || character.deathSaves?.dead || (character.deathSaves?.failures || 0) >= 3) {
+      return;
+    }
     const healFormula = `1d${charClass?.hitDie || 8} + ${stats.attributes['con']?.mod || 0}`;
     const res = evaluateFormula(healFormula, stats, character);
     const healed = Math.max(1, res.total);
@@ -231,6 +253,9 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
   };
 
   const handleLongRest = () => {
+    if (character.hp <= 0 || character.deathSaves?.dead || (character.deathSaves?.failures || 0) >= 3) {
+      return;
+    }
     const resetUses: Record<string, number> = {};
     character.knownAbilityIds.forEach((aid) => {
       const ab = campaign.compendium.abilities.find((a) => a.id === aid);
@@ -251,6 +276,40 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
 
   const handleDeathSaveRoll = () => {
     rollDeathSave(character.id);
+  };
+
+  const toggleEquipInventoryEntry = (invId: string) => {
+    updateChar((c) => {
+      const targetInv = c.inventory.find((x) => x.id === invId);
+      if (!targetInv) return c;
+      const targetItem = campaign.compendium.items.find((i) => i.id === targetInv.itemId);
+      if (!targetItem) return c;
+      const targetSlot = targetInv.equippedSlot || resolveItemEquipSlot(targetItem);
+      if (!targetSlot) return c;
+
+      const willEquip = !targetInv.equipped;
+      return {
+        ...c,
+        inventory: c.inventory.map((x) => {
+          if (x.id === invId) {
+            return {
+              ...x,
+              equipped: willEquip,
+              equippedSlot: willEquip ? targetSlot : undefined,
+            };
+          }
+          if (willEquip && x.equipped) {
+            const otherItem = campaign.compendium.items.find((i) => i.id === x.itemId);
+            const otherSlot =
+              x.equippedSlot || (otherItem ? resolveItemEquipSlot(otherItem) : null);
+            if (otherSlot === targetSlot) {
+              return { ...x, equipped: false, equippedSlot: undefined };
+            }
+          }
+          return x;
+        }),
+      };
+    });
   };
 
   const handleForgeSubmit = (e: React.FormEvent) => {
@@ -339,10 +398,14 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 md:p-6">
-      <OrnateFrame
-        accentColor={charColor}
-        className="rpg-glass-panel rounded-lg w-full max-w-6xl h-[92vh] flex flex-col overflow-hidden animate-modal-unfurl"
+      <DraggablePanel
+        storageKey="character-sheet-modal"
+        className="w-full max-w-6xl h-[92vh] flex flex-col"
       >
+        <OrnateFrame
+          accentColor={charColor}
+          className="rpg-glass-panel rounded-lg w-full h-full flex flex-col overflow-hidden animate-modal-unfurl"
+        >
         {/* Modal Header */}
         <div
           className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-3 shrink-0"
@@ -414,7 +477,82 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <DragGripBadge label="Mover" />
+            <button
+              type="button"
+              onClick={() => saveCharacterToVault(character)}
+              className={`px-2.5 py-1.5 rounded text-xs font-display font-bold flex items-center gap-1 cursor-pointer transition border ${
+                lastSavedHeroFeedback?.id === (character.vaultId || character.id)
+                  ? 'bg-emerald-950/85 border-emerald-400/70 text-emerald-200'
+                  : 'rpg-btn-primary border-transparent'
+              }`}
+              title="Salvar e sincronizar este personagem no Cofre (Desktop + Online)"
+            >
+              {lastSavedHeroFeedback?.id === (character.vaultId || character.id) ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-300" />
+                  <span>Salvo ✓</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-3.5 h-3.5" />
+                  <span>
+                    {character.vaultId ||
+                    savedHeroes.some((h) => h.id === (character.vaultId || character.id))
+                      ? 'Sincronizar Herói'
+                      : 'Salvar Herói'}
+                  </span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => triggerHeroJsonDownload(character)}
+              className="rpg-card px-2 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
+              title="Baixar ficha do personagem (.hero.json)"
+            >
+              <Download className="w-3.5 h-3.5 text-amber-300" />
+              <span className="hidden lg:inline">.json</span>
+            </button>
+            {role === 'gm' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => heroFileInputRef.current?.click()}
+                  className="rpg-card px-2 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
+                  title="Importar ficha de personagem (.json) para a mesa"
+                >
+                  <Upload className="w-3.5 h-3.5 text-sky-300" />
+                </button>
+                <input
+                  ref={heroFileInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      try {
+                        const parsed = JSON.parse(String(reader.result));
+                        const imported = parseHeroPayloadFromJson(parsed, campaign);
+                        if (!imported) {
+                          window.alert('Arquivo de herói inválido.');
+                          return;
+                        }
+                        importSavedHeroIntoCampaign(imported);
+                      } catch {
+                        window.alert('Erro ao ler arquivo JSON do personagem.');
+                      }
+                    };
+                    reader.readAsText(file);
+                    e.target.value = '';
+                  }}
+                  className="hidden"
+                />
+              </>
+            )}
             {role === 'gm' ? (
               <>
                 <button
@@ -425,15 +563,19 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   Level Up
                 </button>
                 <button
+                  disabled={character.hp <= 0}
                   onClick={handleShortRest}
-                  className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer hover:opacity-85"
+                  className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer hover:opacity-85 disabled:opacity-35 disabled:cursor-not-allowed"
+                  title={character.hp <= 0 ? 'Personagens caídos (0 PV) não podem fazer descanso' : 'Descanso Curto'}
                 >
                   <Coffee className="w-3.5 h-3.5" />
                   Desc. Curto
                 </button>
                 <button
+                  disabled={character.hp <= 0}
                   onClick={handleLongRest}
-                  className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer text-sky-400 hover:opacity-85"
+                  className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer text-sky-400 hover:opacity-85 disabled:opacity-35 disabled:cursor-not-allowed"
+                  title={character.hp <= 0 ? 'Personagens caídos (0 PV) não podem fazer descanso' : 'Descanso Longo'}
                 >
                   <Moon className="w-3.5 h-3.5" />
                   Desc. Longo
@@ -442,21 +584,31 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
             ) : (
               <>
                 <button
+                  disabled={character.hp <= 0}
                   onClick={() => {
                     sendPlayerRequest('short-rest', 'Descanso Curto');
                   }}
-                  className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer hover:opacity-85"
-                  title="Enviar solicitação de Descanso Curto ao Mestre"
+                  className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer hover:opacity-85 disabled:opacity-35 disabled:cursor-not-allowed"
+                  title={
+                    character.hp <= 0
+                      ? 'Personagens caídos (0 PV) não podem pedir descanso'
+                      : 'Enviar solicitação de Descanso Curto ao Mestre'
+                  }
                 >
                   <Coffee className="w-3.5 h-3.5 text-amber-400" />
                   Pedir Desc. Curto
                 </button>
                 <button
+                  disabled={character.hp <= 0}
                   onClick={() => {
                     sendPlayerRequest('long-rest', 'Descanso Longo');
                   }}
-                  className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer text-sky-300 hover:opacity-85"
-                  title="Enviar solicitação de Descanso Longo ao Mestre"
+                  className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer text-sky-300 hover:opacity-85 disabled:opacity-35 disabled:cursor-not-allowed"
+                  title={
+                    character.hp <= 0
+                      ? 'Personagens caídos (0 PV) não podem pedir descanso'
+                      : 'Enviar solicitação de Descanso Longo ao Mestre'
+                  }
                 >
                   <Moon className="w-3.5 h-3.5" />
                   Pedir Desc. Longo
@@ -628,11 +780,39 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
           );
         })()}
 
-        {/* Active Conditions Strip */}
+        {/* Active Conditions & Concentration Strip */}
         <div
           className="px-4 py-2 border-b flex items-center gap-1.5 overflow-x-auto shrink-0"
           style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'rgba(0,0,0,0.14)' }}
         >
+          <button
+            onClick={() => {
+              if (character.concentratingSpell) {
+                setCharacterConcentration(character.id, null);
+              } else {
+                const spell = window.prompt('Qual magia/efeito está mantendo em Concentração?', 'Bênção');
+                if (spell && spell.trim()) {
+                  setCharacterConcentration(character.id, spell.trim());
+                }
+              }
+            }}
+            title="Concentração D&D 5e: ao sofrer dano, exige teste de CON (CD = máx(10, metade do dano)). Clique para ativar ou encerrar."
+            className={`px-2 py-0.5 rounded-md text-[11px] font-display font-bold flex items-center gap-1 shrink-0 border transition cursor-pointer ${
+              character.concentratingSpell
+                ? 'border-sky-400/80 bg-sky-950/60 text-sky-200'
+                : 'border-white/15 bg-black/25 text-slate-300 hover:border-sky-400/50'
+            }`}
+          >
+            <Sparkles className="w-3 h-3 text-sky-400" />
+            <span>
+              {character.concentratingSpell
+                ? `Conc: ${character.concentratingSpell} ×`
+                : '+ Concentração'}
+            </span>
+          </button>
+
+          <span className="h-3.5 w-px bg-white/15 mx-0.5 shrink-0" />
+
           <span className="text-[11px] font-semibold uppercase tracking-wider mr-1 shrink-0" style={{ color: 'var(--text-muted)' }}>
             Condições:
           </span>
@@ -1487,13 +1667,24 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                     <button
                       onClick={() => {
                         if (!addItemId) return;
-                        updateChar((c) => ({
-                          ...c,
-                          inventory: [
-                            ...c.inventory,
-                            { id: `inv-${Date.now()}`, itemId: addItemId, quantity: 1, equipped: false },
-                          ],
-                        }));
+                        updateChar((c) => {
+                          const existing = c.inventory.find((x) => x.itemId === addItemId);
+                          if (existing) {
+                            return {
+                              ...c,
+                              inventory: c.inventory.map((x) =>
+                                x.id === existing.id ? { ...x, quantity: x.quantity + 1 } : x
+                              ),
+                            };
+                          }
+                          return {
+                            ...c,
+                            inventory: [
+                              ...c.inventory,
+                              { id: `inv-${Date.now()}`, itemId: addItemId, quantity: 1, equipped: false },
+                            ],
+                          };
+                        });
                       }}
                       className="rpg-btn-primary px-3 py-1 rounded text-xs flex items-center gap-1 cursor-pointer"
                     >
@@ -1503,18 +1694,48 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                 )}
               </div>
 
+              {/* AAA DARK-FANTASY ILLUSTRATED ANATOMICAL RELIQUARY PAPERDOLL (Class-Bound, 7 Slots) */}
+              <EquipmentPaperdoll
+                character={character}
+                campaign={campaign}
+                stats={stats}
+                charClassName={charClass?.name}
+                classPaperdollArchetype={charClass?.paperdollArchetype}
+                charColor={charColor}
+                resolveAssetUrl={resolveAssetUrl}
+                onToggleEquip={toggleEquipInventoryEntry}
+              />
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
                 {character.inventory.map((inv) => {
                   const item = campaign.compendium.items.find((i) => i.id === inv.itemId);
                   if (!item) return null;
+                  const itemSlot = inv.equippedSlot || resolveItemEquipSlot(item);
                   return (
                     <div key={inv.id} className="rpg-card rounded-xl p-3 flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <span className="font-bold text-sm truncate">{item.name}</span>
                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/25">
                             {item.type}
                           </span>
+                          {itemSlot && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/50 border border-amber-500/30 text-amber-200">
+                              {EQUIP_SLOT_LABELS[itemSlot]}
+                            </span>
+                          )}
+                          {(() => {
+                            const b =
+                              extractItemDefenseBonus(item) +
+                              (item.modifiers
+                                ?.filter((m) => m.target === 'defense')
+                                .reduce((a, m) => a + m.value, 0) || 0);
+                            return b > 0 ? (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-400/50 text-emerald-300 font-mono-dice font-bold">
+                                +{b} CA
+                              </span>
+                            ) : null;
+                          })()}
                         </div>
                         <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
                           {item.description}
@@ -1588,19 +1809,12 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                           </button>
                         ) : (
                           <button
-                            onClick={() =>
-                              updateChar((c) => ({
-                                ...c,
-                                inventory: c.inventory.map((x) =>
-                                  x.id === inv.id ? { ...x, equipped: !x.equipped } : x
-                                ),
-                              }))
-                            }
+                            onClick={() => toggleEquipInventoryEntry(inv.id)}
                             className={`px-2.5 py-1 rounded text-[11px] font-semibold cursor-pointer ${
                               inv.equipped ? 'rpg-btn-primary' : 'rpg-card border'
                             }`}
                           >
-                            {inv.equipped ? '✓ Equipado' : 'Equipar'}
+                            {inv.equipped ? '✓ Vestido' : 'Equipar'}
                           </button>
                         )}
                       </div>
@@ -1775,6 +1989,66 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   </div>
                 )}
 
+                {/* Character Damage Resistances / Immunities / Vulnerabilities */}
+                <div className="p-3 rounded-lg bg-black/25 border border-amber-500/25 space-y-2">
+                  <div className="font-display font-bold text-xs text-amber-200">
+                    Afinidades de Dano (Resistência ½ • Imunidade 0 • Vulnerabilidade 2x)
+                  </div>
+                  {(
+                    [
+                      {
+                        key: 'damageResistances' as const,
+                        label: 'Resistente (½)',
+                        activeCls: 'bg-sky-950/90 border-sky-400/70 text-sky-200',
+                      },
+                      {
+                        key: 'damageImmunities' as const,
+                        label: 'Imune (0)',
+                        activeCls: 'bg-emerald-950/90 border-emerald-400/70 text-emerald-200',
+                      },
+                      {
+                        key: 'damageVulnerabilities' as const,
+                        label: 'Vulnerável (2x)',
+                        activeCls: 'bg-red-950/90 border-red-400/70 text-red-200',
+                      },
+                    ] as const
+                  ).map((group) => {
+                    const list = character[group.key] || [];
+                    return (
+                      <div key={group.key} className="space-y-1">
+                        <div className="text-[10px] uppercase tracking-wider opacity-75">
+                          {group.label}
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {DAMAGE_TYPE_OPTIONS.map((dt) => {
+                            const active = list.includes(dt);
+                            return (
+                              <button
+                                key={dt}
+                                type="button"
+                                disabled={role !== 'gm'}
+                                onClick={() => {
+                                  const nextList = active
+                                    ? list.filter((x) => x !== dt)
+                                    : [...list, dt];
+                                  updateChar((c) => ({ ...c, [group.key]: nextList }));
+                                }}
+                                className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer transition disabled:cursor-default ${
+                                  active
+                                    ? group.activeCls
+                                    : 'rpg-card opacity-65 hover:opacity-100'
+                                }`}
+                              >
+                                {dt}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
                 <div>
                   <label className="block mb-1">História / Origem</label>
                   <textarea
@@ -1827,7 +2101,8 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
             </div>
           )}
         </div>
-      </OrnateFrame>
+        </OrnateFrame>
+      </DraggablePanel>
     </div>
   );
 };

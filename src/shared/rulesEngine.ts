@@ -1,4 +1,83 @@
-import { CampaignState, Character, RolledDieVisual, StatModifier } from './types';
+import {
+  AoETemplate,
+  CampaignState,
+  Character,
+  EquipSlot,
+  ItemDef,
+  MapToken,
+  PaperdollArchetype,
+  RolledDieVisual,
+  StatModifier,
+  TacticalMap,
+  TerrainCellKind,
+} from './types';
+
+export const DAMAGE_TYPE_OPTIONS = [
+  'Corte',
+  'Perfuração',
+  'Concussão',
+  'Fogo',
+  'Gelo',
+  'Elétrico',
+  'Ácido',
+  'Veneno',
+  'Necrótico',
+  'Radiante',
+  'Psíquico',
+  'Arcano',
+  'Trovejante',
+] as const;
+
+export function inferPaperdollArchetype(className?: string): PaperdollArchetype {
+  const lower = (className || '').toLowerCase();
+  if (/mago|feitic|brux|cl[eé]rig|druida|arcan|xam[aã]|sacerdot/.test(lower)) {
+    return 'arcane';
+  }
+  if (/ladin|assass|patrulh|arqueir|ca[çc]ador|bardo|monge|ninja/.test(lower)) {
+    return 'rogue';
+  }
+  return 'warrior';
+}
+
+export const EQUIP_SLOT_LABELS: Record<EquipSlot, string> = {
+  head: 'Cabeça',
+  amulet: 'Pescoço / Manto',
+  armor: 'Tronco / Armadura',
+  mainHand: 'Mão Principal',
+  offHand: 'Mão Secundária',
+  ring: 'Anel / Relíquia',
+  boots: 'Pés / Botas',
+};
+
+export function extractItemDefenseBonus(item: ItemDef): number {
+  if (typeof item.defenseBonus === 'number' && item.defenseBonus !== 0) {
+    return item.defenseBonus;
+  }
+  const hasDefModifier = item.modifiers?.some((m) => m.target === 'defense' && m.value !== 0);
+  if (hasDefModifier) return 0;
+  const text = `${item.name} ${item.description || ''}`;
+  const match = text.match(/\+(\d+)\s*(?:na\s+defesa|de\s+defesa|em\s+defesa|ca\b|defesa\b)/i);
+  if (match) {
+    return Number(match[1]) || 0;
+  }
+  return 0;
+}
+
+export function resolveItemEquipSlot(item: ItemDef): EquipSlot | null {
+  if (item.type === 'Consumível') return null;
+  if (item.slot) return item.slot;
+  if (item.type === 'Armadura') return 'armor';
+  if (item.type === 'Escudo') return 'offHand';
+  if (item.type === 'Arma') return 'mainHand';
+  const k = `${item.name} ${item.description}`.toLowerCase();
+  if (/elmo|coroa|capuz|chap[eé]u|tiara|capacete|m[aá]scara/.test(k)) return 'head';
+  if (/amuleto|colar|capa|manto|talism[aã]|broche/.test(k)) return 'amulet';
+  if (/bota|greva|sand[aá]lia|sapato/.test(k)) return 'boots';
+  if (/armadura|cota|peitoral|coura[cç]a|robe|veste|t[uú]nica/.test(k)) return 'armor';
+  if (/escudo|broquel|foco|orbe|tomo/.test(k)) return 'offHand';
+  if (/espada|machado|adaga|arco|cajado|lan[cç]a|martelo|clava|bast[aã]o/.test(k)) return 'mainHand';
+  return 'ring';
+}
 
 export const PLAYER_COLOR_PALETTE = [
   '#ef4444', // Rubi
@@ -200,13 +279,20 @@ export function computeCharacterStats(
     : 0;
   const levelBonus = profBonus + halfLevel;
 
-  // Gather active modifiers from equipped items & active conditions
+  // Gather active modifiers from equipped items (strictly max 1 per anatomical body slot) & active conditions
   const activeModifiers: StatModifier[] = [];
+  const effectiveEquippedItems: ItemDef[] = [];
+  const occupiedSlots = new Set<EquipSlot>();
 
   for (const inv of character.inventory) {
     if (!inv.equipped) continue;
     const item = compendium.items.find((i) => i.id === inv.itemId);
-    if (item?.modifiers) {
+    if (!item) continue;
+    const slot = inv.equippedSlot || resolveItemEquipSlot(item);
+    if (!slot || occupiedSlots.has(slot)) continue;
+    occupiedSlots.add(slot);
+    effectiveEquippedItems.push(item);
+    if (item.modifiers) {
       for (const m of item.modifiers) {
         activeModifiers.push({ ...m, label: m.label || item.name });
       }
@@ -307,20 +393,19 @@ export function computeCharacterStats(
   let armorBonus = 0;
   let shieldBonus = 0;
 
-  for (const inv of character.inventory) {
-    if (!inv.equipped) continue;
-    const item = compendium.items.find((i) => i.id === inv.itemId);
-    if (!item || !item.defenseBonus) continue;
+  for (const item of effectiveEquippedItems) {
+    const defBonus = extractItemDefenseBonus(item);
+    if (!defBonus) continue;
     if (item.type === 'Armadura') {
-      armorBonus += item.defenseBonus;
-      defenseBreakdown.push(`${item.name} +${item.defenseBonus}`);
-      if (item.defenseBonus >= 6) hasHeavyArmor = true;
+      armorBonus += defBonus;
+      defenseBreakdown.push(`${item.name} +${defBonus}`);
+      if (defBonus >= 6) hasHeavyArmor = true;
     } else if (item.type === 'Escudo') {
-      shieldBonus += item.defenseBonus;
-      defenseBreakdown.push(`${item.name} +${item.defenseBonus}`);
+      shieldBonus += defBonus;
+      defenseBreakdown.push(`${item.name} +${defBonus}`);
     } else {
-      defense += item.defenseBonus;
-      defenseBreakdown.push(`${item.name} +${item.defenseBonus}`);
+      defense += defBonus;
+      defenseBreakdown.push(`${item.name} +${defBonus}`);
     }
   }
 
@@ -456,6 +541,59 @@ export function computeCharacterStats(
     saveDiceBonuses,
     skills,
     totalWeight: Math.round(totalWeight * 10) / 10,
+  };
+}
+
+/**
+ * Synchronizes every character's derived Defense (CA), MaxHP, and Speed onto their
+ * MapTokens and Combatants so equipping/unequipping items immediately updates CA everywhere.
+ */
+export function syncCampaignDerivedCharacterStats(camp: CampaignState): CampaignState {
+  if (!camp || !Array.isArray(camp.characters) || !camp.compendium) return camp;
+  const statsByCharId = new Map<string, ComputedCharacterStats>();
+  for (const ch of camp.characters) {
+    statsByCharId.set(ch.id, computeCharacterStats(ch, camp));
+  }
+
+  const nextMaps = (camp.maps || []).map((m) => ({
+    ...m,
+    tokens: (m.tokens || []).map((tok) => {
+      if (tok.type !== 'character' || !tok.referenceId) return tok;
+      const st = statsByCharId.get(tok.referenceId);
+      const ch = camp.characters.find((c) => c.id === tok.referenceId);
+      if (!st || !ch) return tok;
+      return {
+        ...tok,
+        hp: ch.hp,
+        maxHp: st.maxHp,
+        defense: st.defense,
+      };
+    }),
+  }));
+
+  const nextCombat = camp.combat
+    ? {
+        ...camp.combat,
+        combatants: (camp.combat.combatants || []).map((cb) => {
+          if (cb.type !== 'character' || !cb.referenceId) return cb;
+          const st = statsByCharId.get(cb.referenceId);
+          const ch = camp.characters.find((c) => c.id === cb.referenceId);
+          if (!st || !ch) return cb;
+          return {
+            ...cb,
+            hp: ch.hp,
+            maxHp: st.maxHp,
+            defense: st.defense,
+            speedMeters: st.speed,
+          };
+        }),
+      }
+    : camp.combat;
+
+  return {
+    ...camp,
+    maps: nextMaps,
+    combat: nextCombat,
   };
 }
 
@@ -613,4 +751,890 @@ export function evaluateFormula(
     resolvedFormula: formula,
     details: detailParts.join(' ').replace(/^\+/, ''),
   };
+}
+
+/**
+ * Ensures any imported or vault-restored Character JSON has complete defaults.
+ */
+export function normalizeHeroCharacter(
+  raw: Partial<Character>,
+  fallbackCampaign?: CampaignState
+): Character {
+  const id = raw.id || `char-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const vaultId = raw.vaultId || id;
+  const fallbackAttrs: Record<string, number> = {};
+  (fallbackCampaign?.compendium?.attributes || []).forEach((a) => {
+    fallbackAttrs[a.id] = 10;
+  });
+  const attrs = { ...fallbackAttrs, ...(raw.attributes || {}) };
+
+  const validRace = fallbackCampaign?.compendium?.races?.some((r) => r.id === raw.raceId)
+    ? (raw.raceId as string)
+    : fallbackCampaign?.compendium?.races?.[0]?.id || raw.raceId || '';
+  const validClass = fallbackCampaign?.compendium?.classes?.some((c) => c.id === raw.classId)
+    ? (raw.classId as string)
+    : fallbackCampaign?.compendium?.classes?.[0]?.id || raw.classId || '';
+
+  return {
+    id,
+    vaultId,
+    lastSyncedAt: raw.lastSyncedAt || new Date().toISOString(),
+    ownerPlayerId: raw.ownerPlayerId,
+    playerName: raw.playerName || 'Aventureiro',
+    playerColor: raw.playerColor || raw.tokenColor || '#38bdf8',
+    tokenFrameStyle: raw.tokenFrameStyle || 'gold',
+    diceSkin: raw.diceSkin || 'gold',
+    themeMusicUrl: raw.themeMusicUrl,
+    themeMusicTitle: raw.themeMusicTitle,
+    name: raw.name?.trim() || 'Herói Sem Nome',
+    raceId: validRace,
+    classId: validClass,
+    level: typeof raw.level === 'number' && raw.level >= 1 ? raw.level : 1,
+    attributes: attrs,
+    trainedSkillIds: Array.isArray(raw.trainedSkillIds) ? raw.trainedSkillIds : [],
+    hp: typeof raw.hp === 'number' ? raw.hp : 12,
+    maxHpOverride: raw.maxHpOverride,
+    tempHp: typeof raw.tempHp === 'number' ? raw.tempHp : 0,
+    mp: typeof raw.mp === 'number' ? raw.mp : 6,
+    maxMpOverride: raw.maxMpOverride,
+    knownAbilityIds: Array.isArray(raw.knownAbilityIds) ? raw.knownAbilityIds : [],
+    customAttacks: Array.isArray(raw.customAttacks) ? raw.customAttacks : [],
+    customAbilities: Array.isArray(raw.customAbilities) ? raw.customAbilities : [],
+    abilityUsesRemaining: raw.abilityUsesRemaining || {},
+    activeConditionIds: Array.isArray(raw.activeConditionIds) ? raw.activeConditionIds : [],
+    inventory: Array.isArray(raw.inventory) ? raw.inventory : [],
+    gold: typeof raw.gold === 'number' ? raw.gold : 0,
+    portraitUrl: raw.portraitUrl || '',
+    tokenColor: raw.tokenColor || raw.playerColor || '#38bdf8',
+    background: raw.background || '',
+    notes: raw.notes || '',
+    deathSaves: raw.deathSaves || { successes: 0, failures: 0 },
+  };
+}
+
+/**
+ * Extracts a normalized Character from either a raw Character JSON or a SavedHeroEntry envelope.
+ */
+export function parseHeroPayloadFromJson(
+  parsed: unknown,
+  fallbackCampaign?: CampaignState
+): Character | null {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const obj = parsed as Record<string, unknown>;
+  const candidate =
+    obj.character && typeof obj.character === 'object'
+      ? (obj.character as Partial<Character>)
+      : (obj as Partial<Character>);
+  if (!candidate.name || typeof candidate.name !== 'string') return null;
+  return normalizeHeroCharacter(candidate, fallbackCampaign);
+}
+
+/**
+ * Checks whether two square footprints [x..x+size-1, y..y+size-1] overlap on the grid.
+ */
+export function doSquaresOverlap(
+  ax: number,
+  ay: number,
+  aSize: number,
+  bx: number,
+  by: number,
+  bSize: number
+): boolean {
+  const sA = Math.max(1, aSize);
+  const sB = Math.max(1, bSize);
+  return ax < bx + sB && ax + sA > bx && ay < by + sB && ay + sA > by;
+}
+
+export function doesFootprintHitWall(
+  terrainCells: Record<string, TerrainCellKind> | undefined,
+  x: number,
+  y: number,
+  size: number
+): boolean {
+  if (!terrainCells) return false;
+  const s = Math.max(1, size);
+  for (let dx = 0; dx < s; dx++) {
+    for (let dy = 0; dy < s; dy++) {
+      if (terrainCells[`${x + dx},${y + dy}`] === 'wall') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Returns true if placing a square token of `size` at (x, y) collides with any existing token or wall cell.
+ */
+export function doesTokenCollideAt(
+  tokens: MapToken[],
+  x: number,
+  y: number,
+  size: number,
+  ignoreTokenId?: string,
+  includeHidden = true,
+  terrainCells?: Record<string, TerrainCellKind>
+): boolean {
+  const s = Math.max(1, size);
+  if (doesFootprintHitWall(terrainCells, x, y, s)) {
+    return true;
+  }
+  for (const other of tokens) {
+    if (ignoreTokenId && other.id === ignoreTokenId) continue;
+    if (!includeHidden && other.isHidden) continue;
+    if (doSquaresOverlap(x, y, s, other.x, other.y, other.size || 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Clamps a square footprint to the map grid and finds the nearest non-overlapping free cell.
+ */
+export function findNearestFreeGridCell(
+  map: Pick<TacticalMap, 'gridWidth' | 'gridHeight' | 'tokens'> & {
+    terrainCells?: Record<string, TerrainCellKind>;
+  },
+  desiredX: number,
+  desiredY: number,
+  size = 1,
+  ignoreTokenId?: string,
+  includeHidden = true
+): { x: number; y: number } {
+  const s = Math.max(1, size);
+  const maxX = Math.max(0, map.gridWidth - s);
+  const maxY = Math.max(0, map.gridHeight - s);
+  const startX = Math.max(0, Math.min(maxX, Math.round(desiredX)));
+  const startY = Math.max(0, Math.min(maxY, Math.round(desiredY)));
+
+  if (
+    !doesTokenCollideAt(
+      map.tokens,
+      startX,
+      startY,
+      s,
+      ignoreTokenId,
+      includeHidden,
+      map.terrainCells
+    )
+  ) {
+    return { x: startX, y: startY };
+  }
+
+  const maxRadius = Math.max(map.gridWidth, map.gridHeight);
+  for (let r = 1; r <= maxRadius; r++) {
+    const candidates: Array<{ x: number; y: number; distSq: number }> = [];
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const cx = startX + dx;
+        const cy = startY + dy;
+        if (cx < 0 || cy < 0 || cx > maxX || cy > maxY) continue;
+        if (
+          !doesTokenCollideAt(
+            map.tokens,
+            cx,
+            cy,
+            s,
+            ignoreTokenId,
+            includeHidden,
+            map.terrainCells
+          )
+        ) {
+          candidates.push({ x: cx, y: cy, distSq: dx * dx + dy * dy });
+        }
+      }
+    }
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => a.distSq - b.distSq);
+      return { x: candidates[0].x, y: candidates[0].y };
+    }
+  }
+
+  return { x: startX, y: startY };
+}
+
+/**
+ * Resolves token movement target during grid dragging with smooth single-axis sliding around occupied squares & walls.
+ */
+export function resolveDragTargetCell(
+  map: Pick<TacticalMap, 'gridWidth' | 'gridHeight' | 'tokens'> & {
+    terrainCells?: Record<string, TerrainCellKind>;
+  },
+  movingToken: MapToken,
+  desiredX: number,
+  desiredY: number,
+  includeHidden = true
+): { x: number; y: number } {
+  const s = Math.max(1, movingToken.size || 1);
+  const maxX = Math.max(0, map.gridWidth - s);
+  const maxY = Math.max(0, map.gridHeight - s);
+  const clampedX = Math.max(0, Math.min(maxX, desiredX));
+  const clampedY = Math.max(0, Math.min(maxY, desiredY));
+
+  if (
+    !doesTokenCollideAt(
+      map.tokens,
+      clampedX,
+      clampedY,
+      s,
+      movingToken.id,
+      includeHidden,
+      map.terrainCells
+    )
+  ) {
+    return { x: clampedX, y: clampedY };
+  }
+  if (
+    clampedX !== movingToken.x &&
+    !doesTokenCollideAt(
+      map.tokens,
+      clampedX,
+      movingToken.y,
+      s,
+      movingToken.id,
+      includeHidden,
+      map.terrainCells
+    )
+  ) {
+    return { x: clampedX, y: movingToken.y };
+  }
+  if (
+    clampedY !== movingToken.y &&
+    !doesTokenCollideAt(
+      map.tokens,
+      movingToken.x,
+      clampedY,
+      s,
+      movingToken.id,
+      includeHidden,
+      map.terrainCells
+    )
+  ) {
+    return { x: movingToken.x, y: clampedY };
+  }
+
+  return { x: movingToken.x, y: movingToken.y };
+}
+
+/**
+ * Bresenham grid raycast returning all integer grid cells from (x0, y0) to (x1, y1) inclusive.
+ */
+export function traceGridLine(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number
+): Array<{ x: number; y: number }> {
+  const cells: Array<{ x: number; y: number }> = [];
+  let cx = Math.round(x0);
+  let cy = Math.round(y0);
+  const tx = Math.round(x1);
+  const ty = Math.round(y1);
+  const dx = Math.abs(tx - cx);
+  const dy = Math.abs(ty - cy);
+  const sx = cx < tx ? 1 : -1;
+  const sy = cy < ty ? 1 : -1;
+  let err = dx - dy;
+
+  for (let guard = 0; guard < 256; guard++) {
+    cells.push({ x: cx, y: cy });
+    if (cx === tx && cy === ty) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) {
+      err -= dy;
+      cx += sx;
+    }
+    if (e2 < dx) {
+      err += dx;
+      cy += sy;
+    }
+  }
+  return cells;
+}
+
+export interface LineOfSightCoverResult {
+  blockedByWall: boolean;
+  coverAcBonus: 0 | 2 | 5;
+  coverLabel?: string;
+}
+
+/**
+ * Evaluates Line of Sight (Walls block attacks) and D&D 5e Cover (+2 Half / +5 Three-Quarters AC).
+ */
+export function evaluateLineOfSightAndCover(
+  map: Pick<TacticalMap, 'tokens'> & { terrainCells?: Record<string, TerrainCellKind> } | undefined,
+  attackerToken: MapToken | undefined,
+  defenderToken: MapToken | undefined,
+  isRanged: boolean
+): LineOfSightCoverResult {
+  if (!map || !attackerToken || !defenderToken || attackerToken.id === defenderToken.id) {
+    return { blockedByWall: false, coverAcBonus: 0 };
+  }
+  const terrain = map.terrainCells || {};
+  const ax = attackerToken.x + Math.floor((attackerToken.size || 1) / 2);
+  const ay = attackerToken.y + Math.floor((attackerToken.size || 1) / 2);
+  const bx = defenderToken.x + Math.floor((defenderToken.size || 1) / 2);
+  const by = defenderToken.y + Math.floor((defenderToken.size || 1) / 2);
+
+  const line = traceGridLine(ax, ay, bx, by);
+  let coverUnits = 0;
+
+  for (const cell of line) {
+    const insideAttacker = doSquaresOverlap(
+      cell.x,
+      cell.y,
+      1,
+      attackerToken.x,
+      attackerToken.y,
+      attackerToken.size || 1
+    );
+    const insideDefender = doSquaresOverlap(
+      cell.x,
+      cell.y,
+      1,
+      defenderToken.x,
+      defenderToken.y,
+      defenderToken.size || 1
+    );
+    if (insideAttacker || insideDefender) continue;
+
+    const cellTerrain = terrain[`${cell.x},${cell.y}`];
+    if (cellTerrain === 'wall') {
+      return {
+        blockedByWall: true,
+        coverAcBonus: 0,
+        coverLabel: 'Sem Linha de Visão (Parede)',
+      };
+    }
+    if (cellTerrain === 'cover') {
+      coverUnits += 1;
+    }
+    if (isRanged) {
+      const blockingCreature = map.tokens.some(
+        (other) =>
+          other.id !== attackerToken.id &&
+          other.id !== defenderToken.id &&
+          !other.isHidden &&
+          other.hp > 0 &&
+          doSquaresOverlap(cell.x, cell.y, 1, other.x, other.y, other.size || 1)
+      );
+      if (blockingCreature) {
+        coverUnits += 1;
+      }
+    }
+  }
+
+  if (coverUnits >= 2) {
+    return {
+      blockedByWall: false,
+      coverAcBonus: 5,
+      coverLabel: 'Cobertura Três-Quartos (+5 CA)',
+    };
+  }
+  if (coverUnits === 1) {
+    return {
+      blockedByWall: false,
+      coverAcBonus: 2,
+      coverLabel: 'Meia Cobertura (+2 CA)',
+    };
+  }
+  return { blockedByWall: false, coverAcBonus: 0 };
+}
+
+/**
+ * Calculates total movement cost in meters along a grid path where 'difficult' cells cost 2x (3m per square).
+ */
+export function calculateMovementCostMeters(
+  origin: { x: number; y: number },
+  finalPos: { x: number; y: number },
+  terrainCells: Record<string, TerrainCellKind> | undefined,
+  sqMeters = 1.5,
+  path?: Array<{ x: number; y: number }>
+): { meters: number; difficultSquares: number } {
+  const cells =
+    path && path.length > 1
+      ? path.slice(1)
+      : traceGridLine(origin.x, origin.y, finalPos.x, finalPos.y).slice(1);
+
+  if (cells.length === 0) return { meters: 0, difficultSquares: 0 };
+
+  let totalMeters = 0;
+  let difficultSquares = 0;
+  let prev = origin;
+
+  for (const step of cells) {
+    const stepSq = Math.max(Math.abs(step.x - prev.x), Math.abs(step.y - prev.y));
+    if (stepSq <= 0) continue;
+    const isDiff = terrainCells?.[`${step.x},${step.y}`] === 'difficult';
+    if (isDiff) {
+      difficultSquares += stepSq;
+      totalMeters += stepSq * sqMeters * 2;
+    } else {
+      totalMeters += stepSq * sqMeters;
+    }
+    prev = step;
+  }
+
+  return {
+    meters: Math.round(totalMeters * 10) / 10,
+    difficultSquares,
+  };
+}
+
+/**
+ * Returns all map tokens inside an AoE Template (Sphere, Cube, Cone, Line).
+ */
+export function getTokensInsideTemplate(
+  map: Pick<TacticalMap, 'tokens'>,
+  template: AoETemplate
+): MapToken[] {
+  const tx = template.x + 0.5;
+  const ty = template.y + 0.5;
+  const rad = Math.max(0.5, template.radiusSquares);
+  const angleRad = ((template.angleDeg || 0) * Math.PI) / 180;
+  const dirX = Math.cos(angleRad);
+  const dirY = Math.sin(angleRad);
+
+  return map.tokens.filter((tok) => {
+    if (tok.hp <= 0) return false;
+    const cx = tok.x + (tok.size || 1) / 2;
+    const cy = tok.y + (tok.size || 1) / 2;
+    const dx = cx - tx;
+    const dy = cy - ty;
+    const dist = Math.hypot(dx, dy);
+    const tokRad = (tok.size || 1) * 0.45;
+
+    if (template.shape === 'sphere') {
+      return dist <= rad + tokRad;
+    }
+    if (template.shape === 'cube') {
+      return Math.abs(dx) <= rad + tokRad && Math.abs(dy) <= rad + tokRad;
+    }
+    if (template.shape === 'cone') {
+      if (dist > rad + tokRad) return false;
+      if (dist < 0.35) return true;
+      const dot = (dx * dirX + dy * dirY) / dist;
+      return dot >= Math.cos((34 * Math.PI) / 180);
+    }
+    if (template.shape === 'line') {
+      const length = rad * 2;
+      const proj = dx * dirX + dy * dirY;
+      if (proj < -0.25 || proj > length + tokRad) return false;
+      const perp = Math.abs(dx * -dirY + dy * dirX);
+      return perp <= 0.75 + tokRad;
+    }
+    return false;
+  });
+}
+
+export function computeConcentrationDc(damageTaken: number): number {
+  return Math.max(10, Math.floor(Math.abs(damageTaken) / 2));
+}
+
+function normalizeDamageKey(val: string): string {
+  const clean = val
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+  // Unify common Portuguese synonyms (Contusão <-> Concussão, Gelo <-> Frio, Elétrico <-> Relâmpago)
+  if (clean === 'contusao' || clean === 'impacto' || clean === 'esmagamento') return 'concussao';
+  if (clean === 'frio') return 'gelo';
+  if (clean === 'relampago' || clean === 'raio') return 'eletrico';
+  if (clean === 'perfurante') return 'perfuracao';
+  if (clean === 'cortante') return 'corte';
+  return clean;
+}
+
+export function isTokenHostileTo(a: MapToken, b: MapToken): boolean {
+  return (
+    (a.type === 'character' && b.type === 'monster') ||
+    (a.type === 'monster' && b.type === 'character')
+  );
+}
+
+export function isTokenIncapacitated(token: MapToken, char?: Character): boolean {
+  if (token.hp <= 0) return true;
+  const conds = new Set([...(token.activeConditionIds || []), ...(char?.activeConditionIds || [])]);
+  return (
+    conds.has('cond-atordoado') ||
+    conds.has('cond-paralisado') ||
+    conds.has('cond-inconsciente')
+  );
+}
+
+/**
+ * Official D&D 5e rule: checks if any living, visible, conscious hostile enemy is within 1.5m (1 square) of the attacker.
+ */
+export function hasAdjacentHostileEnemy(
+  map: Pick<TacticalMap, 'tokens'> | undefined,
+  attackerToken: MapToken | undefined,
+  sqMeters = 1.5,
+  characters?: Character[]
+): MapToken | null {
+  if (!map || !attackerToken) return null;
+  for (const other of map.tokens) {
+    if (other.id === attackerToken.id || other.isHidden) continue;
+    if (!isTokenHostileTo(attackerToken, other)) continue;
+    const otherChar =
+      other.type === 'character' && other.referenceId
+        ? characters?.find((c) => c.id === other.referenceId)
+        : undefined;
+    if (isTokenIncapacitated(other, otherChar)) continue;
+    const dist = getGridSpanDistance(
+      attackerToken.x,
+      attackerToken.y,
+      attackerToken.size || 1,
+      other.x,
+      other.y,
+      other.size || 1,
+      sqMeters
+    );
+    if (dist.squares <= 1) {
+      return other;
+    }
+  }
+  return null;
+}
+
+/**
+ * Optional D&D 5e Flanking rule: returns the flanking ally if attacker and an opposite-side conscious ally
+ * are both adjacent (<= 1 square) to the defender.
+ */
+export function isTargetFlankedBy(
+  map: Pick<TacticalMap, 'tokens'> | undefined,
+  attackerToken: MapToken | undefined,
+  defenderToken: MapToken | undefined,
+  sqMeters = 1.5,
+  characters?: Character[]
+): MapToken | null {
+  if (!map || !attackerToken || !defenderToken || attackerToken.id === defenderToken.id) {
+    return null;
+  }
+  if (!isTokenHostileTo(attackerToken, defenderToken)) return null;
+
+  const atkDist = getGridSpanDistance(
+    attackerToken.x,
+    attackerToken.y,
+    attackerToken.size || 1,
+    defenderToken.x,
+    defenderToken.y,
+    defenderToken.size || 1,
+    sqMeters
+  );
+  if (atkDist.squares > 1) return null;
+
+  const defCx = defenderToken.x + (defenderToken.size || 1) / 2;
+  const defCy = defenderToken.y + (defenderToken.size || 1) / 2;
+  const atkVx = attackerToken.x + (attackerToken.size || 1) / 2 - defCx;
+  const atkVy = attackerToken.y + (attackerToken.size || 1) / 2 - defCy;
+  const atkLen = Math.hypot(atkVx, atkVy) || 1;
+
+  for (const ally of map.tokens) {
+    if (ally.id === attackerToken.id || ally.id === defenderToken.id || ally.isHidden) continue;
+    if (ally.type !== attackerToken.type) continue;
+    const allyChar =
+      ally.type === 'character' && ally.referenceId
+        ? characters?.find((c) => c.id === ally.referenceId)
+        : undefined;
+    if (isTokenIncapacitated(ally, allyChar)) continue;
+
+    const allyDist = getGridSpanDistance(
+      ally.x,
+      ally.y,
+      ally.size || 1,
+      defenderToken.x,
+      defenderToken.y,
+      defenderToken.size || 1,
+      sqMeters
+    );
+    if (allyDist.squares > 1) continue;
+
+    const allyVx = ally.x + (ally.size || 1) / 2 - defCx;
+    const allyVy = ally.y + (ally.size || 1) / 2 - defCy;
+    const allyLen = Math.hypot(allyVx, allyVy) || 1;
+    const dot = (atkVx * allyVx + atkVy * allyVy) / (atkLen * allyLen);
+    // Opposite sides of the target (angle >= ~120 degrees -> dot <= -0.5)
+    if (dot <= -0.5) {
+      return ally;
+    }
+  }
+  return null;
+}
+
+export interface TacticalAttackModResult {
+  effectiveAdvantageMode: RollAdvantageMode;
+  advantages: string[];
+  disadvantages: string[];
+  autoCritOnHit: boolean;
+  summaryBadges: string[];
+  gmOverrideUsed?: 'advantage' | 'disadvantage';
+  isRangedInMelee: boolean;
+  isFlanking: boolean;
+}
+
+/**
+ * Evaluates all D&D 5e situational attack modifiers:
+ * - Ranged attack while adjacent to a conscious hostile enemy (1.5m) -> Disadvantage
+ * - GM 1-click next-attack Advantage / Disadvantage
+ * - Manual Advantage/Disadvantage toggle
+ * - Flanking (optional campaign setting) -> Advantage
+ * - Defender Dodging -> Disadvantage
+ * - Attacker & Defender Conditions (Prone, Paralyzed, Stunned, Blinded, Invisible, Poisoned, Frightened)
+ * - Official D&D cancellation: any Advantage + any Disadvantage = Normal
+ */
+export function evaluateTacticalAttackModifiers(params: {
+  map?: Pick<TacticalMap, 'tokens'>;
+  attackerToken?: MapToken;
+  defenderToken?: MapToken;
+  attackerChar?: Character;
+  defenderChar?: Character;
+  characters?: Character[];
+  range?: string;
+  actionTitle?: string;
+  sqMeters?: number;
+  enableFlanking?: boolean;
+  manualAdvantageMode?: RollAdvantageMode;
+  defenderDodging?: boolean;
+  isReaction?: boolean;
+}): TacticalAttackModResult {
+  const {
+    map,
+    attackerToken,
+    defenderToken,
+    attackerChar,
+    defenderChar,
+    characters,
+    range,
+    actionTitle,
+    sqMeters = 1.5,
+    enableFlanking = true,
+    manualAdvantageMode = 'normal',
+    defenderDodging = false,
+    isReaction = false,
+  } = params;
+
+  const advantages: string[] = [];
+  const disadvantages: string[] = [];
+  let autoCritOnHit = false;
+  let gmOverrideUsed: 'advantage' | 'disadvantage' | undefined;
+  let isRangedInMelee = false;
+  let isFlanking = false;
+
+  if (manualAdvantageMode === 'advantage') advantages.push('Vantagem (Manual)');
+  if (manualAdvantageMode === 'disadvantage') disadvantages.push('Desvantagem (Manual)');
+
+  if (attackerChar?.nextAttackRollOverride === 'advantage') {
+    advantages.push('Vantagem (Mestre)');
+    gmOverrideUsed = 'advantage';
+  } else if (attackerChar?.nextAttackRollOverride === 'disadvantage') {
+    disadvantages.push('Desvantagem (Mestre)');
+    gmOverrideUsed = 'disadvantage';
+  }
+
+  if (defenderDodging) {
+    disadvantages.push('Alvo Esquivando');
+  }
+
+  const maxRangeMeters = parseAttackRangeMeters(range, actionTitle);
+  const isRangedAttack = !isReaction && maxRangeMeters > sqMeters + 0.05;
+  const distInfo =
+    attackerToken && defenderToken
+      ? getGridSpanDistance(
+          attackerToken.x,
+          attackerToken.y,
+          attackerToken.size || 1,
+          defenderToken.x,
+          defenderToken.y,
+          defenderToken.size || 1,
+          sqMeters
+        )
+      : null;
+
+  // 1. Official D&D 5e Ranged Attack in Close Combat (any conscious hostile enemy within 1.5m)
+  if (isRangedAttack && map && attackerToken) {
+    const adjacentEnemy = hasAdjacentHostileEnemy(map, attackerToken, sqMeters, characters);
+    if (adjacentEnemy) {
+      isRangedInMelee = true;
+      disadvantages.push(`Inimigo Colado (${adjacentEnemy.name} a 1,5m)`);
+    }
+  }
+
+  // 2. Optional Flanking (Melee attack with opposite-side ally adjacent to defender)
+  if (
+    enableFlanking &&
+    !isRangedAttack &&
+    map &&
+    attackerToken &&
+    defenderToken
+  ) {
+    const flankAlly = isTargetFlankedBy(map, attackerToken, defenderToken, sqMeters, characters);
+    if (flankAlly) {
+      isFlanking = true;
+      advantages.push(`Flanqueamento (${flankAlly.name})`);
+    }
+  }
+
+  // 3. Attacker Conditions
+  const atkConds = new Set([
+    ...(attackerToken?.activeConditionIds || []),
+    ...(attackerChar?.activeConditionIds || []),
+  ]);
+  if (atkConds.has('cond-invisivel')) advantages.push('Atacante Invisível');
+  if (atkConds.has('cond-cego')) disadvantages.push('Atacante Cego');
+  if (atkConds.has('cond-envenenado')) disadvantages.push('Atacante Envenenado');
+  if (atkConds.has('cond-caido')) disadvantages.push('Atacante Caído');
+  if (atkConds.has('cond-amedrontado')) disadvantages.push('Atacante Amedrontado');
+
+  // 4. Defender Conditions
+  const defConds = new Set([
+    ...(defenderToken?.activeConditionIds || []),
+    ...(defenderChar?.activeConditionIds || []),
+  ]);
+  const isAdjacentToDefender = distInfo ? distInfo.squares <= 1 : !isRangedAttack;
+  if (defConds.has('cond-caido')) {
+    if (isAdjacentToDefender) {
+      advantages.push('Alvo Caído (≤ 1,5m)');
+    } else {
+      disadvantages.push('Alvo Caído (à Distância)');
+    }
+  }
+  if (defConds.has('cond-cego')) advantages.push('Alvo Cego');
+  if (defConds.has('cond-atordoado')) advantages.push('Alvo Atordoado');
+  if (defConds.has('cond-paralisado')) {
+    advantages.push('Alvo Paralisado');
+    if (isAdjacentToDefender) {
+      autoCritOnHit = true;
+    }
+  }
+  if (defConds.has('cond-invisivel')) disadvantages.push('Alvo Invisível');
+
+  // Official D&D 5e Advantage/Disadvantage cancellation
+  let effectiveAdvantageMode: RollAdvantageMode = 'normal';
+  if (advantages.length > 0 && disadvantages.length === 0) {
+    effectiveAdvantageMode = 'advantage';
+  } else if (disadvantages.length > 0 && advantages.length === 0) {
+    effectiveAdvantageMode = 'disadvantage';
+  }
+
+  const summaryBadges: string[] = [];
+  if (advantages.length > 0 && disadvantages.length > 0) {
+    summaryBadges.push(`Normal (Vantagem + Desvantagem cancelados)`);
+  }
+  advantages.forEach((a) => summaryBadges.push(`+Vant: ${a}`));
+  disadvantages.forEach((d) => summaryBadges.push(`-Desv: ${d}`));
+  if (autoCritOnHit) {
+    summaryBadges.push('Crítico Automático (Alvo Paralisado a 1,5m)');
+  }
+
+  return {
+    effectiveAdvantageMode,
+    advantages,
+    disadvantages,
+    autoCritOnHit,
+    summaryBadges,
+    gmOverrideUsed,
+    isRangedInMelee,
+    isFlanking,
+  };
+}
+
+export interface DamageAffinityResult {
+  finalAmount: number;
+  affinity: 'normal' | 'immune' | 'resistant' | 'vulnerable';
+  modifierLabel?: string;
+}
+
+/**
+ * Resolves D&D 5e Damage Immunities (0x), Resistances (0.5x floor), and Vulnerabilities (2x).
+ */
+export function resolveDamageWithAffinities(
+  rawAmount: number,
+  damageType: string | undefined,
+  affinities: {
+    immunities?: string[];
+    resistances?: string[];
+    vulnerabilities?: string[];
+    activeConditionIds?: string[];
+  }
+): DamageAffinityResult {
+  const base = Math.max(0, Math.round(rawAmount));
+  if (!damageType || base === 0) {
+    return { finalAmount: base, affinity: 'normal' };
+  }
+
+  // Support compound types like "Perfuração / Fogo" by checking any segment
+  const incomingTypes = damageType
+    .split(/[\/,&+]/)
+    .map((s) => normalizeDamageKey(s))
+    .filter(Boolean);
+
+  if (incomingTypes.length === 0) {
+    return { finalAmount: base, affinity: 'normal' };
+  }
+
+  const immSet = new Set((affinities.immunities || []).map(normalizeDamageKey));
+  const resSet = new Set((affinities.resistances || []).map(normalizeDamageKey));
+  const vulSet = new Set((affinities.vulnerabilities || []).map(normalizeDamageKey));
+
+  // Barbarian Rage ("cond-furia") automatically grants resistance to physical weapon damage
+  if (affinities.activeConditionIds?.includes('cond-furia')) {
+    resSet.add('corte');
+    resSet.add('perfuracao');
+    resSet.add('concussao');
+  }
+
+  // Only immune if all incoming damage types are immune (or single type matches)
+  const allImmune = incomingTypes.every((t) => immSet.has(t));
+  if (allImmune) {
+    return {
+      finalAmount: 0,
+      affinity: 'immune',
+      modifierLabel: `Imune a ${damageType}`,
+    };
+  }
+
+  const hasResistance = incomingTypes.some((t) => resSet.has(t));
+  const hasVulnerability = incomingTypes.some((t) => vulSet.has(t));
+
+  if (hasResistance && hasVulnerability) {
+    return {
+      finalAmount: base,
+      affinity: 'normal',
+      modifierLabel: `Resistência + Vulnerabilidade (${damageType})`,
+    };
+  }
+  if (hasResistance) {
+    return {
+      finalAmount: Math.floor(base / 2),
+      affinity: 'resistant',
+      modifierLabel: `Resistente a ${damageType} (½)`,
+    };
+  }
+  if (hasVulnerability) {
+    return {
+      finalAmount: base * 2,
+      affinity: 'vulnerable',
+      modifierLabel: `Vulnerável a ${damageType} (2x!)`,
+    };
+  }
+
+  return { finalAmount: base, affinity: 'normal' };
+}
+
+/**
+ * Qualitative wound state shown to players for monsters when enemy exact stats are hidden.
+ */
+export function getMonsterWoundStatus(
+  hp: number,
+  maxHp: number
+): { label: string; colorClass: string } {
+  if (hp <= 0) return { label: 'Derrotado', colorClass: 'text-red-400' };
+  const pct = hp / Math.max(1, maxHp);
+  if (pct >= 0.99) return { label: 'Ileso', colorClass: 'text-emerald-400' };
+  if (pct >= 0.65) return { label: 'Escoriado', colorClass: 'text-lime-300' };
+  if (pct >= 0.35) return { label: 'Ferido', colorClass: 'text-amber-300' };
+  return { label: 'Muito Ferido', colorClass: 'text-red-400' };
 }

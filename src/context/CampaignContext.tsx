@@ -7,7 +7,9 @@ import {
   CampaignSummary,
   CardRewardNotification,
   Character,
+  ChatMessageEntry,
   CombatDuelState,
+  ConnectedPlayerInfo,
   DiceSkin,
   HandoutPayload,
   InitiativeCeremonyState,
@@ -18,7 +20,10 @@ import {
   PlayerRequest,
   RollLogEntry,
   RolledDieVisual,
+  SavedHeroEntry,
   SkillCheckRequest,
+  TacticalSavePrompt,
+  TacticalSaveTargetEntry,
   ThemeMode,
   UserRole,
 } from '../shared/types';
@@ -26,12 +31,69 @@ import { createStarterCampaign } from '../shared/starterSeed';
 import {
   computeCharacterStats,
   evaluateFormula,
+  evaluateLineOfSightAndCover,
+  evaluateTacticalAttackModifiers,
+  findNearestFreeGridCell,
   getGridSpanDistance,
+  getTokensInsideTemplate,
+  normalizeHeroCharacter,
   parseAttackRangeMeters,
   pickRandomPlayerColor,
+  resolveDamageWithAffinities,
   RollAdvantageMode,
+  syncCampaignDerivedCharacterStats,
 } from '../shared/rulesEngine';
 import { soundEngine } from '../utils/soundEngine';
+
+const LOCAL_HERO_VAULT_KEY = 'chronicle_hero_vault_v1';
+
+function readLocalHeroVault(): SavedHeroEntry[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_HERO_VAULT_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalHeroVault(list: SavedHeroEntry[]): void {
+  try {
+    localStorage.setItem(LOCAL_HERO_VAULT_KEY, JSON.stringify(list));
+  } catch {
+    // ignore quota limits
+  }
+}
+
+function mergeSavedHeroLists(...lists: SavedHeroEntry[][]): SavedHeroEntry[] {
+  const byId = new Map<string, SavedHeroEntry>();
+  for (const list of lists) {
+    for (const entry of list || []) {
+      if (!entry?.id || !entry?.character?.name) continue;
+      const existing = byId.get(entry.id);
+      if (
+        !existing ||
+        new Date(entry.updatedAt || 0).getTime() >= new Date(existing.updatedAt || 0).getTime()
+      ) {
+        byId.set(entry.id, entry);
+      }
+    }
+  }
+  return Array.from(byId.values()).sort(
+    (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+  );
+}
+
+export function triggerHeroJsonDownload(char: Character): void {
+  const blob = new Blob([JSON.stringify(char, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${char.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'heroi'}.hero.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export interface MapPing {
   id: string;
@@ -54,6 +116,7 @@ export interface FloatingCombatVfx {
   tokenId: string;
   amount: number;
   isHeal: boolean;
+  note?: string;
 }
 
 export interface ThemeMusicBanner {
@@ -73,11 +136,20 @@ interface CampaignContextValue {
   campaign: CampaignState;
   savedCampaigns: CampaignSummary[];
   refreshSavedCampaigns: () => Promise<void>;
+  savedHeroes: SavedHeroEntry[];
+  refreshSavedHeroes: () => Promise<void>;
+  saveCharacterToVault: (char: Character, opts?: { silent?: boolean }) => Promise<void>;
+  deleteSavedHero: (heroId: string) => Promise<void>;
+  importSavedHeroIntoCampaign: (hero: Character) => void;
+  claimCampaignCharacter: (characterId: string) => void;
+  lastSavedHeroFeedback: { id: string; name: string; syncedAt: string } | null;
+  isRemoteTunnelSession: boolean;
   inLobby: boolean;
   setInLobby: (v: boolean) => void;
   loading: boolean;
   isConnected: boolean;
   connectedClients: number;
+  connectedPlayers: ConnectedPlayerInfo[];
   serverUrl: string;
   setServerUrl: (url: string) => void;
   networkAddresses: NetworkAddress[];
@@ -158,6 +230,32 @@ interface CampaignContextValue {
   dismissDuel: () => void;
   initiativeCeremony: InitiativeCeremonyState | null;
   showInitiativeCeremony: (ceremony: InitiativeCeremonyState | null) => void;
+  startCombatFromMap: () => void;
+
+  // Phase 2: Unified Hybrid Save Prompts (Traps, AoE, Concentration) & RP Chat / Whispers
+  activeSavePrompt: TacticalSavePrompt | null;
+  rollSavePromptTarget: (tokenId: string) => void;
+  rollAllPendingSaveTargets: () => void;
+  applySavePromptDamages: () => void;
+  dismissSavePrompt: () => void;
+  triggerTrapOnToken: (markerId: string, token: MapToken) => void;
+  triggerAoESavePrompt: (
+    templateId: string,
+    params: {
+      title: string;
+      saveSkillId: string;
+      saveLabel: string;
+      dc: number;
+      damageFormula: string;
+      damageType: string;
+      halfOnSuccess: boolean;
+    }
+  ) => void;
+  setCharacterConcentration: (characterId: string, spellName: string | null) => void;
+  chatMessages: ChatMessageEntry[];
+  unreadChatCount: number;
+  sendChatMessage: (text: string, recipientName?: string) => void;
+  markChatRead: () => void;
 
   // Lobby Actions
   createNewCampaign: (params: {
@@ -185,6 +283,7 @@ interface CampaignContextValue {
     characterId: string,
     mode: 'stabilize' | 'save-full' | 'revive-1' | 'revive-full'
   ) => void;
+  claimTreasureMarker: (markerId: string) => void;
   sendRoll: (entry: Omit<RollLogEntry, 'id' | 'timestamp'>) => void;
   quickRollFormula: (
     title: string,
@@ -209,7 +308,20 @@ interface CampaignContextValue {
     extraBonus?: number;
     extraDice?: string[];
   }) => void;
-  applyDamage: (targetTokenId: string, amount: number, isHeal?: boolean, rollId?: string) => void;
+  applyDamage: (
+    targetTokenId: string,
+    amount: number,
+    isHeal?: boolean,
+    rollId?: string,
+    damageType?: string
+  ) => void;
+  setCharacterNextAttackOverride: (
+    characterId: string,
+    override: 'advantage' | 'disadvantage' | null
+  ) => void;
+  canUndo: boolean;
+  undoCount: number;
+  undoLastAction: () => void;
   sendHandout: (handout: Omit<HandoutPayload, 'id' | 'sentAt'>) => void;
   triggerSound: (payload: {
     action: 'ambient' | 'sfx' | 'stop-ambient';
@@ -237,10 +349,20 @@ function getOrCreatePlayerId(): string {
 export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [campaign, setCampaign] = useState<CampaignState>(() => createStarterCampaign());
   const [savedCampaigns, setSavedCampaigns] = useState<CampaignSummary[]>([]);
+  const [savedHeroes, setSavedHeroes] = useState<SavedHeroEntry[]>(() => readLocalHeroVault());
+  const [lastSavedHeroFeedback, setLastSavedHeroFeedback] = useState<{
+    id: string;
+    name: string;
+    syncedAt: string;
+  } | null>(null);
+  const isRemoteTunnelSession =
+    typeof window !== 'undefined' &&
+    window.location.hostname.toLowerCase().includes('trycloudflare.com');
   const [inLobby, setInLobby] = useState<boolean>(true);
   const [loading, setLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [connectedClients, setConnectedClients] = useState(1);
+  const [connectedPlayers, setConnectedPlayers] = useState<ConnectedPlayerInfo[]>([]);
   const [networkAddresses, setNetworkAddresses] = useState<NetworkAddress[]>([]);
   const [publicTunnel, setPublicTunnel] = useState<{
     status: 'idle' | 'starting' | 'active' | 'error';
@@ -301,6 +423,9 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [pendingAttackChoice, setPendingAttackChoice] = useState<PendingAttackChoice | null>(null);
   const [tacticalAlert, setTacticalAlert] = useState<{ id: string; message: string } | null>(null);
   const [opportunityPrompt, setOpportunityPrompt] = useState<OpportunityAttackPrompt | null>(null);
+  const [activeSavePrompt, setActiveSavePrompt] = useState<TacticalSavePrompt | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessageEntry[]>([]);
+  const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [activeDuel, setActiveDuel] = useState<CombatDuelState | null>(null);
   const [initiativeCeremony, setInitiativeCeremony] = useState<InitiativeCeremonyState | null>(null);
 
@@ -311,7 +436,21 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const serverUrlRef = useRef(serverUrl);
   const prevMapIdRef = useRef<string>(campaign.activeMapId);
   const activeDuelRef = useRef<CombatDuelState | null>(null);
+  const activeSavePromptRef = useRef<TacticalSavePrompt | null>(null);
+  const startConcentrationPromptRef = useRef<
+    | ((payload: {
+        tokenId: string;
+        characterId?: string;
+        name: string;
+        spellName: string;
+        dc: number;
+        damageTaken: number;
+      }) => void)
+    | null
+  >(null);
   const pendingAttackRef = useRef<PendingAttackChoice | null>(null);
+  const inLobbyRef = useRef<boolean>(inLobby);
+  const hasPlayerCharRef = useRef<boolean>(false);
 
   const startDuelRef = useRef<((choice: PendingAttackChoice, tok: MapToken) => void) | null>(null);
 
@@ -338,6 +477,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   useEffect(() => {
     serverUrlRef.current = serverUrl;
   }, [serverUrl]);
+
+  useEffect(() => {
+    inLobbyRef.current = inLobby;
+  }, [inLobby]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -381,6 +524,16 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const setActiveCharacterId = useCallback((id: string) => {
     setActiveCharacterIdState(id);
     localStorage.setItem('rpg_active_char', id);
+    const camp = campaignRef.current;
+    const activeMap = camp.maps.find((m) => m.id === camp.activeMapId) || camp.maps[0];
+    const charTok = activeMap?.tokens.find(
+      (t) => t.type === 'character' && t.referenceId === id
+    );
+    if (charTok) {
+      setTargetTokenId(charTok.id);
+    } else if (roleRef.current === 'gm') {
+      setTargetTokenId(null);
+    }
   }, []);
 
   const setMyPlayerName = useCallback((name: string) => {
@@ -449,6 +602,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   );
 
   useEffect(() => {
+    hasPlayerCharRef.current = Boolean(myCharacter);
     if (role === 'player' && myCharacter && activeCharacterId !== myCharacter.id) {
       setActiveCharacterId(myCharacter.id);
     }
@@ -466,6 +620,44 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, []);
 
+  const savedHeroesRef = useRef<SavedHeroEntry[]>(savedHeroes);
+  useEffect(() => {
+    savedHeroesRef.current = savedHeroes;
+  }, [savedHeroes]);
+
+  const refreshSavedHeroes = useCallback(async () => {
+    const localStored = readLocalHeroVault();
+    const collected: SavedHeroEntry[][] = [localStored];
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+
+    try {
+      const resLocal = await fetch('/api/characters/saved');
+      if (resLocal.ok) {
+        const data = (await resLocal.json()) as { characters: SavedHeroEntry[] };
+        if (Array.isArray(data.characters)) collected.push(data.characters);
+      }
+    } catch {
+      // ignore
+    }
+
+    const remoteBase = serverUrlRef.current?.trim().replace(/\/+$/, '');
+    if (remoteBase && remoteBase !== origin) {
+      try {
+        const resRemote = await fetch(`${remoteBase}/api/characters/saved`);
+        if (resRemote.ok) {
+          const data = (await resRemote.json()) as { characters: SavedHeroEntry[] };
+          if (Array.isArray(data.characters)) collected.push(data.characters);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const merged = mergeSavedHeroLists(...collected);
+    writeLocalHeroVault(merged);
+    setSavedHeroes(merged);
+  }, []);
+
   useEffect(() => {
     let mounted = true;
     const base = serverUrl || '';
@@ -474,7 +666,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       .then((res) => (res.ok ? res.json() : null))
       .then((data: CampaignState | null) => {
         if (mounted && data && data.compendium) {
-          setCampaign(data);
+          setCampaign(syncCampaignDerivedCharacterStats(data));
         }
       })
       .catch(() => {})
@@ -483,6 +675,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
 
     refreshSavedCampaigns();
+    refreshSavedHeroes();
 
     fetch('/api/network-info')
       .then((res) => (res.ok ? res.json() : null))
@@ -519,18 +712,33 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (mounted) setConnectedClients(count);
     });
 
+    socket.on('presence:list', (list: ConnectedPlayerInfo[]) => {
+      if (mounted && Array.isArray(list)) setConnectedPlayers(list);
+    });
+
+    socket.on('characters:saved-updated', (serverList: SavedHeroEntry[]) => {
+      if (!mounted || !Array.isArray(serverList)) return;
+      setSavedHeroes((prev) => {
+        const merged = mergeSavedHeroLists(readLocalHeroVault(), prev, serverList);
+        writeLocalHeroVault(merged);
+        return merged;
+      });
+    });
+
     socket.on('tunnel:status', (st: { status: 'idle' | 'starting' | 'active' | 'error'; url: string; error?: string }) => {
       if (mounted && st?.status) setPublicTunnel(st);
     });
 
     socket.on('campaign:updated', (next: CampaignState) => {
       if (mounted && next && next.compendium) {
-        setCampaign(next);
+        setCampaign(syncCampaignDerivedCharacterStats(next));
       }
     });
 
     socket.on('roll:new', (entry: RollLogEntry) => {
       if (!mounted) return;
+      if (inLobbyRef.current) return;
+      if (roleRef.current === 'player' && !hasPlayerCharRef.current) return;
       if (entry.isSecret && roleRef.current !== 'gm') return;
       if (activeDuelRef.current) return;
       if (entry.rolledDice && entry.rolledDice.length > 0) {
@@ -562,14 +770,55 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setOpportunityPrompt(prompt);
     });
 
-    socket.on('floating:vfx', (vfx: { tokenId: string; amount: number; isHeal: boolean }) => {
+    socket.on('save-prompt:updated', (prompt: TacticalSavePrompt | null) => {
       if (!mounted) return;
-      const id = `fvfx-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
-      setFloatingVfx((prev) => [...prev, { ...vfx, id }]);
-      window.setTimeout(() => {
-        setFloatingVfx((prev) => prev.filter((x) => x.id !== id));
-      }, 1700);
+      activeSavePromptRef.current = prompt;
+      setActiveSavePrompt(prompt);
     });
+
+    socket.on('chat:new', (msg: ChatMessageEntry) => {
+      if (!mounted || !msg?.id) return;
+      setChatMessages((prev) =>
+        prev.some((m) => m.id === msg.id) ? prev : [...prev, msg].slice(-150)
+      );
+      if (msg.senderPlayerId !== myPlayerId) {
+        setUnreadChatCount((c) => c + 1);
+      }
+    });
+
+    socket.on(
+      'concentration:trigger',
+      (payload: {
+        tokenId: string;
+        characterId?: string;
+        name: string;
+        spellName: string;
+        dc: number;
+        damageTaken: number;
+      }) => {
+        if (!mounted) return;
+        const shouldInitiate =
+          roleRef.current === 'gm' ||
+          Boolean(payload.characterId && payload.characterId === activeCharRef.current);
+        if (!shouldInitiate) return;
+        if (activeSavePromptRef.current?.kind === 'concentration' && activeSavePromptRef.current.targets.some((t) => t.tokenId === payload.tokenId)) {
+          return;
+        }
+        startConcentrationPromptRef.current?.(payload);
+      }
+    );
+
+    socket.on(
+      'floating:vfx',
+      (vfx: { tokenId: string; amount: number; isHeal: boolean; note?: string }) => {
+        if (!mounted) return;
+        const id = `fvfx-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+        setFloatingVfx((prev) => [...prev, { ...vfx, id }]);
+        window.setTimeout(() => {
+          setFloatingVfx((prev) => prev.filter((x) => x.id !== id));
+        }, 2100);
+      }
+    );
 
     socket.on('pointer:bulk', (list: MapPointerState[]) => {
       if (!mounted) return;
@@ -717,24 +966,396 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       mounted = false;
       socket.disconnect();
     };
-  }, [serverUrl, refreshSavedCampaigns]);
+  }, [serverUrl, refreshSavedCampaigns, refreshSavedHeroes]);
 
-  const updateCampaign = useCallback((updater: (prev: CampaignState) => CampaignState) => {
-    setCampaign((prev) => {
-      const next = updater(prev);
-      if (socketRef.current?.connected) {
-        socketRef.current.emit('campaign:patch', next);
-      } else {
-        const base = serverUrlRef.current || '';
-        fetch(`${base}/api/campaign/update`, {
+  useEffect(() => {
+    if (!socketRef.current || !isConnected) return;
+    const controlledChar =
+      role === 'player'
+        ? myCharacter
+        : campaign.characters.find((c) => c.id === activeCharacterId);
+    socketRef.current.emit('presence:identify', {
+      playerId: myPlayerId,
+      playerName: role === 'gm' ? campaign.gmName || 'Mestre' : myPlayerName || 'Aventureiro',
+      playerColor:
+        role === 'gm'
+          ? '#f59e0b'
+          : myCharacter?.playerColor || myPlayerColor || '#38bdf8',
+      role,
+      characterId: controlledChar?.id,
+      characterName: controlledChar?.name,
+    });
+  }, [
+    isConnected,
+    myPlayerId,
+    myPlayerName,
+    myPlayerColor,
+    role,
+    myCharacter?.id,
+    myCharacter?.name,
+    myCharacter?.playerColor,
+    activeCharacterId,
+    campaign.gmName,
+    campaign.characters,
+  ]);
+
+  const autoSyncTimerRef = useRef<number | null>(null);
+
+  const persistHeroToVault = useCallback(
+    async (char: Character, opts?: { silent?: boolean }) => {
+      const now = new Date().toISOString();
+      const vaultId = char.vaultId || char.id;
+      const stampedChar: Character = {
+        ...char,
+        vaultId,
+        lastSyncedAt: now,
+      };
+      const newEntry: SavedHeroEntry = {
+        id: vaultId,
+        character: stampedChar,
+        savedAt: now,
+        updatedAt: now,
+        originCampaignId: campaignRef.current.id,
+        originCampaignName: campaignRef.current.name,
+      };
+
+      setSavedHeroes((prev) => {
+        const existing = prev.find((x) => x.id === vaultId);
+        const merged = mergeSavedHeroLists(prev, [
+          { ...newEntry, savedAt: existing?.savedAt || now },
+        ]);
+        writeLocalHeroVault(merged);
+        return merged;
+      });
+
+      const payload = JSON.stringify({
+        character: stampedChar,
+        originCampaignId: campaignRef.current.id,
+        originCampaignName: campaignRef.current.name,
+      });
+
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      try {
+        await fetch('/api/characters/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(next),
-        }).catch(() => {});
+          body: payload,
+        });
+      } catch {
+        // ignore
       }
+
+      const remoteBase = serverUrlRef.current?.trim().replace(/\/+$/, '');
+      if (remoteBase && remoteBase !== origin) {
+        try {
+          await fetch(`${remoteBase}/api/characters/save`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+          });
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!opts?.silent) {
+        setLastSavedHeroFeedback({ id: vaultId, name: char.name, syncedAt: now });
+        window.setTimeout(() => {
+          setLastSavedHeroFeedback((curr) => (curr?.syncedAt === now ? null : curr));
+        }, 3200);
+      }
+    },
+    []
+  );
+
+  const undoHistoryRef = useRef<CampaignState[]>([]);
+  const lastUndoPushMsRef = useRef<number>(0);
+  const [undoCount, setUndoCount] = useState(0);
+
+  const pushUndoSnapshot = useCallback((snapshot: CampaignState, force = false) => {
+    if (roleRef.current !== 'gm') return;
+    const now = Date.now();
+    if (!force && now - lastUndoPushMsRef.current < 450) return;
+    lastUndoPushMsRef.current = now;
+    try {
+      const cloned = JSON.parse(JSON.stringify(snapshot)) as CampaignState;
+      undoHistoryRef.current = [...undoHistoryRef.current.slice(-14), cloned];
+      setUndoCount(undoHistoryRef.current.length);
+    } catch {
+      // ignore clone errors
+    }
+  }, []);
+
+  const updateCampaign = useCallback(
+    (updater: (prev: CampaignState) => CampaignState) => {
+      setCampaign((prev) => {
+        pushUndoSnapshot(prev);
+        const next = syncCampaignDerivedCharacterStats(updater(prev));
+        if (socketRef.current?.connected) {
+          socketRef.current.emit('campaign:patch', next);
+        } else {
+          const base = serverUrlRef.current || '';
+          fetch(`${base}/api/campaign/update`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(next),
+          }).catch(() => {});
+        }
+
+        const knownIds = new Set(savedHeroesRef.current.map((h) => h.id));
+        const charsToSync = next.characters.filter(
+          (ch) => Boolean(ch.vaultId) || knownIds.has(ch.id)
+        );
+        if (charsToSync.length > 0) {
+          if (autoSyncTimerRef.current) window.clearTimeout(autoSyncTimerRef.current);
+          autoSyncTimerRef.current = window.setTimeout(() => {
+            charsToSync.forEach((ch) => {
+              persistHeroToVault(ch, { silent: true }).catch(() => {});
+            });
+          }, 800);
+        }
+
+        return next;
+      });
+    },
+    [persistHeroToVault, pushUndoSnapshot]
+  );
+
+  const undoLastAction = useCallback(() => {
+    if (roleRef.current !== 'gm' || undoHistoryRef.current.length === 0) return;
+    const previous = undoHistoryRef.current[undoHistoryRef.current.length - 1];
+    undoHistoryRef.current = undoHistoryRef.current.slice(0, -1);
+    setUndoCount(undoHistoryRef.current.length);
+    const restored = syncCampaignDerivedCharacterStats(previous);
+    setCampaign(restored);
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('campaign:patch', restored);
+    } else {
+      const base = serverUrlRef.current || '';
+      fetch(`${base}/api/campaign/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(restored),
+      }).catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (roleRef.current !== 'gm') return;
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z' || e.shiftKey) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (undoHistoryRef.current.length > 0) {
+        e.preventDefault();
+        undoLastAction();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undoLastAction]);
+
+  const setCharacterNextAttackOverride = useCallback(
+    (characterId: string, override: 'advantage' | 'disadvantage' | null) => {
+      updateCampaign((prev) => ({
+        ...prev,
+        characters: prev.characters.map((c) =>
+          c.id === characterId
+            ? {
+                ...c,
+                nextAttackRollOverride: c.nextAttackRollOverride === override ? null : override,
+              }
+            : c
+        ),
+      }));
+    },
+    [updateCampaign]
+  );
+
+  const saveCharacterToVault = useCallback(
+    async (char: Character, opts?: { silent?: boolean }) => {
+      await persistHeroToVault(char, opts);
+      // Stamp vaultId on campaign character if not yet linked so future edits auto-sync
+      if (!char.vaultId) {
+        const targetVaultId = char.id;
+        const inCamp = campaignRef.current.characters.some((c) => c.id === char.id);
+        if (inCamp) {
+          updateCampaign((prev) => ({
+            ...prev,
+            characters: prev.characters.map((c) =>
+              c.id === char.id
+                ? { ...c, vaultId: targetVaultId, lastSyncedAt: new Date().toISOString() }
+                : c
+            ),
+          }));
+        }
+      }
+    },
+    [persistHeroToVault, updateCampaign]
+  );
+
+  const deleteSavedHero = useCallback(async (heroId: string) => {
+    setSavedHeroes((prev) => {
+      const next = prev.filter((h) => h.id !== heroId);
+      writeLocalHeroVault(next);
       return next;
     });
+    try {
+      await fetch(`/api/characters/saved/${encodeURIComponent(heroId)}`, {
+        method: 'DELETE',
+      });
+    } catch {
+      // ignore
+    }
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const remoteBase = serverUrlRef.current?.trim().replace(/\/+$/, '');
+    if (remoteBase && remoteBase !== origin) {
+      try {
+        await fetch(`${remoteBase}/api/characters/saved/${encodeURIComponent(heroId)}`, {
+          method: 'DELETE',
+        });
+      } catch {
+        // ignore
+      }
+    }
   }, []);
+
+  const importSavedHeroIntoCampaign = useCallback(
+    (rawHero: Character) => {
+      const camp = campaignRef.current;
+      const normalized = normalizeHeroCharacter(rawHero, camp);
+      const vaultId = normalized.vaultId || normalized.id;
+
+      // Avoid ID collision if importing an independent copy, or reclaim same hero if present
+      const existingMatch = camp.characters.find(
+        (c) => c.id === normalized.id || (c.vaultId && c.vaultId === vaultId)
+      );
+      const finalCharId = existingMatch ? existingMatch.id : normalized.id;
+      const ownerUpdate =
+        roleRef.current === 'player'
+          ? {
+              ownerPlayerId: myPlayerId,
+              playerName: myPlayerName || normalized.playerName,
+              playerColor: myPlayerColor || normalized.playerColor,
+              tokenColor: myPlayerColor || normalized.tokenColor,
+            }
+          : {};
+
+      const finalChar: Character = {
+        ...normalized,
+        ...ownerUpdate,
+        id: finalCharId,
+        vaultId,
+        lastSyncedAt: new Date().toISOString(),
+      };
+      const stats = computeCharacterStats(finalChar, camp);
+      const clampedHp = Math.max(0, Math.min(stats.maxHp, finalChar.hp || stats.maxHp));
+      const clampedMp = Math.max(0, Math.min(stats.maxMp, finalChar.mp || stats.maxMp));
+      finalChar.hp = clampedHp;
+      finalChar.mp = clampedMp;
+
+      updateCampaign((prev) => {
+        const hasChar = prev.characters.some((c) => c.id === finalChar.id);
+        const nextChars = hasChar
+          ? prev.characters.map((c) => (c.id === finalChar.id ? finalChar : c))
+          : [...prev.characters, finalChar];
+
+        const nextMaps = prev.maps.map((m) => {
+          if (m.id !== prev.activeMapId) return m;
+          const existingTok = m.tokens.find(
+            (t) => t.type === 'character' && t.referenceId === finalChar.id
+          );
+          if (existingTok) {
+            return {
+              ...m,
+              tokens: m.tokens.map((t) =>
+                t.id === existingTok.id
+                  ? {
+                      ...t,
+                      name: finalChar.name.split(' ')[0],
+                      color: finalChar.playerColor || finalChar.tokenColor,
+                      frameStyle: finalChar.tokenFrameStyle || t.frameStyle,
+                      imageUrl: finalChar.portraitUrl || t.imageUrl,
+                      hp: finalChar.hp,
+                      maxHp: stats.maxHp,
+                      defense: stats.defense,
+                    }
+                  : t
+              ),
+            };
+          }
+          const spawnPos = findNearestFreeGridCell(
+            m,
+            2 + (prev.characters.length % 3),
+            4 + (prev.characters.length % 4),
+            1
+          );
+          return {
+            ...m,
+            tokens: [
+              ...m.tokens,
+              {
+                id: `tok-${finalChar.id}`,
+                name: finalChar.name.split(' ')[0],
+                type: 'character' as const,
+                referenceId: finalChar.id,
+                x: spawnPos.x,
+                y: spawnPos.y,
+                size: 1,
+                hp: finalChar.hp,
+                maxHp: stats.maxHp,
+                defense: stats.defense,
+                activeConditionIds: finalChar.activeConditionIds,
+                isHidden: false,
+                color: finalChar.playerColor || finalChar.tokenColor,
+                frameStyle: finalChar.tokenFrameStyle || 'gold',
+                imageUrl: finalChar.portraitUrl,
+              },
+            ],
+          };
+        });
+
+        return {
+          ...prev,
+          characters: nextChars,
+          maps: nextMaps,
+        };
+      });
+
+      persistHeroToVault(finalChar, { silent: false }).catch(() => {});
+      setActiveCharacterId(finalChar.id);
+    },
+    [myPlayerColor, myPlayerId, myPlayerName, persistHeroToVault, setActiveCharacterId, updateCampaign]
+  );
+
+  const claimCampaignCharacter = useCallback(
+    (characterId: string) => {
+      const target = campaignRef.current.characters.find((c) => c.id === characterId);
+      if (!target) return;
+      const claimed: Character = {
+        ...target,
+        ownerPlayerId: myPlayerId,
+        playerName: myPlayerName.trim() || target.playerName,
+        vaultId: target.vaultId || target.id,
+        lastSyncedAt: new Date().toISOString(),
+      };
+      updateCampaign((prev) => ({
+        ...prev,
+        characters: prev.characters.map((c) => (c.id === characterId ? claimed : c)),
+      }));
+      persistHeroToVault(claimed, { silent: false }).catch(() => {});
+      setActiveCharacterId(characterId);
+    },
+    [myPlayerId, myPlayerName, persistHeroToVault, setActiveCharacterId, updateCampaign]
+  );
 
   const setMyPlayerColor = useCallback(
     (color: string) => {
@@ -963,14 +1584,24 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       const stats = computeCharacterStats(char, campaignRef.current);
+      const matchingAbility = campaignRef.current.compendium.abilities.find(
+        (ab) => ab.name.trim().toLowerCase() === title.trim().toLowerCase()
+      );
+      const shouldSetConcentration = Boolean(matchingAbility?.requiresConcentration);
 
       updateCampaign((prev) => ({
         ...prev,
-        characters: prev.characters.map((c) =>
-          c.id === char.id && costMp && costMp > 0 ? { ...c, mp: Math.max(0, c.mp - costMp) } : c
-        ),
+        characters: prev.characters.map((c) => {
+          if (c.id !== char.id) return c;
+          const nextMp = costMp && costMp > 0 ? Math.max(0, c.mp - costMp) : c.mp;
+          return {
+            ...c,
+            mp: nextMp,
+            ...(shouldSetConcentration ? { concentratingSpell: title } : {}),
+          };
+        }),
         combat:
-          prev.combat.active && charCb && actionCost !== 'Livre'
+          prev.combat.active && charCb && (actionCost !== 'Livre' || shouldSetConcentration)
             ? {
                 ...prev.combat,
                 combatants: prev.combat.combatants.map((cb) =>
@@ -983,6 +1614,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                           actionCost === 'Bônus' ? false : cb.bonusActionAvailable,
                         reactionAvailable:
                           actionCost === 'Reação' ? false : cb.reactionAvailable,
+                        ...(shouldSetConcentration ? { concentratingSpell: title } : {}),
                       }
                 ),
               }
@@ -1115,16 +1747,45 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   );
 
   const applyDamage = useCallback(
-    (targetTokenIdParam: string, amount: number, isHeal = false, rollId?: string) => {
+    (
+      targetTokenIdParam: string,
+      amount: number,
+      isHeal = false,
+      rollId?: string,
+      damageType?: string
+    ) => {
+      pushUndoSnapshot(campaignRef.current, true);
       if (socketRef.current?.connected) {
         socketRef.current.emit('combat:apply-damage', {
           targetTokenId: targetTokenIdParam,
           amount,
           isHeal,
           rollId,
+          damageType,
         });
       } else {
-        const delta = isHeal ? Math.abs(amount) : -Math.abs(amount);
+        const curr = campaignRef.current;
+        const tok = curr.maps.flatMap((m) => m.tokens).find((t) => t.id === targetTokenIdParam);
+        const char = curr.characters.find(
+          (c) => c.id === tok?.referenceId || c.id === targetTokenIdParam
+        );
+        const mon =
+          tok?.type === 'monster' && tok.referenceId
+            ? curr.compendium.monsters.find((m) => m.id === tok.referenceId)
+            : undefined;
+        let finalAmt = Math.abs(amount);
+        if (!isHeal && damageType) {
+          finalAmt = resolveDamageWithAffinities(finalAmt, damageType, {
+            immunities: char?.damageImmunities || mon?.damageImmunities,
+            resistances: char?.damageResistances || mon?.damageResistances,
+            vulnerabilities: char?.damageVulnerabilities || mon?.damageVulnerabilities,
+            activeConditionIds: [
+              ...(tok?.activeConditionIds || []),
+              ...(char?.activeConditionIds || []),
+            ],
+          }).finalAmount;
+        }
+        const delta = isHeal ? finalAmt : -finalAmt;
         updateCampaign((prev) => ({
           ...prev,
           maps: prev.maps.map((m) => ({
@@ -1141,7 +1802,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }));
       }
     },
-    [updateCampaign]
+    [pushUndoSnapshot, updateCampaign]
   );
 
   const sendHandout = useCallback((handout: Omit<HandoutPayload, 'id' | 'sentAt'>) => {
@@ -1382,18 +2043,20 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setRole('player');
       setServerUrl(params.targetServerUrl);
       const base = params.targetServerUrl.trim().replace(/\/+$/, '');
+      serverUrlRef.current = base;
       try {
         const res = await fetch(`${base}/api/campaign`);
         if (res.ok) {
           const data = (await res.json()) as CampaignState;
-          setCampaign(data);
+          setCampaign(syncCampaignDerivedCharacterStats(data));
         }
       } catch {
         // socket will sync once connected
       }
+      refreshSavedHeroes().catch(() => {});
       setInLobby(false);
     },
-    [setMyPlayerName, setRole, setServerUrl]
+    [refreshSavedHeroes, setMyPlayerName, setRole, setServerUrl]
   );
 
   const resetCampaign = useCallback(async () => {
@@ -1437,9 +2100,22 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const sendPlayerRequest = useCallback(
     (type: PlayerRequest['type'], label: string, note?: string) => {
       const char =
-        campaignRef.current.characters.find((c) => c.id === activeCharRef.current) ||
-        campaignRef.current.characters[0];
+        roleRef.current === 'player'
+          ? campaignRef.current.characters.find(
+              (c) =>
+                c.ownerPlayerId === myPlayerId ||
+                c.id === activeCharRef.current
+            )
+          : campaignRef.current.characters.find((c) => c.id === activeCharRef.current) ||
+            campaignRef.current.characters[0];
       if (!char) return;
+      if (
+        (type === 'short-rest' || type === 'long-rest' || type === 'heal-mp') &&
+        (char.hp <= 0 || char.deathSaves?.dead || (char.deathSaves?.failures || 0) >= 3)
+      ) {
+        showTacticalAlert('Personagens caídos ou mortos (0 PV) não podem pedir descanso ou cura!');
+        return;
+      }
       const reqPayload: PlayerRequest = {
         id: `preq-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
         characterId: char.id,
@@ -1628,6 +2304,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   const emitDuelState = useCallback((duel: CombatDuelState | null) => {
+    activeDuelRef.current = duel;
     setActiveDuel(duel);
     if (socketRef.current?.connected) {
       socketRef.current.emit('duel:show', duel);
@@ -1673,8 +2350,12 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return;
       }
 
-      // 3. Range Validation (D&D Melee 1.5m vs Ranged Xm)
-      if (attackerToken && attackerToken.id !== defenderToken.id) {
+      // 3. Range Validation (D&D Melee 1.5m vs Ranged Xm; Reaction Opportunity Attacks fire right as the target leaves reach)
+      if (
+        choice.actionCost !== 'Reação' &&
+        attackerToken &&
+        attackerToken.id !== defenderToken.id
+      ) {
         const maxRangeMeters = parseAttackRangeMeters(choice.range, choice.actionTitle);
         const { meters: distMeters } = getGridSpanDistance(
           attackerToken.x,
@@ -1752,14 +2433,65 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       const stats = char ? computeCharacterStats(char, currCampaign) : undefined;
+      const defenderChar =
+        defenderToken.type === 'character' && defenderToken.referenceId
+          ? currCampaign.characters.find((c) => c.id === defenderToken.referenceId)
+          : undefined;
+
+      // Line of Sight (Walls block attacks) & Automatic Cover (+2 Half / +5 Three-Quarters AC)
+      const sqMetersVal = currCampaign.settings.gridSquareMeters || 1.5;
+      const isRangedForLos =
+        actionCost !== 'Reação' &&
+        parseAttackRangeMeters(choice.range, choice.actionTitle) > sqMetersVal + 0.05;
+      const losResult = evaluateLineOfSightAndCover(
+        activeMap,
+        attackerToken,
+        defenderToken,
+        isRangedForLos
+      );
+      if (losResult.blockedByWall) {
+        showTacticalAlert(
+          `Alvo sem linha de visão! Uma parede bloqueia "${choice.actionTitle}" contra ${defenderToken.name}.`
+        );
+        return;
+      }
+      const effectiveDefenderAc = defenderToken.defense + losResult.coverAcBonus;
+
+      // Full D&D 5e situational attack modifiers:
+      // Ranged in melee (1.5m), GM next-attack grant, Flanking, Dodge, Conditions (Prone, Paralyzed, Invisible, etc.)
+      const tacticalMods = evaluateTacticalAttackModifiers({
+        map: activeMap,
+        attackerToken,
+        defenderToken,
+        attackerChar: char,
+        defenderChar,
+        characters: currCampaign.characters,
+        range: choice.range,
+        actionTitle: choice.actionTitle,
+        sqMeters: sqMetersVal,
+        enableFlanking: currCampaign.settings.enableFlanking ?? true,
+        manualAdvantageMode: advantageMode,
+        defenderDodging: Boolean(defenderCb?.dodging),
+        isReaction: actionCost === 'Reação',
+      });
+      const allSituationalBadges = losResult.coverLabel
+        ? [...tacticalMods.summaryBadges, losResult.coverLabel]
+        : tacticalMods.summaryBadges;
 
       updateCampaign((prev) => ({
         ...prev,
-        characters: prev.characters.map((c) =>
-          choice.costMp && choice.costMp > 0 && char && c.id === char.id
-            ? { ...c, mp: Math.max(0, c.mp - choice.costMp) }
-            : c
-        ),
+        characters: prev.characters.map((c) => {
+          if (!char || c.id !== char.id) return c;
+          const nextMp =
+            choice.costMp && choice.costMp > 0 ? Math.max(0, c.mp - choice.costMp) : c.mp;
+          const clearGmOverride = Boolean(tacticalMods.gmOverrideUsed);
+          if (nextMp === c.mp && !clearGmOverride) return c;
+          return {
+            ...c,
+            mp: nextMp,
+            nextAttackRollOverride: clearGmOverride ? null : c.nextAttackRollOverride,
+          };
+        }),
         combat:
           prev.combat.active && attackerCb && actionCost !== 'Livre'
             ? {
@@ -1780,17 +2512,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             : prev.combat,
       }));
 
-      // If defender used Esquivar (Dodge), impose disadvantage unless attacker already had advantage (cancel to normal)
-      const effectiveAdvMode: RollAdvantageMode = defenderCb?.dodging
-        ? advantageMode === 'advantage'
-          ? 'normal'
-          : 'disadvantage'
-        : advantageMode;
-
       const hasAttackRoll = Boolean(choice.attackFormula && choice.attackFormula.trim());
       const attackRes = hasAttackRoll
         ? evaluateFormula(choice.attackFormula!, stats, char, {
-            advantageMode: effectiveAdvMode,
+            advantageMode: tacticalMods.effectiveAdvantageMode,
             extraFlatBonus: stats?.attackBonusExtra,
             extraDiceBonuses: stats?.attackDiceBonuses,
           })
@@ -1798,7 +2523,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       const hitSuccess = !attackRes
         ? true
-        : attackRes.isCrit || (!attackRes.isFumble && attackRes.total >= defenderToken.defense);
+        : attackRes.isCrit || (!attackRes.isFumble && attackRes.total >= effectiveDefenderAc);
+      const effectiveIsCrit = Boolean(
+        attackRes?.isCrit || (hitSuccess && tacticalMods.autoCritOnHit)
+      );
 
       const duel: CombatDuelState = {
         id: `duel-${Date.now()}`,
@@ -1807,11 +2535,12 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         attackerImageUrl: choice.attackerImageUrl,
         attackerFrame: choice.attackerFrame,
         defenderTokenId: defenderToken.id,
+        defenderType: defenderToken.type,
         defenderName: defenderToken.name,
         defenderColor: defenderToken.color,
         defenderImageUrl: defenderToken.imageUrl,
         defenderFrame: defenderToken.frameStyle,
-        defenderDefense: defenderToken.defense,
+        defenderDefense: effectiveDefenderAc,
         defenderHpBefore: defenderToken.hp,
         defenderMaxHp: defenderToken.maxHp,
         actionTitle: choice.actionTitle,
@@ -1820,11 +2549,14 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         attackRolledDice: attackRes?.rolledDice || [],
         attackTotal: attackRes?.total,
         d20Natural: attackRes?.d20Natural,
-        isCrit: attackRes?.isCrit || false,
+        isCrit: effectiveIsCrit,
         isFumble: attackRes?.isFumble || false,
         hitSuccess,
         damageFormula: choice.damageFormula,
         damageType: choice.damageType,
+        situationalModifiers: allSituationalBadges,
+        effectiveAdvantageMode: tacticalMods.effectiveAdvantageMode,
+        autoCritOnHit: tacticalMods.autoCritOnHit,
         phase: hasAttackRoll ? 'rolling-attack' : 'rolling-damage',
       };
 
@@ -1833,6 +2565,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       soundEngine.playSfxPreset('dice');
 
       if (attackRes) {
+        const modSuffix =
+          allSituationalBadges.length > 0
+            ? ` • ${allSituationalBadges.join(' | ')}`
+            : '';
         sendRoll({
           rollerName: choice.attackerName,
           rollerRole: roleRef.current,
@@ -1844,22 +2580,24 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           rolledDice: attackRes.rolledDice,
           d20Natural: attackRes.d20Natural,
           total: attackRes.total,
-          isCrit: attackRes.isCrit,
+          isCrit: effectiveIsCrit,
           isFumble: attackRes.isFumble,
           targetName: defenderToken.name,
           targetTokenId: defenderToken.id,
-          targetDefense: defenderToken.defense,
+          targetDefense: effectiveDefenderAc,
           hitStatus: hitSuccess ? 'hit' : 'miss',
           isSecret: false,
-          details: hitSuccess
-            ? `ACERTOU! (${attackRes.total} vs CA ${defenderToken.defense})`
-            : `BLOQUEADO! (${attackRes.total} vs CA ${defenderToken.defense})`,
+          details: `${
+            hitSuccess
+              ? `ACERTOU! (${attackRes.total} vs CA ${effectiveDefenderAc})`
+              : `BLOQUEADO! (${attackRes.total} vs CA ${effectiveDefenderAc})`
+          }${modSuffix}`,
         });
 
         window.setTimeout(() => {
-          setActiveDuel((curr) =>
-            curr && curr.id === duel.id ? { ...curr, phase: 'attack-result' } : curr
-          );
+          if (activeDuelRef.current?.id === duel.id) {
+            emitDuelState({ ...duel, phase: 'attack-result' });
+          }
           if (!hitSuccess) {
             triggerSlashVfx(defenderToken.id, 'block');
           } else {
@@ -1880,12 +2618,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         emitDuelState(dmgDuel);
 
         window.setTimeout(() => {
-          setActiveDuel((curr) =>
-            curr && curr.id === dmgDuel.id
-              ? { ...curr, phase: 'damage-result', damageApplied: true }
-              : curr
-          );
-          applyDamage(defenderToken.id, dmgTotal, isHealing);
+          if (activeDuelRef.current?.id === dmgDuel.id) {
+            emitDuelState({ ...dmgDuel, phase: 'damage-result', damageApplied: true });
+          }
+          applyDamage(defenderToken.id, dmgTotal, isHealing, undefined, choice.damageType);
           triggerSlashVfx(defenderToken.id, isHealing ? 'heal' : 'hit');
           soundEngine.playSfxPreset(isHealing ? 'heal' : 'fireball');
         }, 680);
@@ -1918,12 +2654,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     soundEngine.playSfxPreset('dice');
 
     window.setTimeout(() => {
-      setActiveDuel((curr) =>
-        curr && curr.id === nextDuel.id
-          ? { ...curr, phase: 'damage-result', damageApplied: true }
-          : curr
-      );
-      applyDamage(duel.defenderTokenId, dmgTotal, isHealing);
+      if (activeDuelRef.current?.id === nextDuel.id) {
+        emitDuelState({ ...nextDuel, phase: 'damage-result', damageApplied: true });
+      }
+      applyDamage(duel.defenderTokenId, dmgTotal, isHealing, undefined, duel.damageType);
       triggerSlashVfx(duel.defenderTokenId, isHealing ? 'heal' : 'hit');
       soundEngine.playSfxPreset(isHealing ? 'heal' : duel.damageType?.toLowerCase().includes('fogo') ? 'fireball' : 'sword');
 
@@ -2023,7 +2757,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         nextHp = 1;
         nextSucc = 0;
         nextFail = 0;
-        msg = '20 NATURAL! Levantou consciente com 1 PV!';
+        msg = '20 NATURAL! Renasceu imediatamente com 1 PV!';
       } else if (nat === 1) {
         nextFail = Math.min(3, nextFail + 2);
         nextDead = nextFail >= 3;
@@ -2032,10 +2766,15 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           : `1 NATURAL! Duas falhas nos Portões da Morte (${nextFail}/3).`;
       } else if (nat >= 10) {
         nextSucc = Math.min(3, nextSucc + 1);
-        nextStabilized = nextSucc >= 3;
-        msg = nextStabilized
-          ? '3º Sucesso! Personagem ESTABILIZADO (0 PV, fora de perigo).'
-          : `Sucesso contra a Morte (${nextSucc}/3).`;
+        if (nextSucc >= 3) {
+          nextHp = 1;
+          nextSucc = 0;
+          nextFail = 0;
+          nextStabilized = false;
+          msg = '3º Sucesso contra a Morte! O herói venceu os Portões da Morte e renasceu com 1 PV!';
+        } else {
+          msg = `Sucesso contra a Morte (${nextSucc}/3).`;
+        }
       } else {
         nextFail = Math.min(3, nextFail + 1);
         nextDead = nextFail >= 3;
@@ -2089,7 +2828,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const charTok = activeMap?.tokens.find(
         (t) => t.type === 'character' && t.referenceId === char.id
       );
-      if (nat === 20 || nextStabilized) {
+      if (nextHp > 0 || nextStabilized) {
         soundEngine.playSfxPreset('heal');
         if (charTok) triggerSlashVfx(charTok.id, 'heal');
       }
@@ -2187,12 +2926,13 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const res = evaluateFormula(`1d20 + ${medBonus}`, helperStats, helper);
       const isCritWake = res.d20Natural === 20;
       const stabilizedNow = !isCritWake && res.total >= 10;
+      const revivedWithOneHp = isCritWake || stabilizedNow;
 
       updateCampaign((prev) => ({
         ...prev,
         characters: prev.characters.map((c) => {
           if (c.id !== target.id) return c;
-          if (isCritWake) {
+          if (revivedWithOneHp) {
             return {
               ...c,
               hp: 1,
@@ -2205,18 +2945,6 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               },
             };
           }
-          if (stabilizedNow) {
-            return {
-              ...c,
-              deathSaves: {
-                ...(c.deathSaves || { successes: 0, failures: 0 }),
-                successes: 3,
-                stabilized: true,
-                dead: false,
-                assistedBy: helper.name,
-              },
-            };
-          }
           return {
             ...c,
             deathSaves: {
@@ -2225,7 +2953,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             },
           };
         }),
-        maps: isCritWake
+        maps: revivedWithOneHp
           ? prev.maps.map((m) => ({
               ...m,
               tokens: m.tokens.map((t) =>
@@ -2236,7 +2964,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         combat: {
           ...prev.combat,
           combatants: prev.combat.combatants.map((cb) => {
-            if (isCritWake && cb.type === 'character' && cb.referenceId === target.id) {
+            if (revivedWithOneHp && cb.type === 'character' && cb.referenceId === target.id) {
               return { ...cb, hp: 1 };
             }
             if (prev.combat.active && cb.referenceId === helper.id) {
@@ -2247,7 +2975,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         },
       }));
 
-      if (isCritWake || stabilizedNow) {
+      if (revivedWithOneHp) {
         soundEngine.playSfxPreset('heal');
         if (targetTok) triggerSlashVfx(targetTok.id, 'heal');
       }
@@ -2269,7 +2997,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         details: isCritWake
           ? `20 NATURAL! ${helper.name} reanimou ${target.name} com 1 PV!`
           : stabilizedNow
-            ? `SUCESSO (${res.total} vs CD 10)! ${helper.name} estabilizou ${target.name} nos Portões da Morte!`
+            ? `SUCESSO (${res.total} vs CD 10)! ${helper.name} socorreu ${target.name}, que renasceu com 1 PV!`
             : `Medicina ${res.total} vs CD 10 — ${target.name} ainda sangra, mas recebe VANTAGEM (2d20) no próximo Teste contra a Morte graças a ${helper.name}!`,
       });
     },
@@ -2288,28 +3016,17 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const stats = computeCharacterStats(char, camp);
 
       const nextHp =
-        mode === 'stabilize'
-          ? 0
-          : mode === 'revive-1'
-            ? 1
-            : stats.maxHp;
+        mode === 'stabilize' || mode === 'revive-1'
+          ? 1
+          : stats.maxHp;
 
-      const nextDeathSaves =
-        mode === 'stabilize'
-          ? {
-              successes: 3,
-              failures: 0,
-              stabilized: true,
-              dead: false,
-              assistedBy: undefined,
-            }
-          : {
-              successes: 0,
-              failures: 0,
-              stabilized: false,
-              dead: false,
-              assistedBy: undefined,
-            };
+      const nextDeathSaves = {
+        successes: 0,
+        failures: 0,
+        stabilized: false,
+        dead: false,
+        assistedBy: undefined,
+      };
 
       updateCampaign((prev) => ({
         ...prev,
@@ -2366,6 +3083,704 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [sendRoll, triggerSlashVfx, updateCampaign]
   );
 
+  const claimTreasureMarker = useCallback(
+    (markerId: string) => {
+      const camp = campaignRef.current;
+      const activeMap = camp.maps.find((m) => m.id === camp.activeMapId);
+      if (!activeMap) return;
+      const marker = (activeMap.gmMarkers || []).find((gm) => gm.id === markerId);
+      if (!marker || (!marker.revealed && roleRef.current !== 'gm')) return;
+
+      const char =
+        roleRef.current === 'player'
+          ? camp.characters.find((c) => c.ownerPlayerId === myPlayerId) ||
+            camp.characters.find((c) => c.id === activeCharRef.current)
+          : camp.characters.find((c) => c.id === activeCharRef.current) || camp.characters[0];
+
+      if (!char) {
+        showTacticalAlert('Nenhum herói selecionado para pegar o tesouro.');
+        return;
+      }
+      if (char.hp <= 0) {
+        showTacticalAlert(`${char.name} está caído (0 PV) e não pode pegar o tesouro!`);
+        return;
+      }
+
+      const heroTok = activeMap.tokens.find(
+        (t) => t.type === 'character' && t.referenceId === char.id
+      );
+      if (heroTok && roleRef.current !== 'gm') {
+        const sqMeters = camp.settings.gridSquareMeters || 1.5;
+        const dist = getGridSpanDistance(
+          heroTok.x,
+          heroTok.y,
+          heroTok.size,
+          marker.x,
+          marker.y,
+          1,
+          sqMeters
+        );
+        if (dist.squares > 1) {
+          showTacticalAlert(
+            `Aproxime-se de "${marker.title}" (${dist.meters}m — fique a até 1,5m para pegar o tesouro).`
+          );
+          return;
+        }
+      }
+
+      const lootItems = marker.lootItems || [];
+      const lootGold = Math.max(0, marker.lootGold || 0);
+      if (lootItems.length === 0 && lootGold === 0) {
+        showTacticalAlert(`"${marker.title}" já está vazio.`);
+        return;
+      }
+
+      updateCampaign((prev) => ({
+        ...prev,
+        characters: prev.characters.map((c) => {
+          if (c.id !== char.id) return c;
+          const nextInventory = [...c.inventory];
+          for (const loot of lootItems) {
+            if (loot.quantity <= 0) continue;
+            const existingIdx = nextInventory.findIndex((inv) => inv.itemId === loot.itemId);
+            if (existingIdx >= 0) {
+              nextInventory[existingIdx] = {
+                ...nextInventory[existingIdx],
+                quantity: nextInventory[existingIdx].quantity + loot.quantity,
+              };
+            } else {
+              nextInventory.push({
+                id: `inv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                itemId: loot.itemId,
+                quantity: loot.quantity,
+                equipped: false,
+              });
+            }
+          }
+          return {
+            ...c,
+            gold: (c.gold || 0) + lootGold,
+            inventory: nextInventory,
+          };
+        }),
+        maps: prev.maps.map((m) =>
+          m.id !== activeMap.id
+            ? m
+            : {
+                ...m,
+                gmMarkers: (m.gmMarkers || []).filter((gm) => gm.id !== markerId),
+              }
+        ),
+      }));
+
+      soundEngine.playSfxPreset('heal');
+      const itemLabels = lootItems
+        .map((li) => {
+          const def = camp.compendium.items.find((i) => i.id === li.itemId);
+          return `${li.quantity}x ${def?.name || 'Item'}`;
+        })
+        .concat(lootGold > 0 ? [`${lootGold} PO`] : []);
+
+      sendRoll({
+        rollerName: char.name,
+        rollerRole: roleRef.current,
+        rollerColor: char.playerColor || char.tokenColor,
+        diceSkin: char.diceSkin || 'gold',
+        title: `Tesouro Coletado: ${marker.title}`,
+        formula: 'Saque',
+        individualRolls: [],
+        total: lootGold,
+        isSecret: false,
+        details: `${char.name} pegou: ${itemLabels.join(', ')}.`,
+      });
+    },
+    [myPlayerId, sendRoll, showTacticalAlert, updateCampaign]
+  );
+
+  // Sync visible chat history from campaign.chatLog (hiding other players' private whispers)
+  useEffect(() => {
+    const rawChat = campaign.chatLog || [];
+    const myCharNameLower = (myCharacter?.name || '').toLowerCase();
+    const myNameLower = (myPlayerName || '').toLowerCase();
+    const visible = rawChat.filter((m) => {
+      if (!m.isWhisper) return true;
+      if (role === 'gm') return true;
+      if (m.senderPlayerId === myPlayerId) return true;
+      if (m.recipientPlayerId && m.recipientPlayerId === myPlayerId) return true;
+      const recLower = (m.recipientName || '').toLowerCase();
+      return Boolean(
+        recLower && (recLower === myNameLower || (myCharNameLower && recLower === myCharNameLower))
+      );
+    });
+    setChatMessages((prev) => {
+      const byId = new Map<string, ChatMessageEntry>();
+      visible.forEach((m) => byId.set(m.id, m));
+      prev.forEach((m) => {
+        if (!byId.has(m.id)) byId.set(m.id, m);
+      });
+      return Array.from(byId.values()).slice(-150);
+    });
+  }, [campaign.chatLog, myCharacter?.name, myPlayerId, myPlayerName, role]);
+
+  const emitSavePromptState = useCallback((prompt: TacticalSavePrompt | null) => {
+    activeSavePromptRef.current = prompt;
+    setActiveSavePrompt(prompt);
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('save-prompt:update', prompt);
+    }
+  }, []);
+
+  const getTokenSaveBonus = useCallback(
+    (tok: MapToken, saveSkillId: string): number => {
+      const camp = campaignRef.current;
+      if (tok.type === 'character' && tok.referenceId) {
+        const ch = camp.characters.find((c) => c.id === tok.referenceId);
+        if (ch) {
+          const st = computeCharacterStats(ch, camp);
+          if (st.skills[saveSkillId]) return st.skills[saveSkillId].total;
+          if (saveSkillId === 'fortitude' || saveSkillId === 'con') return st.attributes['con']?.mod ?? 0;
+          if (saveSkillId === 'reflexos' || saveSkillId === 'des') return st.attributes['des']?.mod ?? 0;
+          if (saveSkillId === 'vontade' || saveSkillId === 'sab') return st.attributes['sab']?.mod ?? 0;
+          return 0;
+        }
+      }
+      if (tok.type === 'monster' && tok.referenceId) {
+        const mon = camp.compendium.monsters.find((m) => m.id === tok.referenceId);
+        if (mon) {
+          if (saveSkillId === 'fortitude' || saveSkillId === 'con') return mon.saves.fort;
+          if (saveSkillId === 'reflexos' || saveSkillId === 'des') return mon.saves.ref;
+          if (saveSkillId === 'vontade' || saveSkillId === 'sab') return mon.saves.von;
+        }
+      }
+      return 0;
+    },
+    []
+  );
+
+  const setCharacterConcentration = useCallback(
+    (characterId: string, spellName: string | null) => {
+      updateCampaign((prev) => ({
+        ...prev,
+        characters: prev.characters.map((c) =>
+          c.id === characterId ? { ...c, concentratingSpell: spellName } : c
+        ),
+        combat: {
+          ...prev.combat,
+          combatants: prev.combat.combatants.map((cb) =>
+            cb.referenceId === characterId ? { ...cb, concentratingSpell: spellName } : cb
+          ),
+        },
+      }));
+    },
+    [updateCampaign]
+  );
+
+  const startTacticalSavePrompt = useCallback(
+    (params: {
+      kind: TacticalSavePrompt['kind'];
+      title: string;
+      subtitle?: string;
+      saveSkillId: string;
+      saveLabel: string;
+      dc: number;
+      damageFormula?: string;
+      damageType?: string;
+      halfOnSuccess?: boolean;
+      tokens: MapToken[];
+    }) => {
+      if (params.tokens.length === 0) return;
+      const rawDamage =
+        params.damageFormula && params.damageFormula.trim()
+          ? Math.max(1, evaluateFormula(params.damageFormula).total)
+          : 0;
+
+      const entries: TacticalSaveTargetEntry[] = params.tokens.map((tok) => {
+        const isMonsterOrNpc = tok.type !== 'character';
+        if (isMonsterOrNpc) {
+          const bonus = getTokenSaveBonus(tok, params.saveSkillId);
+          const d20 = Math.floor(Math.random() * 20) + 1;
+          const total = d20 + bonus;
+          const passed = total >= params.dc;
+          const dmg =
+            rawDamage > 0
+              ? passed
+                ? params.halfOnSuccess
+                  ? Math.floor(rawDamage / 2)
+                  : 0
+                : rawDamage
+              : 0;
+          return {
+            tokenId: tok.id,
+            characterId: tok.type === 'character' ? tok.referenceId : undefined,
+            name: tok.name,
+            type: tok.type,
+            color: tok.color,
+            imageUrl: tok.imageUrl,
+            status: passed ? 'passed' : 'failed',
+            d20,
+            bonus,
+            total,
+            damageToApply: dmg,
+            applied: false,
+          };
+        }
+
+        // Hybrid Mode: Player characters stay pending so the player clicks & rolls their own d20!
+        return {
+          tokenId: tok.id,
+          characterId: tok.referenceId,
+          name: tok.name,
+          type: tok.type,
+          color: tok.color,
+          imageUrl: tok.imageUrl,
+          status: 'pending',
+          damageToApply: rawDamage,
+          applied: false,
+        };
+      });
+
+      const prompt: TacticalSavePrompt = {
+        id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        kind: params.kind,
+        title: params.title,
+        subtitle: params.subtitle,
+        saveSkillId: params.saveSkillId,
+        saveLabel: params.saveLabel,
+        dc: params.dc,
+        damageFormula: params.damageFormula,
+        damageType: params.damageType,
+        halfOnSuccess: params.halfOnSuccess,
+        rolledRawDamage: rawDamage,
+        targets: entries,
+      };
+      emitSavePromptState(prompt);
+      soundEngine.playSfxPreset(params.kind === 'trap' ? 'sword' : 'dice');
+    },
+    [emitSavePromptState, getTokenSaveBonus]
+  );
+
+  const rollSavePromptTarget = useCallback(
+    (tokenId: string) => {
+      const prompt = activeSavePromptRef.current;
+      if (!prompt) return;
+      const camp = campaignRef.current;
+      const activeMap = camp.maps.find((m) => m.id === camp.activeMapId) || camp.maps[0];
+      const tok = activeMap?.tokens.find((t) => t.id === tokenId);
+      const entry = prompt.targets.find((t) => t.tokenId === tokenId);
+      if (!entry || entry.status !== 'pending') return;
+
+      const bonus = tok ? getTokenSaveBonus(tok, prompt.saveSkillId) : 0;
+      const d20 = Math.floor(Math.random() * 20) + 1;
+      const total = d20 + bonus;
+      const passed = total >= prompt.dc;
+      const rawDmg = prompt.rolledRawDamage || 0;
+      const dmgToApply =
+        rawDmg > 0
+          ? passed
+            ? prompt.halfOnSuccess
+              ? Math.floor(rawDmg / 2)
+              : 0
+            : rawDmg
+          : 0;
+
+      const updated: TacticalSavePrompt = {
+        ...prompt,
+        targets: prompt.targets.map((t) =>
+          t.tokenId === tokenId
+            ? {
+                ...t,
+                status: passed ? 'passed' : 'failed',
+                d20,
+                bonus,
+                total,
+                damageToApply: dmgToApply,
+              }
+            : t
+        ),
+      };
+      emitSavePromptState(updated);
+
+      const ch = entry.characterId
+        ? camp.characters.find((c) => c.id === entry.characterId)
+        : undefined;
+
+      sendRoll({
+        rollerName: entry.name,
+        rollerRole: entry.type === 'character' ? 'player' : 'gm',
+        rollerColor: entry.color,
+        diceSkin: (ch?.diceSkin || 'gold') as DiceSkin,
+        title: `${prompt.title} — ${prompt.saveLabel} (CD ${prompt.dc})`,
+        formula: `1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`,
+        individualRolls: [`1d20: [${d20}] ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`],
+        rolledDice: [{ sides: 20, value: d20 }],
+        d20Natural: d20,
+        total,
+        isCrit: d20 === 20,
+        isFumble: d20 === 1,
+        isSecret: false,
+        details:
+          prompt.kind === 'concentration'
+            ? passed
+              ? `CONCENTRAÇÃO MANTIDA! (${total} vs CD ${prompt.dc})`
+              : `CONCENTRAÇÃO QUEBRADA! (${total} vs CD ${prompt.dc})`
+            : passed
+              ? `PASSOU NA SALVAGUARDA! (${total} vs CD ${prompt.dc})${dmgToApply > 0 ? ` • Metade: ${dmgToApply}` : ' • Sem dano'}`
+              : `FALHOU NA SALVAGUARDA! (${total} vs CD ${prompt.dc})${dmgToApply > 0 ? ` • Dano: ${dmgToApply}` : ''}`,
+      });
+
+      if (prompt.kind === 'concentration' && !passed && entry.characterId) {
+        setCharacterConcentration(entry.characterId, null);
+      }
+    },
+    [emitSavePromptState, getTokenSaveBonus, sendRoll, setCharacterConcentration]
+  );
+
+  const rollAllPendingSaveTargets = useCallback(() => {
+    const prompt = activeSavePromptRef.current;
+    if (!prompt) return;
+    const camp = campaignRef.current;
+    const activeMap = camp.maps.find((m) => m.id === camp.activeMapId) || camp.maps[0];
+    const rawDmg = prompt.rolledRawDamage || 0;
+    const brokenConcCharIds: string[] = [];
+
+    const nextTargets = prompt.targets.map((t) => {
+      if (t.status !== 'pending') return t;
+      const tok = activeMap?.tokens.find((x) => x.id === t.tokenId);
+      const bonus = tok ? getTokenSaveBonus(tok, prompt.saveSkillId) : 0;
+      const d20 = Math.floor(Math.random() * 20) + 1;
+      const total = d20 + bonus;
+      const passed = total >= prompt.dc;
+      const dmgToApply =
+        rawDmg > 0
+          ? passed
+            ? prompt.halfOnSuccess
+              ? Math.floor(rawDmg / 2)
+              : 0
+            : rawDmg
+          : 0;
+      if (prompt.kind === 'concentration' && !passed && t.characterId) {
+        brokenConcCharIds.push(t.characterId);
+      }
+      return {
+        ...t,
+        status: (passed ? 'passed' : 'failed') as 'passed' | 'failed',
+        d20,
+        bonus,
+        total,
+        damageToApply: dmgToApply,
+      };
+    });
+
+    emitSavePromptState({ ...prompt, targets: nextTargets });
+    soundEngine.playSfxPreset('dice');
+    brokenConcCharIds.forEach((cid) => setCharacterConcentration(cid, null));
+  }, [emitSavePromptState, getTokenSaveBonus, setCharacterConcentration]);
+
+  const applySavePromptDamages = useCallback(() => {
+    const prompt = activeSavePromptRef.current;
+    if (!prompt) return;
+    const nextTargets = prompt.targets.map((t) => {
+      if (t.status === 'pending' || t.applied) return t;
+      if (t.damageToApply > 0) {
+        applyDamage(t.tokenId, t.damageToApply, false, undefined, prompt.damageType);
+        triggerSlashVfx(t.tokenId, 'hit');
+      }
+      return { ...t, applied: true };
+    });
+    emitSavePromptState({ ...prompt, targets: nextTargets });
+    soundEngine.playSfxPreset('fireball');
+  }, [applyDamage, emitSavePromptState, triggerSlashVfx]);
+
+  const dismissSavePrompt = useCallback(() => {
+    emitSavePromptState(null);
+  }, [emitSavePromptState]);
+
+  const triggerTrapOnToken = useCallback(
+    (markerId: string, token: MapToken) => {
+      const camp = campaignRef.current;
+      const activeMap = camp.maps.find((m) => m.id === camp.activeMapId) || camp.maps[0];
+      const marker = activeMap?.gmMarkers?.find((gm) => gm.id === markerId);
+      if (!marker || marker.kind !== 'trap' || marker.trapTriggered) return;
+
+      // Reveal & mark triggered so it does not double-fire
+      updateCampaign((prev) => ({
+        ...prev,
+        maps: prev.maps.map((m) =>
+          m.id === activeMap.id
+            ? {
+                ...m,
+                gmMarkers: (m.gmMarkers || []).map((gm) =>
+                  gm.id === markerId ? { ...gm, revealed: true, trapTriggered: true } : gm
+                ),
+              }
+            : m
+        ),
+      }));
+
+      const saveSkillId = marker.trapSaveSkillId || 'reflexos';
+      const saveLabel =
+        saveSkillId === 'fortitude'
+          ? 'Fortitude (CON)'
+          : saveSkillId === 'vontade'
+            ? 'Vontade (SAB)'
+            : 'Reflexos (DES)';
+
+      startTacticalSavePrompt({
+        kind: 'trap',
+        title: `Armadilha: ${marker.title}`,
+        subtitle: marker.description || `${token.name} acionou uma armadilha oculta!`,
+        saveSkillId,
+        saveLabel,
+        dc: marker.trapDc || 13,
+        damageFormula: marker.trapDamageFormula || '2d6',
+        damageType: marker.trapDamageType || 'Perfuração',
+        halfOnSuccess: true,
+        tokens: [token],
+      });
+    },
+    [startTacticalSavePrompt, updateCampaign]
+  );
+
+  const triggerAoESavePrompt = useCallback(
+    (
+      templateId: string,
+      params: {
+        title: string;
+        saveSkillId: string;
+        saveLabel: string;
+        dc: number;
+        damageFormula: string;
+        damageType: string;
+        halfOnSuccess: boolean;
+      }
+    ) => {
+      const camp = campaignRef.current;
+      const activeMap = camp.maps.find((m) => m.id === camp.activeMapId) || camp.maps[0];
+      const tmpl = activeMap?.templates.find((t) => t.id === templateId);
+      if (!activeMap || !tmpl) return;
+      const affected = getTokensInsideTemplate(activeMap, tmpl);
+      if (affected.length === 0) {
+        showTacticalAlert('Nenhum token vivo encontrado dentro desta área AoE.');
+        return;
+      }
+      startTacticalSavePrompt({
+        kind: 'aoe',
+        title: params.title || tmpl.label,
+        subtitle: `${affected.length} ${affected.length === 1 ? 'alvo' : 'alvos'} na área de ${tmpl.label}`,
+        saveSkillId: params.saveSkillId,
+        saveLabel: params.saveLabel,
+        dc: params.dc,
+        damageFormula: params.damageFormula,
+        damageType: params.damageType,
+        halfOnSuccess: params.halfOnSuccess,
+        tokens: affected,
+      });
+    },
+    [showTacticalAlert, startTacticalSavePrompt]
+  );
+
+  useEffect(() => {
+    startConcentrationPromptRef.current = (payload) => {
+      const camp = campaignRef.current;
+      const activeMap = camp.maps.find((m) => m.id === camp.activeMapId) || camp.maps[0];
+      const tok = activeMap?.tokens.find((t) => t.id === payload.tokenId);
+      const syntheticToken: MapToken = tok || {
+        id: payload.tokenId,
+        referenceId: payload.characterId,
+        name: payload.name,
+        type: payload.characterId ? 'character' : 'monster',
+        x: 0,
+        y: 0,
+        size: 1,
+        hp: 1,
+        maxHp: 1,
+        defense: 10,
+        activeConditionIds: [],
+        isHidden: false,
+        color: '#a855f7',
+      };
+      startTacticalSavePrompt({
+        kind: 'concentration',
+        title: `Concentração: ${payload.spellName}`,
+        subtitle: `${payload.name} sofreu ${payload.damageTaken} de dano — teste de Constituição para manter a magia!`,
+        saveSkillId: 'fortitude',
+        saveLabel: 'Constituição / Fortitude',
+        dc: payload.dc,
+        tokens: [syntheticToken],
+      });
+    };
+  }, [startTacticalSavePrompt]);
+
+  const sendChatMessage = useCallback(
+    (rawText: string, explicitRecipient?: string) => {
+      let text = rawText.trim();
+      if (!text) return;
+
+      let recipientName = explicitRecipient?.trim() || '';
+      let isWhisper = Boolean(recipientName);
+
+      // Parse /w Nome mensagem or /sussurro Nome mensagem
+      const whisperMatch = text.match(/^\/(?:w|whisper|sussurro)\s+"([^"]+)"\s+(.+)$/i) ||
+        text.match(/^\/(?:w|whisper|sussurro)\s+(\S+)\s+(.+)$/i);
+      if (whisperMatch) {
+        recipientName = whisperMatch[1].trim();
+        text = whisperMatch[2].trim();
+        isWhisper = Boolean(recipientName);
+      }
+
+      const activeChar =
+        roleRef.current === 'player'
+          ? campaignRef.current.characters.find((c) => c.ownerPlayerId === myPlayerId) ||
+            campaignRef.current.characters.find((c) => c.id === activeCharRef.current)
+          : undefined;
+
+      const matchedOnline = recipientName
+        ? connectedPlayers.find(
+            (p) =>
+              p.playerName.toLowerCase() === recipientName.toLowerCase() ||
+              (p.characterName || '').toLowerCase() === recipientName.toLowerCase()
+          )
+        : undefined;
+
+      const msg: ChatMessageEntry = {
+        id: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        senderName:
+          roleRef.current === 'gm'
+            ? campaignRef.current.gmName || 'Mestre'
+            : activeChar?.name || myPlayerName || 'Aventureiro',
+        senderRole: roleRef.current,
+        senderColor:
+          roleRef.current === 'gm'
+            ? '#f59e0b'
+            : activeChar?.playerColor || myPlayerColor || '#38bdf8',
+        senderPlayerId: myPlayerId,
+        characterName: activeChar?.name,
+        recipientName: isWhisper ? recipientName : undefined,
+        recipientPlayerId: matchedOnline?.playerId,
+        isWhisper,
+        text,
+      };
+
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('chat:send', msg);
+      } else {
+        setChatMessages((prev) => [...prev, msg].slice(-150));
+      }
+    },
+    [connectedPlayers, myPlayerColor, myPlayerId, myPlayerName]
+  );
+
+  const markChatRead = useCallback(() => {
+    setUnreadChatCount(0);
+  }, []);
+
+  const startCombatFromMap = useCallback(() => {
+    const curr = campaignRef.current;
+    const activeMap = curr.maps.find((m) => m.id === curr.activeMapId);
+    const tokens = activeMap?.tokens || [];
+    const ceremonyEntries: InitiativeCeremonyState['entries'] = [];
+
+    const combatants = tokens.map((tok) => {
+      let initBonus = 1;
+      let speedMeters = 9;
+      let portraitUrl = tok.imageUrl;
+      let frameStyle = tok.frameStyle;
+      let tokColor = tok.color;
+
+      if (tok.type === 'character' && tok.referenceId) {
+        const ch = curr.characters.find((c) => c.id === tok.referenceId);
+        if (ch) {
+          const stats = computeCharacterStats(ch, curr);
+          initBonus = stats.initiative;
+          speedMeters = stats.speed || 9;
+          portraitUrl = ch.portraitUrl || portraitUrl;
+          frameStyle = ch.tokenFrameStyle || frameStyle;
+          tokColor = ch.playerColor || ch.tokenColor;
+        }
+      } else if (tok.type === 'monster' && tok.referenceId) {
+        const mon = curr.compendium.monsters.find((m) => m.id === tok.referenceId);
+        if (mon) {
+          initBonus = mon.initiativeBonus;
+          speedMeters = mon.speed || 9;
+        }
+      }
+      const d20 = Math.floor(Math.random() * 20) + 1;
+      const total = d20 + initBonus;
+
+      if (!tok.isHidden) {
+        ceremonyEntries.push({
+          id: `cer-${tok.id}`,
+          name: tok.name,
+          type: tok.type === 'character' ? 'character' : 'monster',
+          color: tokColor,
+          imageUrl: portraitUrl,
+          frameStyle,
+          d20Roll: d20,
+          bonus: initBonus,
+          total,
+        });
+      }
+
+      return {
+        id: `comb-${tok.id}`,
+        tokenId: tok.id,
+        referenceId: tok.referenceId,
+        type: (tok.type === 'character' ? 'character' : 'monster') as 'character' | 'monster',
+        name: tok.name,
+        initiative: total,
+        hp: tok.hp,
+        maxHp: tok.maxHp,
+        defense: tok.defense,
+        speedMeters,
+        remainingMoveMeters: speedMeters,
+        actionAvailable: true,
+        bonusActionAvailable: true,
+        reactionAvailable: true,
+        disengaged: false,
+        dodging: false,
+        isHidden: tok.isHidden,
+        color: tokColor,
+        effects: [],
+      };
+    });
+
+    combatants.sort((a, b) => b.initiative - a.initiative);
+
+    updateCampaign((prev) => ({
+      ...prev,
+      combat: {
+        active: true,
+        round: 1,
+        currentTurnIndex: 0,
+        combatants,
+      },
+    }));
+
+    if (ceremonyEntries.length > 0) {
+      showInitiativeCeremony({
+        id: `init-${Date.now()}`,
+        entries: ceremonyEntries,
+      });
+    }
+
+    sendRoll({
+      rollerName: 'Mestre',
+      rollerRole: 'gm',
+      rollerColor: '#e0b84c',
+      diceSkin: 'gold',
+      title: 'Combate Iniciado! (Ordem de Iniciativa)',
+      formula: '1d20 + INI',
+      individualRolls: [],
+      total: combatants[0]?.initiative || 0,
+      isSecret: false,
+      details: combatants
+        .filter((c) => !c.isHidden)
+        .map((c, idx) => `${idx + 1}º ${c.name} (${c.initiative})`)
+        .join(' → '),
+    });
+  }, [sendRoll, showInitiativeCeremony, updateCampaign]);
+
   useEffect(() => {
     startDuelRef.current = startCombatDuel;
   }, [startCombatDuel]);
@@ -2376,11 +3791,20 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         campaign,
         savedCampaigns,
         refreshSavedCampaigns,
+        savedHeroes,
+        refreshSavedHeroes,
+        saveCharacterToVault,
+        deleteSavedHero,
+        importSavedHeroIntoCampaign,
+        claimCampaignCharacter,
+        lastSavedHeroFeedback,
+        isRemoteTunnelSession,
         inLobby,
         setInLobby,
         loading,
         isConnected,
         connectedClients,
+        connectedPlayers,
         serverUrl,
         setServerUrl,
         networkAddresses,
@@ -2446,6 +3870,19 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         dismissDuel,
         initiativeCeremony,
         showInitiativeCeremony,
+        startCombatFromMap,
+        activeSavePrompt,
+        rollSavePromptTarget,
+        rollAllPendingSaveTargets,
+        applySavePromptDamages,
+        dismissSavePrompt,
+        triggerTrapOnToken,
+        triggerAoESavePrompt,
+        setCharacterConcentration,
+        chatMessages,
+        unreadChatCount,
+        sendChatMessage,
+        markChatRead,
         createNewCampaign,
         loadSavedCampaign,
         deleteSavedCampaign,
@@ -2455,10 +3892,15 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         rollDeathSave,
         assistDeathSave,
         gmResolveDeathSave,
+        claimTreasureMarker,
         sendRoll,
         quickRollFormula,
         rollCharacterAction,
         applyDamage,
+        setCharacterNextAttackOverride,
+        canUndo: undoCount > 0,
+        undoCount,
+        undoLastAction,
         sendHandout,
         triggerSound,
         playCharacterTheme,

@@ -1,0 +1,74 @@
+{
+  "id": "char-1795029158776-vtd",
+  "character": {
+    "id": "char-1795029158776-vtd",
+    "vaultId": "char-1795029158776-vtd",
+    "lastSyncedAt": "2026-11-19T01:29:42.032Z",
+    "ownerPlayerId": "plr-1795033412220-d0z4w8",
+    "playerName": "Neguinho marola",
+    "playerColor": "#38bdf8",
+    "tokenFrameStyle": "gold",
+    "diceSkin": "gold",
+    "name": "Arthas lâmina-alva",
+    "raceId": "raca-humano",
+    "classId": "classe-ladino",
+    "level": 1,
+    "attributes": {
+      "for": 11,
+      "des": 18,
+      "con": 11,
+      "int": 13,
+      "sab": 11,
+      "car": 11
+    },
+    "trainedSkillIds": [
+      "arcanismo",
+      "luta",
+      "intuicao",
+      "prestidigitacao"
+    ],
+    "hp": 1,
+    "tempHp": 0,
+    "mp": 3,
+    "knownAbilityIds": [],
+    "customAttacks": [
+      {
+        "id": "catk-1795029243459",
+        "name": "FACA DE CORTAR PAO",
+        "attackBonusFormula": "1d20 + FOR + PROF",
+        "damageFormula": "1d2 + FOR",
+        "damageType": "Corte",
+        "range": "Corpo a Corpo (1,5m)",
+        "rarity": "comum",
+        "notes": ""
+      }
+    ],
+    "customAbilities": [],
+    "abilityUsesRemaining": {},
+    "activeConditionIds": [],
+    "inventory": [
+      {
+        "id": "inv-1795029393416",
+        "itemId": "item-couro-batido",
+        "quantity": 1,
+        "equipped": true,
+        "equippedSlot": "armor"
+      }
+    ],
+    "gold": 50,
+    "portraitUrl": "/uploads/1795030357505-WhatsApp_Image_2026-11-06_at_15_23_03__2.jpeg",
+    "tokenColor": "#38bdf8",
+    "background": "Eu busco justiça pelo cão orelha",
+    "notes": "",
+    "deathSaves": {
+      "successes": 0,
+      "failures": 0,
+      "stabilized": false,
+      "dead": false
+    }
+  },
+  "savedAt": "2026-11-18T23:41:32.809Z",
+  "updatedAt": "2026-11-19T01:29:42.032Z",
+  "originCampaignId": "campanha-cronicas-01",
+  "originCampaignName": "Crônicas de Valdris: A Sombra da Cripta"
+}
