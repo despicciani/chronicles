@@ -174,6 +174,7 @@ export interface MonsterDef {
   damageVulnerabilities?: string[];
   description: string;
   tokenColor: string;
+  imageUrl?: string;
 }
 
 export interface InventoryEntry {
@@ -311,6 +312,8 @@ export interface TacticalMap {
   name: string;
   mode: 'tactical' | 'scene';
   backgroundUrl: string;
+  backgroundNaturalWidth?: number;
+  backgroundNaturalHeight?: number;
   themePreset: 'crypt' | 'tavern' | 'forest' | 'desert' | 'castle' | 'void';
   gridWidth: number;
   gridHeight: number;
@@ -374,10 +377,14 @@ export interface PlayerRequest {
   id: string;
   characterId: string;
   characterName: string;
+  characterPortraitUrl?: string;
   playerColor: string;
-  type: 'short-rest' | 'long-rest' | 'heal-mp' | 'custom';
+  requesterPlayerId?: string;
+  requesterPlayerName?: string;
+  type: 'short-rest' | 'long-rest' | 'heal-mp' | 'claim-hero' | 'import-hero' | 'custom';
   label: string;
   note?: string;
+  heroPayload?: Character;
   createdAt: string;
 }
 
@@ -412,6 +419,7 @@ export interface OpportunityAttackPrompt {
 
 export interface CombatDuelState {
   id: string;
+  attackerCharacterId?: string;
   attackerName: string;
   attackerColor: string;
   attackerImageUrl?: string;
@@ -427,6 +435,7 @@ export interface CombatDuelState {
   defenderMaxHp: number;
   actionTitle: string;
   diceSkin: DiceSkin;
+  rawAttackFormula?: string;
   attackFormula?: string;
   attackRolledDice: RolledDieVisual[];
   attackTotal?: number;
@@ -442,7 +451,22 @@ export interface CombatDuelState {
   situationalModifiers?: string[];
   effectiveAdvantageMode?: 'normal' | 'advantage' | 'disadvantage';
   autoCritOnHit?: boolean;
-  phase: 'rolling-attack' | 'attack-result' | 'rolling-damage' | 'damage-result';
+  phase: 'ready-attack' | 'rolling-attack' | 'attack-result' | 'rolling-damage' | 'damage-result';
+}
+
+export interface PendingManualRoll {
+  id: string;
+  title: string;
+  subtitle?: string;
+  formula: string;
+  displayFormula?: string;
+  previewDice: RolledDieVisual[];
+  rollerName: string;
+  rollerColor: string;
+  diceSkin: DiceSkin;
+  allowAdvantageToggle?: boolean;
+  advantageMode: 'normal' | 'advantage' | 'disadvantage';
+  onExecute: (chosenMode: 'normal' | 'advantage' | 'disadvantage') => void;
 }
 
 export interface InitiativeCeremonyEntry {
@@ -504,11 +528,17 @@ export interface NpcEntry {
   role: string;
   location: string;
   imageUrl: string;
+  tokenColor?: string;
   publicBio: string;
   secretNotes: string;
   sharedPartyNotes: string;
   revealedToPlayers: boolean;
   disposition: 'Aliado' | 'Neutro' | 'Hostil' | 'Desconhecido';
+  combatEnabled?: boolean;
+  maxHp?: number;
+  defense?: number;
+  speed?: number;
+  attacks?: MonsterAttack[];
 }
 
 export interface GmNote {

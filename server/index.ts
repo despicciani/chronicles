@@ -14,6 +14,7 @@ import {
   computeConcentrationDc,
   encodeRoomCode,
   evaluateFormula,
+  findNearestFreeGridCell,
   normalizeHeroCharacter,
   resolveDamageWithAffinities,
   syncCampaignDerivedCharacterStats,
@@ -40,13 +41,17 @@ import {
 
 const PORT = Number(process.env.PORT || 3001);
 const DISCOVERY_UDP_PORT = Number(process.env.DISCOVERY_UDP_PORT || 3002);
-const DATA_DIR = path.resolve(process.cwd(), 'server', 'data');
+const DATA_DIR = process.env.CHRONICLES_DATA_DIR
+  ? path.resolve(process.env.CHRONICLES_DATA_DIR)
+  : path.resolve(process.cwd(), 'server', 'data');
 const CAMPAIGNS_DIR = path.join(DATA_DIR, 'campaigns');
 const CHARACTERS_DIR = path.join(DATA_DIR, 'characters');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const LEGACY_DATA_FILE = path.join(DATA_DIR, 'campaign-state.json');
 const ACTIVE_ID_FILE = path.join(DATA_DIR, 'active-campaign.txt');
-const DIST_DIR = path.resolve(process.cwd(), 'dist');
+const DIST_DIR = process.env.CHRONICLES_DIST_DIR
+  ? path.resolve(process.env.CHRONICLES_DIST_DIR)
+  : path.resolve(process.cwd(), 'dist');
 
 let campaignState: CampaignState = createStarterCampaign();
 let saveQueue: Promise<void> = Promise.resolve();
@@ -422,6 +427,7 @@ async function startPublicTunnel(): Promise<PublicTunnelState> {
       broadcastTunnelStatus();
 
       if (!fsSync.existsSync(cloudflaredBin)) {
+        fsSync.mkdirSync(path.dirname(cloudflaredBin), { recursive: true });
         await installCloudflared(cloudflaredBin);
       }
 
@@ -1200,8 +1206,25 @@ io.on('connection', (socket) => {
     io.emit('check:updated', null);
   });
 
-  // Player Requests to GM (Descanso Longo, Descanso Curto, Cura/Ajuste)
+  // Player Requests to GM (Descanso Longo, Descanso Curto, Cura/Ajuste, Entrada como Herói)
   socket.on('request:send', (reqPayload: PlayerRequest) => {
+    if (reqPayload.type === 'claim-hero' || reqPayload.type === 'import-hero') {
+      // Replace any previous pending hero-join request from the same player
+      pendingRequests = [
+        ...pendingRequests.filter(
+          (r) =>
+            !(
+              (r.type === 'claim-hero' || r.type === 'import-hero') &&
+              r.requesterPlayerId &&
+              r.requesterPlayerId === reqPayload.requesterPlayerId
+            )
+        ),
+        reqPayload,
+      ];
+      io.emit('request:list', pendingRequests);
+      return;
+    }
+
     const exists = pendingRequests.some(
       (r) => r.characterId === reqPayload.characterId && r.type === reqPayload.type
     );
@@ -1211,11 +1234,179 @@ io.on('connection', (socket) => {
     io.emit('request:list', pendingRequests);
   });
 
+  socket.on('request:cancel', (payload: { requestId?: string; requesterPlayerId?: string }) => {
+    pendingRequests = pendingRequests.filter((r) => {
+      if (payload.requestId && r.id === payload.requestId) return false;
+      if (
+        payload.requesterPlayerId &&
+        (r.type === 'claim-hero' || r.type === 'import-hero') &&
+        r.requesterPlayerId === payload.requesterPlayerId
+      ) {
+        return false;
+      }
+      return true;
+    });
+    io.emit('request:list', pendingRequests);
+  });
+
   socket.on('request:resolve', async (payload: { requestId: string; approved: boolean }) => {
     const reqItem = pendingRequests.find((r) => r.id === payload.requestId);
     pendingRequests = pendingRequests.filter((r) => r.id !== payload.requestId);
     io.emit('request:list', pendingRequests);
     if (!reqItem) return;
+
+    // 1. GM Approval for Claiming an Existing Campaign Hero
+    if (reqItem.type === 'claim-hero') {
+      if (payload.approved) {
+        const target = campaignState.characters.find((c) => c.id === reqItem.characterId);
+        if (target && reqItem.requesterPlayerId) {
+          const now = new Date().toISOString();
+          const claimed: Character = {
+            ...target,
+            ownerPlayerId: reqItem.requesterPlayerId,
+            playerName: reqItem.requesterPlayerName?.trim() || target.playerName,
+            vaultId: target.vaultId || target.id,
+            lastSyncedAt: now,
+          };
+          campaignState = normalizeCampaign({
+            ...campaignState,
+            characters: campaignState.characters.map((c) => (c.id === target.id ? claimed : c)),
+          });
+          await persistState();
+          await upsertSavedCharacter(claimed, {
+            originCampaignId: campaignState.id,
+            originCampaignName: campaignState.name,
+          }).catch(() => {});
+          io.emit('campaign:updated', campaignState);
+        }
+      }
+      io.emit('request:resolved', {
+        type: reqItem.type,
+        requesterPlayerId: reqItem.requesterPlayerId,
+        characterId: reqItem.characterId,
+        characterName: reqItem.characterName,
+        label: reqItem.label,
+        approved: payload.approved,
+      });
+      return;
+    }
+
+    // 2. GM Approval for Importing a Previously Saved Hero from Vault / .json
+    if (reqItem.type === 'import-hero') {
+      let resolvedCharId = reqItem.characterId;
+      if (payload.approved && reqItem.heroPayload && reqItem.requesterPlayerId) {
+        const now = new Date().toISOString();
+        const normalized = normalizeHeroCharacter(reqItem.heroPayload, campaignState);
+        const vaultId = normalized.vaultId || normalized.id;
+        const existingChar = campaignState.characters.find(
+          (c) =>
+            c.id === normalized.id ||
+            (vaultId && c.vaultId === vaultId) ||
+            (c.name.toLowerCase() === normalized.name.toLowerCase() &&
+              c.ownerPlayerId === reqItem.requesterPlayerId)
+        );
+        const finalCharId = existingChar ? existingChar.id : normalized.id;
+        resolvedCharId = finalCharId;
+
+        const finalChar: Character = {
+          ...normalized,
+          id: finalCharId,
+          vaultId,
+          ownerPlayerId: reqItem.requesterPlayerId,
+          playerName: reqItem.requesterPlayerName?.trim() || normalized.playerName,
+          playerColor: reqItem.playerColor || normalized.playerColor,
+          tokenColor: reqItem.playerColor || normalized.tokenColor,
+          lastSyncedAt: now,
+        };
+        const stats = computeCharacterStats(finalChar, campaignState);
+        finalChar.hp = Math.max(0, Math.min(stats.maxHp, finalChar.hp || stats.maxHp));
+        finalChar.mp = Math.max(0, Math.min(stats.maxMp, finalChar.mp || stats.maxMp));
+
+        const hasChar = campaignState.characters.some((c) => c.id === finalCharId);
+        const nextChars = hasChar
+          ? campaignState.characters.map((c) => (c.id === finalCharId ? finalChar : c))
+          : [...campaignState.characters, finalChar];
+
+        const nextMaps = campaignState.maps.map((m) => {
+          if (m.id !== campaignState.activeMapId) return m;
+          const existingTok = m.tokens.find(
+            (t) => t.type === 'character' && t.referenceId === finalCharId
+          );
+          if (existingTok) {
+            return {
+              ...m,
+              tokens: m.tokens.map((t) =>
+                t.id === existingTok.id
+                  ? {
+                      ...t,
+                      name: finalChar.name.split(' ')[0],
+                      color: finalChar.playerColor || finalChar.tokenColor,
+                      frameStyle: finalChar.tokenFrameStyle || t.frameStyle,
+                      imageUrl: finalChar.portraitUrl || t.imageUrl,
+                      hp: finalChar.hp,
+                      maxHp: stats.maxHp,
+                      defense: stats.defense,
+                    }
+                  : t
+              ),
+            };
+          }
+          const spawnPos = findNearestFreeGridCell(
+            m,
+            2 + (campaignState.characters.length % 3),
+            4 + (campaignState.characters.length % 4),
+            1
+          );
+          return {
+            ...m,
+            tokens: [
+              ...m.tokens,
+              {
+                id: `tok-${finalCharId}`,
+                name: finalChar.name.split(' ')[0],
+                type: 'character' as const,
+                referenceId: finalCharId,
+                x: spawnPos.x,
+                y: spawnPos.y,
+                size: 1,
+                hp: finalChar.hp,
+                maxHp: stats.maxHp,
+                defense: stats.defense,
+                activeConditionIds: finalChar.activeConditionIds,
+                isHidden: false,
+                color: finalChar.playerColor || finalChar.tokenColor,
+                frameStyle: finalChar.tokenFrameStyle || 'gold',
+                imageUrl: finalChar.portraitUrl,
+              },
+            ],
+          };
+        });
+
+        campaignState = normalizeCampaign({
+          ...campaignState,
+          characters: nextChars,
+          maps: nextMaps,
+        });
+        await persistState();
+        await upsertSavedCharacter(finalChar, {
+          originCampaignId: campaignState.id,
+          originCampaignName: campaignState.name,
+        }).catch(() => {});
+        const savedList = await listSavedCharacters().catch(() => []);
+        io.emit('characters:saved-updated', savedList);
+        io.emit('campaign:updated', campaignState);
+      }
+
+      io.emit('request:resolved', {
+        type: reqItem.type,
+        requesterPlayerId: reqItem.requesterPlayerId,
+        characterId: resolvedCharId,
+        characterName: reqItem.characterName,
+        label: reqItem.label,
+        approved: payload.approved,
+      });
+      return;
+    }
 
     if (payload.approved) {
       const char = campaignState.characters.find((c) => c.id === reqItem.characterId);

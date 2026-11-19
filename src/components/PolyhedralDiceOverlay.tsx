@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, Flame, ShieldAlert, Sparkles } from 'lucide-react';
+import { CheckCircle2, Dices, Flame, ShieldAlert, Sparkles, X } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
+import { buildPreviewDiceForFormula, RollAdvantageMode } from '../shared/rulesEngine';
 import { DiceSkin, RolledDieVisual } from '../shared/types';
 import { OrnateDivider, OrnateFrame } from './OrnateFrame';
 
@@ -48,12 +49,13 @@ const SKIN_STYLES: Record<
 
 export const PolyhedronShape: React.FC<{
   die: RolledDieVisual;
-  displayValue: number;
+  displayValue: number | string;
   skin: DiceSkin;
   rolling: boolean;
   isCritDie?: boolean;
   isFumbleDie?: boolean;
-}> = ({ die, displayValue, skin, rolling, isCritDie, isFumbleDie }) => {
+  onClick?: () => void;
+}> = ({ die, displayValue, skin, rolling, isCritDie, isFumbleDie, onClick }) => {
   const palette = SKIN_STYLES[skin] || SKIN_STYLES.gold;
   const strokeColor = isCritDie
     ? '#facc15'
@@ -206,9 +208,11 @@ export const PolyhedronShape: React.FC<{
 
   return (
     <div
+      onClick={onClick}
       className={`flex flex-col items-center gap-1 transition-all duration-300 ${
         isDiscarded ? 'opacity-45 scale-90 grayscale' : ''
-      }`}
+      } ${onClick ? 'cursor-pointer hover:scale-108 active:scale-95' : ''}`}
+      title={onClick ? 'Clique no dado para rolar!' : undefined}
     >
       <div
         className={`relative w-24 h-24 flex items-center justify-center ${
@@ -283,9 +287,38 @@ export const PolyhedronShape: React.FC<{
 };
 
 export const PolyhedralDiceOverlay: React.FC = () => {
-  const { latestRollForOverlay, dismissRollOverlay } = useCampaign();
+  const {
+    latestRollForOverlay,
+    dismissRollOverlay,
+    pendingManualRoll,
+    cancelManualRoll,
+    executeManualRoll,
+  } = useCampaign();
   const [rolling, setRolling] = useState(true);
   const [tickValues, setTickValues] = useState<number[]>([]);
+  const [chosenManualMode, setChosenManualMode] = useState<RollAdvantageMode>('normal');
+
+  useEffect(() => {
+    if (pendingManualRoll) {
+      setChosenManualMode(pendingManualRoll.advantageMode);
+    }
+  }, [pendingManualRoll]);
+
+  useEffect(() => {
+    if (!pendingManualRoll) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        cancelManualRoll();
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        const tag = (e.target as HTMLElement | null)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        executeManualRoll(chosenManualMode);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [pendingManualRoll, chosenManualMode, cancelManualRoll, executeManualRoll]);
 
   useEffect(() => {
     if (!latestRollForOverlay) return;
@@ -312,6 +345,131 @@ export const PolyhedralDiceOverlay: React.FC = () => {
       window.clearTimeout(autoClose);
     };
   }, [latestRollForOverlay, dismissRollOverlay]);
+
+  // MANUAL CLICK-TO-ROLL TRAY (Local to roller until they click to roll!)
+  if (pendingManualRoll) {
+    const previewDice = pendingManualRoll.allowAdvantageToggle
+      ? buildPreviewDiceForFormula(pendingManualRoll.formula, chosenManualMode)
+      : pendingManualRoll.previewDice;
+    const auraColor = pendingManualRoll.rollerColor || '#e0b84c';
+    const skin = pendingManualRoll.diceSkin || 'gold';
+
+    return (
+      <div
+        onClick={cancelManualRoll}
+        className="fixed inset-0 z-[74] pointer-events-auto flex items-center justify-center bg-black/65 backdrop-blur-[3px] p-4"
+      >
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="max-w-xl w-full"
+        >
+          <OrnateFrame
+            accentColor={auraColor}
+            className="rpg-glass-panel rounded-lg px-7 py-6 w-full flex flex-col items-center gap-4 relative animate-modal-unfurl shadow-[0_24px_70px_rgba(0,0,0,0.95)]"
+          >
+            <button
+              onClick={cancelManualRoll}
+              className="absolute top-3 right-3 rpg-card p-1.5 rounded-md hover:border-amber-400 cursor-pointer"
+              title="Cancelar rolagem (Esc)"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="text-center w-full pr-6">
+              <div
+                className="flex items-center justify-center gap-2 text-[11px] font-display uppercase tracking-[0.22em] font-bold"
+                style={{ color: auraColor }}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{pendingManualRoll.rollerName}</span>
+                <Sparkles className="w-3.5 h-3.5" />
+              </div>
+              <h3 className="font-chronicle font-bold text-xl mt-1 chronicle-gold-text">
+                {pendingManualRoll.title}
+              </h3>
+              <div className="text-xs font-mono-dice text-amber-200/85 mt-1">
+                {pendingManualRoll.displayFormula || pendingManualRoll.formula}
+              </div>
+              {pendingManualRoll.subtitle && (
+                <p className="text-[11px] font-lore italic mt-1" style={{ color: 'var(--text-secondary)' }}>
+                  {pendingManualRoll.subtitle}
+                </p>
+              )}
+              <OrnateDivider className="mt-2.5 max-w-sm mx-auto" />
+            </div>
+
+            {/* Optional d20 Advantage / Disadvantage Selector before rolling */}
+            {pendingManualRoll.allowAdvantageToggle && (
+              <div
+                className="flex rounded-md overflow-hidden border text-[11px]"
+                style={{ borderColor: 'var(--border-subtle)' }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setChosenManualMode('normal')}
+                  className={`px-3 py-1 font-display font-bold cursor-pointer ${
+                    chosenManualMode === 'normal' ? 'rpg-btn-primary' : 'rpg-card'
+                  }`}
+                >
+                  Normal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChosenManualMode('advantage')}
+                  className={`px-3 py-1 font-display font-bold cursor-pointer ${
+                    chosenManualMode === 'advantage'
+                      ? 'bg-emerald-600 text-white'
+                      : 'rpg-card'
+                  }`}
+                >
+                  Vantagem (2d20)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChosenManualMode('disadvantage')}
+                  className={`px-3 py-1 font-display font-bold cursor-pointer ${
+                    chosenManualMode === 'disadvantage'
+                      ? 'bg-red-600 text-white'
+                      : 'rpg-card'
+                  }`}
+                >
+                  Desvantagem (2d20)
+                </button>
+              </div>
+            )}
+
+            {/* Clickable Ready Polyhedra */}
+            <div className="flex flex-wrap items-center justify-center gap-5 py-2">
+              {previewDice.map((die, idx) => (
+                <PolyhedronShape
+                  key={`${die.sides}-${idx}`}
+                  die={die}
+                  displayValue="?"
+                  skin={skin}
+                  rolling={false}
+                  onClick={() => executeManualRoll(chosenManualMode)}
+                />
+              ))}
+            </div>
+
+            <div className="flex flex-col items-center gap-2 w-full">
+              <button
+                type="button"
+                onClick={() => executeManualRoll(chosenManualMode)}
+                className="rpg-btn-primary px-8 py-2.5 rounded-md text-sm font-display font-bold flex items-center gap-2 cursor-pointer shadow-[0_10px_28px_rgba(224,184,76,0.28)]"
+              >
+                <Dices className="w-4 h-4" />
+                <span>Rolar Dado!</span>
+              </button>
+              <span className="text-[10px] font-lore italic" style={{ color: 'var(--text-muted)' }}>
+                Clique no dado acima ou pressione Enter para girar
+              </span>
+            </div>
+          </OrnateFrame>
+        </div>
+      </div>
+    );
+  }
 
   if (!latestRollForOverlay || !latestRollForOverlay.rolledDice?.length) return null;
 

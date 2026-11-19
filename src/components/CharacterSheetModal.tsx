@@ -406,75 +406,85 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
           accentColor={charColor}
           className="rpg-glass-panel rounded-lg w-full h-full flex flex-col overflow-hidden animate-modal-unfurl"
         >
-        {/* Modal Header */}
+        {/* Modal Header (Close X permanently pinned top-right!) */}
         <div
-          className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-3 shrink-0"
+          className="px-4 py-3 border-b relative shrink-0 space-y-2.5"
           style={{ borderColor: 'var(--border-subtle)' }}
         >
-          <div className="flex items-center gap-3 flex-wrap">
-            <TokenPortrait
-              name={character.name}
-              imageUrl={character.portraitUrl}
-              playerColor={charColor}
-              frameStyle={character.tokenFrameStyle || 'gold'}
-              sizePx={50}
-              isDead={character.hp <= 0}
-            />
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3 flex-wrap min-w-0">
+              <TokenPortrait
+                name={character.name}
+                imageUrl={character.portraitUrl}
+                playerColor={charColor}
+                frameStyle={character.tokenFrameStyle || 'gold'}
+                sizePx={50}
+                isDead={character.hp <= 0}
+              />
 
-            <div>
-              {role === 'gm' ? (
-                <div className="flex items-center gap-2">
-                  <select
-                    value={character.id}
-                    onChange={(e) => setActiveCharacterId(e.target.value)}
-                    className="rpg-input font-display font-bold text-base py-1"
-                  >
-                    {campaign.characters.map((ch) => (
-                      <option key={ch.id} value={ch.id}>
-                        {ch.name} — Nível {ch.level}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    onClick={handleCreateCharacter}
-                    className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer hover:opacity-85"
-                  >
-                    <UserPlus className="w-3.5 h-3.5" /> Novo
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Excluir permanentemente o personagem "${character.name}" da campanha?`
-                        )
-                      ) {
-                        deleteCharacter(character.id);
-                      }
-                    }}
-                    className="px-2.5 py-1.5 rounded bg-red-950/80 border border-red-500/40 text-red-200 hover:bg-red-900 text-xs flex items-center gap-1 cursor-pointer"
-                    title="Excluir este personagem da campanha"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" /> Excluir
-                  </button>
-                </div>
-              ) : (
-                <h2 className="font-display font-extrabold text-lg leading-tight" style={{ color: charColor }}>
-                  {character.name} — Nível {character.level}
-                </h2>
-              )}
-
-              <div className="text-xs mt-0.5 flex items-center gap-2" style={{ color: 'var(--text-secondary)' }}>
-                <span>{race?.name || 'Sem Raça'} • {charClass?.name || 'Sem Classe'} • Jogador: {character.playerName}</span>
-                {character.themeMusicUrl && role === 'gm' && (
-                  <button
-                    onClick={() => playCharacterTheme(character)}
-                    className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[11px] flex items-center gap-1 cursor-pointer hover:bg-amber-500/35"
-                  >
-                    <Music className="w-3 h-3" /> Tocar Tema
-                  </button>
+              <div className="min-w-0">
+                {role === 'gm' ? (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <select
+                      value={character.id}
+                      onChange={(e) => setActiveCharacterId(e.target.value)}
+                      className="rpg-input font-display font-bold text-base py-1"
+                    >
+                      {campaign.characters.map((ch) => (
+                        <option key={ch.id} value={ch.id}>
+                          {ch.name} — Nível {ch.level}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={handleCreateCharacter}
+                      className="rpg-card px-2.5 py-1.5 rounded text-xs flex items-center gap-1 cursor-pointer hover:opacity-85"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" /> Novo
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Excluir permanentemente o personagem "${character.name}" da campanha?`
+                          )
+                        ) {
+                          deleteCharacter(character.id);
+                        }
+                      }}
+                      className="px-2.5 py-1.5 rounded bg-red-950/80 border border-red-500/40 text-red-200 hover:bg-red-900 text-xs flex items-center gap-1 cursor-pointer"
+                      title="Excluir este personagem da campanha"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Excluir
+                    </button>
+                  </div>
+                ) : (
+                  <h2 className="font-display font-extrabold text-lg leading-tight" style={{ color: charColor }}>
+                    {character.name} — Nível {character.level}
+                  </h2>
                 )}
+
+                <div className="text-xs mt-0.5 flex items-center gap-2" style={{ color: 'var(--text-secondary)' }}>
+                  <span>{race?.name || 'Sem Raça'} • {charClass?.name || 'Sem Classe'} • Jogador: {character.playerName}</span>
+                  {character.themeMusicUrl && role === 'gm' && (
+                    <button
+                      onClick={() => playCharacterTheme(character)}
+                      className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[11px] flex items-center gap-1 cursor-pointer hover:bg-amber-500/35"
+                    >
+                      <Music className="w-3 h-3" /> Tocar Tema
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
+
+            <button
+              onClick={onClose}
+              className="rpg-card p-1.5 rounded-md hover:border-amber-400 cursor-pointer shrink-0"
+              title="Fechar ficha"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
 
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -615,9 +625,6 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                 </button>
               </>
             )}
-            <button onClick={onClose} className="rpg-card p-1.5 rounded hover:opacity-80 cursor-pointer">
-              <X className="w-4 h-4" />
-            </button>
           </div>
         </div>
 
@@ -636,7 +643,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
           return (
             <div className="px-4 py-2.5 bg-red-950/85 border-b border-red-500/60 flex flex-wrap items-center justify-between gap-3 shrink-0 animate-death-pulse">
               <div className="flex items-center gap-2.5">
-                <Skull className="w-6 h-6 text-red-400 animate-pulse" />
+                <Skull className="w-6 h-6 text-red-400" />
                 <div>
                   <div className="font-display font-extrabold text-sm text-red-200 tracking-wider flex items-center gap-2">
                     <span>

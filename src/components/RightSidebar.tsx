@@ -117,7 +117,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({ open, onClose }) => 
   const visibleLogs = campaign.rollLog.filter((entry) => role === 'gm' || !entry.isSecret);
 
   return (
-    <aside className="fixed top-16 right-3 bottom-24 z-35 w-80 sm:w-96 rpg-glass-panel rounded-xl flex flex-col overflow-hidden shadow-2xl animate-dice-tumble">
+    <aside className="fixed top-16 right-3 bottom-24 z-35 w-80 sm:w-96 rpg-glass-panel rounded-xl flex flex-col overflow-hidden shadow-2xl animate-drawer-right">
       {/* Header + 2-Tab Switcher */}
       <div
         className="px-3 py-2 border-b flex items-center justify-between gap-2 shrink-0"

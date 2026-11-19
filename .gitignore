@@ -3,6 +3,8 @@ node_modules/
 
 # Build outputs
 dist/
+dist-server/
+release/
 *.tsbuildinfo
 
 # Local runtime uploads & saves

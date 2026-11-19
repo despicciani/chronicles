@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Flame, Heart, Shield, Sparkles, Swords, X } from 'lucide-react';
+import { Dices, Flame, Heart, Shield, Sparkles, Swords, X } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import { formatFormulaForDisplay, getMonsterWoundStatus } from '../shared/rulesEngine';
 import { OrnateDivider, OrnateFrame, OrnateHeaderBanner, SculptedHealthBar } from './OrnateFrame';
@@ -7,7 +7,16 @@ import { PolyhedronShape } from './PolyhedralDiceOverlay';
 import { TokenPortrait } from './TokenPortrait';
 
 export const CombatDuelOverlay: React.FC = () => {
-  const { campaign, role, activeDuel, rollDuelDamage, advanceDuelPhase, dismissDuel } = useCampaign();
+  const {
+    campaign,
+    role,
+    myCharacter,
+    activeDuel,
+    rollDuelAttack,
+    rollDuelDamage,
+    advanceDuelPhase,
+    dismissDuel,
+  } = useCampaign();
   const [tickNums, setTickNums] = useState<number[]>([20, 20, 8, 6]);
 
   useEffect(() => {
@@ -36,10 +45,17 @@ export const CombatDuelOverlay: React.FC = () => {
 
   if (!activeDuel) return null;
 
+  const isReadyAttack = activeDuel.phase === 'ready-attack';
   const isAttackRolling = activeDuel.phase === 'rolling-attack';
   const isAttackResult = activeDuel.phase === 'attack-result';
   const isDamageRolling = activeDuel.phase === 'rolling-damage';
   const isDamageResult = activeDuel.phase === 'damage-result';
+
+  const canRollDuel =
+    role === 'gm' ||
+    (activeDuel.attackerCharacterId
+      ? myCharacter?.id === activeDuel.attackerCharacterId
+      : myCharacter?.name === activeDuel.attackerName);
 
   // Read live HP of defender so bar drops visually in real time when damage is applied!
   const activeMap = campaign.maps.find((m) => m.id === campaign.activeMapId);
@@ -195,7 +211,7 @@ export const CombatDuelOverlay: React.FC = () => {
 
               {/* Deflection Ring on Block */}
               {isAttackResult && !activeDuel.hitSuccess && (
-                <div className="absolute inset-0 rounded-full border-2 border-sky-400/75 pointer-events-none animate-ping opacity-55" />
+                <div className="absolute inset-0 rounded-full border-2 border-sky-400/80 pointer-events-none animate-impact-ripple" />
               )}
 
               <div className="absolute inset-0 flex flex-col items-center justify-center">
@@ -264,58 +280,112 @@ export const CombatDuelOverlay: React.FC = () => {
 
         {/* STAGE 1 OR STAGE 2 DICE & ACTION PANEL */}
         <div className="rpg-socket rounded-lg p-4 flex flex-col items-center gap-3 text-center">
-          {(isAttackRolling || isAttackResult) && (
+          {isReadyAttack && (
             <>
               <div className="text-xs uppercase tracking-widest font-display font-bold text-amber-200/90">
-                Etapa 1 — Teste de Acerto ({formatFormulaForDisplay(activeDuel.attackFormula || '')})
+                Etapa 1 — Pronto para Atacar ({formatFormulaForDisplay(activeDuel.attackFormula || activeDuel.rawAttackFormula || '1d20')})
               </div>
               <div className="flex flex-wrap items-center justify-center gap-5">
                 {activeDuel.attackRolledDice.map((die, idx) => (
                   <PolyhedronShape
                     key={idx}
                     die={die}
-                    displayValue={isAttackRolling ? tickNums[idx % tickNums.length] : die.value}
+                    displayValue="?"
                     skin={activeDuel.diceSkin}
-                    rolling={isAttackRolling}
-                    isCritDie={!isAttackRolling && die.sides === 20 && die.value === 20}
-                    isFumbleDie={!isAttackRolling && die.sides === 20 && die.value === 1}
+                    rolling={false}
+                    onClick={canRollDuel ? rollDuelAttack : undefined}
                   />
                 ))}
               </div>
+              {canRollDuel ? (
+                <div className="space-y-1.5">
+                  <button
+                    onClick={rollDuelAttack}
+                    className="rpg-btn-primary px-7 py-2.5 rounded-md text-sm font-display font-bold flex items-center gap-2 mx-auto cursor-pointer shadow-xl"
+                  >
+                    <Dices className="w-4 h-4" />
+                    <span>
+                      Rolar Ataque ({formatFormulaForDisplay(activeDuel.attackFormula || activeDuel.rawAttackFormula || '1d20')})
+                    </span>
+                  </button>
+                  <div className="text-[10px] font-lore italic" style={{ color: 'var(--text-muted)' }}>
+                    Clique no dado ou no botão acima para girar o teste de acerto
+                  </div>
+                </div>
+              ) : (
+                <div className="px-4 py-1.5 rounded-md bg-black/35 border border-amber-500/30 text-xs font-lore italic text-amber-200/85">
+                  Aguardando <strong>{activeDuel.attackerName}</strong> rolar o ataque...
+                </div>
+              )}
+            </>
+          )}
+
+          {(isAttackRolling || isAttackResult) && (
+            <>
+              {activeDuel.attackRolledDice.length > 0 && (
+                <>
+                  <div className="text-xs uppercase tracking-widest font-display font-bold text-amber-200/90">
+                    Etapa 1 — Teste de Acerto ({formatFormulaForDisplay(activeDuel.attackFormula || '')})
+                  </div>
+                  <div className="flex flex-wrap items-center justify-center gap-5">
+                    {activeDuel.attackRolledDice.map((die, idx) => (
+                      <PolyhedronShape
+                        key={idx}
+                        die={die}
+                        displayValue={isAttackRolling ? tickNums[idx % tickNums.length] : die.value}
+                        skin={activeDuel.diceSkin}
+                        rolling={isAttackRolling}
+                        isCritDie={!isAttackRolling && die.sides === 20 && die.value === 20}
+                        isFumbleDie={!isAttackRolling && die.sides === 20 && die.value === 1}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
 
               {isAttackResult && (
                 <div className="space-y-2.5">
-                  <div className="flex items-center justify-center gap-3">
-                    <span className="text-sm font-lore">Total do Ataque:</span>
-                    <span
-                      className="font-chronicle font-black text-3xl drop-shadow"
-                      style={{ color: activeDuel.hitSuccess ? '#facc15' : '#f87171' }}
-                    >
-                      {activeDuel.attackTotal}
-                    </span>
-                    <span className="text-sm opacity-75">vs CA {displayedAc}</span>
-                  </div>
+                  {activeDuel.attackTotal !== undefined && (
+                    <div className="flex items-center justify-center gap-3">
+                      <span className="text-sm font-lore">Total do Ataque:</span>
+                      <span
+                        className="font-chronicle font-black text-3xl drop-shadow"
+                        style={{ color: activeDuel.hitSuccess ? '#facc15' : '#f87171' }}
+                      >
+                        {activeDuel.attackTotal}
+                      </span>
+                      <span className="text-sm opacity-75">vs CA {displayedAc}</span>
+                    </div>
+                  )}
 
                   {activeDuel.hitSuccess ? (
                     <div className="space-y-2.5">
-                      <div className="inline-flex items-center gap-2 px-4 py-1 rounded-md bg-amber-950/70 border border-amber-400/70 text-amber-200 font-display font-bold text-xs tracking-wider shadow">
-                        <Flame className="w-4 h-4 text-amber-400" />
-                        {activeDuel.isCrit
-                          ? 'ACERTO CRÍTICO! (Dados de dano dobrados!)'
-                          : `ACERTOU! Superou a CA ${displayedAc}!`}
-                      </div>
-                      {activeDuel.damageFormula ? (
-                        <div>
-                          <button
-                            onClick={rollDuelDamage}
-                            className="rpg-btn-crimson px-7 py-2.5 rounded-md text-sm flex items-center gap-2 mx-auto cursor-pointer shadow-xl"
-                          >
-                            <Sparkles className="w-4 h-4" />
-                            <span>
-                              Rolar Dano Agora ({formatFormulaForDisplay(activeDuel.damageFormula)})
-                            </span>
-                          </button>
+                      {activeDuel.attackTotal !== undefined && (
+                        <div className="inline-flex items-center gap-2 px-4 py-1 rounded-md bg-amber-950/70 border border-amber-400/70 text-amber-200 font-display font-bold text-xs tracking-wider shadow">
+                          <Flame className="w-4 h-4 text-amber-400" />
+                          {activeDuel.isCrit
+                            ? 'ACERTO CRÍTICO! (Dados de dano dobrados!)'
+                            : `ACERTOU! Superou a CA ${displayedAc}!`}
                         </div>
+                      )}
+                      {activeDuel.damageFormula ? (
+                        canRollDuel ? (
+                          <div>
+                            <button
+                              onClick={rollDuelDamage}
+                              className="rpg-btn-crimson px-7 py-2.5 rounded-md text-sm flex items-center gap-2 mx-auto cursor-pointer shadow-xl"
+                            >
+                              <Sparkles className="w-4 h-4" />
+                              <span>
+                                Rolar {isHeal ? 'Cura' : 'Dano'} Agora ({formatFormulaForDisplay(activeDuel.damageFormula)})
+                              </span>
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="px-4 py-1.5 rounded-md bg-black/35 border border-amber-500/30 text-xs font-lore italic text-amber-200/85">
+                            Aguardando <strong>{activeDuel.attackerName}</strong> rolar o {isHeal ? 'efeito' : 'dano'}...
+                          </div>
+                        )
                       ) : (
                         <button
                           onClick={dismissDuel}
@@ -364,7 +434,7 @@ export const CombatDuelOverlay: React.FC = () => {
               </div>
 
               {isDamageResult && (
-                <div className="space-y-2.5 animate-dice-tumble">
+                <div className="space-y-2.5 animate-ui-enter">
                   <div className="font-chronicle font-black text-3xl text-red-400 drop-shadow">
                     {isHeal
                       ? `+${activeDuel.damageTotal} PV Restaurados!`

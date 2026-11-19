@@ -11,7 +11,12 @@ import {
   X,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
-import { computeCharacterStats, evaluateFormula, formatSigned } from '../shared/rulesEngine';
+import {
+  buildPreviewDiceForFormula,
+  computeCharacterStats,
+  evaluateFormula,
+  formatSigned,
+} from '../shared/rulesEngine';
 import { DraggablePanel, DragGripBadge } from './DraggablePanel';
 import { OrnateDivider, OrnateFrame, SculptedHealthBar } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
@@ -26,6 +31,7 @@ export const CinematicOverlays: React.FC = () => {
     submitSkillCheckResult,
     dismissSkillCheck,
     sendRoll,
+    openManualRoll,
     activeReward,
     dismissReward,
     activeThemeBanner,
@@ -55,35 +61,52 @@ export const CinematicOverlays: React.FC = () => {
       : attr
       ? stats.attributes[attr.id]?.mod ?? 0
       : 0;
+    const formulaStr = `1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`;
 
-    const res = evaluateFormula(`1d20 + ${bonus}`, stats, activeChar);
-    const passed = res.isCrit || (!res.isFumble && res.total >= activeSkillCheck.dc);
-
-    sendRoll({
+    openManualRoll({
+      title: `Teste Pedido: ${activeSkillCheck.label}`,
+      subtitle: `Dificuldade: CD ${activeSkillCheck.dc}`,
+      formula: formulaStr,
+      displayFormula: formulaStr,
+      previewDice: buildPreviewDiceForFormula('1d20', 'normal'),
       rollerName: activeChar.name,
-      rollerRole: role,
       rollerColor: activeChar.playerColor || activeChar.tokenColor,
       diceSkin: activeChar.diceSkin || 'gold',
-      title: `Teste Pedido: ${activeSkillCheck.label}`,
-      formula: res.resolvedFormula,
-      individualRolls: res.individualRolls,
-      rolledDice: res.rolledDice,
-      d20Natural: res.d20Natural,
-      total: res.total,
-      isCrit: res.isCrit,
-      isFumble: res.isFumble,
-      isSecret: false,
-      details: `${passed ? 'SUCESSO' : 'FALHA'} contra CD ${activeSkillCheck.dc} (${res.details})`,
-    });
+      allowAdvantageToggle: true,
+      advantageMode: 'normal',
+      onExecute: (chosenMode) => {
+        const res = evaluateFormula(`1d20 + ${bonus}`, stats, activeChar, {
+          advantageMode: chosenMode,
+        });
+        const passed = res.isCrit || (!res.isFumble && res.total >= activeSkillCheck.dc);
 
-    submitSkillCheckResult({
-      checkId: activeSkillCheck.id,
-      characterId: activeChar.id,
-      characterName: activeChar.name,
-      playerColor: activeChar.playerColor || activeChar.tokenColor,
-      total: res.total,
-      d20: res.d20Natural,
-      passed,
+        sendRoll({
+          rollerName: activeChar.name,
+          rollerRole: role,
+          rollerColor: activeChar.playerColor || activeChar.tokenColor,
+          diceSkin: activeChar.diceSkin || 'gold',
+          title: `Teste Pedido: ${activeSkillCheck.label}`,
+          formula: res.resolvedFormula,
+          individualRolls: res.individualRolls,
+          rolledDice: res.rolledDice,
+          d20Natural: res.d20Natural,
+          total: res.total,
+          isCrit: res.isCrit,
+          isFumble: res.isFumble,
+          isSecret: false,
+          details: `${passed ? 'SUCESSO' : 'FALHA'} contra CD ${activeSkillCheck.dc} (${res.details})`,
+        });
+
+        submitSkillCheckResult({
+          checkId: activeSkillCheck.id,
+          characterId: activeChar.id,
+          characterName: activeChar.name,
+          playerColor: activeChar.playerColor || activeChar.tokenColor,
+          total: res.total,
+          d20: res.d20Natural,
+          passed,
+        });
+      },
     });
   };
 
@@ -258,7 +281,7 @@ export const CinematicOverlays: React.FC = () => {
 
       {/* 4. "O MESTRE PEDE UM TESTE!" POP-UP (#1) */}
       {activeSkillCheck && (
-        <div className="fixed bottom-6 left-6 z-40 w-80 sm:w-96 pointer-events-auto animate-dice-tumble">
+        <div className="fixed bottom-6 left-6 z-40 w-80 sm:w-96 pointer-events-auto animate-ui-enter">
           <div className="rpg-glass-panel rounded-2xl p-4 space-y-3 shadow-2xl">
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-center gap-2">

@@ -12,7 +12,6 @@ import { DiaryModal } from './components/DiaryModal';
 import { SoundboardModal } from './components/SoundboardModal';
 import { LobbyScreen } from './components/LobbyScreen';
 import { PlayerCharacterSetupModal } from './components/PlayerCharacterSetupModal';
-import { FantasyParticlesBackground } from './components/FantasyEffects';
 import { PolyhedralDiceOverlay } from './components/PolyhedralDiceOverlay';
 import { CinematicOverlays } from './components/CinematicOverlays';
 import { CombatDuelOverlay } from './components/CombatDuelOverlay';
@@ -85,8 +84,8 @@ const TabletopWorkspace: React.FC = () => {
   if (loading) {
     return (
       <div className="h-screen w-screen flex flex-col items-center justify-center gap-2 bg-[#06070c]">
-        <div className="font-chronicle font-black text-3xl tracking-[0.22em] chronicle-gold-text animate-pulse">
-          CHRONICLE
+        <div className="font-chronicle font-black text-3xl tracking-[0.22em] chronicle-gold-text">
+          CHRONICLES
         </div>
         <div className="font-lore italic text-sm text-amber-200/70">
           Abrindo os tomos da campanha...
@@ -103,7 +102,6 @@ const TabletopWorkspace: React.FC = () => {
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden relative">
-      <FantasyParticlesBackground intensity="low" />
       <TopHeader activeModal={activeModal} setActiveModal={setActiveModal} />
       <InitiativeBar />
 

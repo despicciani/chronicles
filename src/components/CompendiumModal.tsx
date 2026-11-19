@@ -16,6 +16,8 @@ import {
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import { DAMAGE_TYPE_OPTIONS, findNearestFreeGridCell } from '../shared/rulesEngine';
+import { FileUploadButton } from './FileUploadButton';
+import { TokenPortrait } from './TokenPortrait';
 import {
   AbilityDef,
   AttributeDef,
@@ -216,6 +218,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
               activeConditionIds: [],
               isHidden: false,
               color: mon.tokenColor,
+              imageUrl: mon.imageUrl,
             },
           ],
         };
@@ -1687,7 +1690,38 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({ onClose }) => 
                   return (
                     <div className="space-y-3 text-xs">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <h3 className="font-display font-bold text-lg">{item.name}</h3>
+                        <div className="flex items-center gap-3">
+                          <TokenPortrait
+                            name={item.name}
+                            imageUrl={item.imageUrl}
+                            playerColor={item.tokenColor}
+                            frameStyle="crimson"
+                            sizePx={48}
+                            iconHint={item.type}
+                          />
+                          <div>
+                            <h3 className="font-display font-bold text-lg leading-tight">{item.name}</h3>
+                            {canEdit && (
+                              <div className="flex items-center gap-1.5 mt-1">
+                                <FileUploadButton
+                                  accept="image/*"
+                                  label={item.imageUrl ? 'Trocar Foto' : 'Subir Foto'}
+                                  onUploaded={(url) => patch({ imageUrl: url })}
+                                  className="rounded-md"
+                                />
+                                {item.imageUrl && (
+                                  <button
+                                    type="button"
+                                    onClick={() => patch({ imageUrl: undefined })}
+                                    className="rpg-card px-2 py-1 rounded text-[10px] text-red-400 cursor-pointer"
+                                  >
+                                    Remover Foto
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
                         <div className="flex items-center gap-2">
                           {canEdit && (
                             <>

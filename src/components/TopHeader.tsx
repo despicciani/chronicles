@@ -157,7 +157,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
             <div className="hidden md:block leading-tight">
               <div className="flex items-center gap-1.5">
                 <span className="font-chronicle font-bold text-[10px] tracking-[0.2em] chronicle-gold-text">
-                  CHRONICLE
+                  CHRONICLES
                 </span>
                 <span className="text-[10px] opacity-40">•</span>
                 <span className="font-display font-bold text-xs tracking-wide truncate max-w-[165px]">
@@ -186,7 +186,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
                   {btn.icon}
                   <span className="hidden sm:inline">{btn.label}</span>
                   {btn.id === 'soundboard' && activeAmbientName && (
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]" />
                   )}
                 </button>
               );
@@ -413,7 +413,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
               style={{ borderColor: 'var(--border-subtle)' }}
             >
               <div className="flex items-center gap-1.5 min-w-0">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)] shrink-0" />
                 <span className="font-display font-bold text-xs uppercase tracking-wider text-emerald-300 truncate">
                   Jogadores Online ({connectedPlayers.length || connectedClients})
                 </span>

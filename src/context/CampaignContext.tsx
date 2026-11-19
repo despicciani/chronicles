@@ -17,6 +17,7 @@ import {
   MapToken,
   OpportunityAttackPrompt,
   PendingAttackChoice,
+  PendingManualRoll,
   PlayerRequest,
   RollLogEntry,
   RolledDieVisual,
@@ -29,11 +30,13 @@ import {
 } from '../shared/types';
 import { createStarterCampaign } from '../shared/starterSeed';
 import {
+  buildPreviewDiceForFormula,
   computeCharacterStats,
   evaluateFormula,
   evaluateLineOfSightAndCover,
   evaluateTacticalAttackModifiers,
   findNearestFreeGridCell,
+  formatFormulaForDisplay,
   getGridSpanDistance,
   getTokensInsideTemplate,
   normalizeHeroCharacter,
@@ -184,6 +187,10 @@ interface CampaignContextValue {
   dismissHandout: () => void;
   latestRollForOverlay: RollLogEntry | null;
   dismissRollOverlay: () => void;
+  pendingManualRoll: PendingManualRoll | null;
+  openManualRoll: (req: Omit<PendingManualRoll, 'id'>) => void;
+  cancelManualRoll: () => void;
+  executeManualRoll: (chosenMode?: RollAdvantageMode) => void;
   activeAmbientName: string | null;
   activeThemeBanner: ThemeMusicBanner | null;
   pings: MapPing[];
@@ -203,6 +210,10 @@ interface CampaignContextValue {
   }) => void;
   dismissSkillCheck: () => void;
   pendingRequests: PlayerRequest[];
+  pendingHeroJoinRequest: PlayerRequest | null;
+  heroJoinFeedback: { status: 'approved' | 'rejected'; message: string } | null;
+  clearHeroJoinFeedback: () => void;
+  cancelHeroJoinRequest: () => void;
   sendPlayerRequest: (type: PlayerRequest['type'], label: string, note?: string) => void;
   resolvePlayerRequest: (requestId: string, approved: boolean) => void;
   requestToast: { id: string; label: string; approved: boolean } | null;
@@ -225,6 +236,7 @@ interface CampaignContextValue {
   performCombatManeuver: (maneuver: 'dash' | 'disengage' | 'dodge' | 'action-surge') => void;
   activeDuel: CombatDuelState | null;
   startCombatDuel: (choice: PendingAttackChoice, defenderToken: MapToken) => void;
+  rollDuelAttack: () => void;
   rollDuelDamage: () => void;
   advanceDuelPhase: (phase: CombatDuelState['phase']) => void;
   dismissDuel: () => void;
@@ -405,12 +417,18 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [secretRoll, setSecretRoll] = useState(false);
   const [activeHandout, setActiveHandout] = useState<HandoutPayload | null>(null);
   const [latestRollForOverlay, setLatestRollForOverlay] = useState<RollLogEntry | null>(null);
+  const [pendingManualRoll, setPendingManualRoll] = useState<PendingManualRoll | null>(null);
   const [activeAmbientName, setActiveAmbientName] = useState<string | null>(null);
   const [activeThemeBanner, setActiveThemeBanner] = useState<ThemeMusicBanner | null>(null);
   const [pings, setPings] = useState<MapPing[]>([]);
   const [activePointers, setActivePointers] = useState<Record<string, MapPointerState>>({});
   const [activeSkillCheck, setActiveSkillCheck] = useState<SkillCheckRequest | null>(null);
   const [pendingRequests, setPendingRequests] = useState<PlayerRequest[]>([]);
+  const [pendingHeroJoinRequest, setPendingHeroJoinRequest] = useState<PlayerRequest | null>(null);
+  const [heroJoinFeedback, setHeroJoinFeedback] = useState<{
+    status: 'approved' | 'rejected';
+    message: string;
+  } | null>(null);
   const [requestToast, setRequestToast] = useState<{
     id: string;
     label: string;
@@ -850,13 +868,64 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     socket.on('request:list', (list: PlayerRequest[]) => {
       if (!mounted) return;
-      setPendingRequests(list || []);
+      const safeList = list || [];
+      setPendingRequests(safeList);
+      if (roleRef.current === 'player') {
+        const myPending =
+          safeList.find(
+            (r) =>
+              (r.type === 'claim-hero' || r.type === 'import-hero') &&
+              r.requesterPlayerId === myPlayerId
+          ) || null;
+        setPendingHeroJoinRequest(myPending);
+      } else if (
+        safeList.some((r) => r.type === 'claim-hero' || r.type === 'import-hero')
+      ) {
+        soundEngine.playSfxPreset('dice');
+      }
     });
 
     socket.on(
       'request:resolved',
-      (res: { characterId: string; characterName: string; label: string; approved: boolean }) => {
+      (res: {
+        type?: PlayerRequest['type'];
+        requesterPlayerId?: string;
+        characterId: string;
+        characterName: string;
+        label: string;
+        approved: boolean;
+      }) => {
         if (!mounted) return;
+        if (
+          roleRef.current === 'player' &&
+          (res.type === 'claim-hero' || res.type === 'import-hero') &&
+          res.requesterPlayerId === myPlayerId
+        ) {
+          setPendingHeroJoinRequest(null);
+          if (res.approved) {
+            setActiveCharacterId(res.characterId);
+            setHeroJoinFeedback({
+              status: 'approved',
+              message: `O Mestre permitiu sua entrada como ${res.characterName}!`,
+            });
+            soundEngine.playSfxPreset('heal');
+            const id = `rtoast-${Date.now()}`;
+            setRequestToast({
+              id,
+              label: `Entrada permitida: ${res.characterName}`,
+              approved: true,
+            });
+            window.setTimeout(() => {
+              setRequestToast((curr) => (curr?.id === id ? null : curr));
+            }, 4200);
+          } else {
+            setHeroJoinFeedback({
+              status: 'rejected',
+              message: `O Mestre não permitiu sua entrada como ${res.characterName}. Escolha outro herói ou crie um novo.`,
+            });
+          }
+          return;
+        }
         if (roleRef.current === 'player' && res.characterId === activeCharRef.current) {
           const id = `rtoast-${Date.now()}`;
           setRequestToast({ id, label: res.label, approved: res.approved });
@@ -1228,11 +1297,49 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, []);
 
+  const clearHeroJoinFeedback = useCallback(() => {
+    setHeroJoinFeedback(null);
+  }, []);
+
+  const cancelHeroJoinRequest = useCallback(() => {
+    setPendingHeroJoinRequest((curr) => {
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('request:cancel', {
+          requestId: curr?.id,
+          requesterPlayerId: myPlayerId,
+        });
+      }
+      return null;
+    });
+  }, [myPlayerId]);
+
   const importSavedHeroIntoCampaign = useCallback(
     (rawHero: Character) => {
       const camp = campaignRef.current;
       const normalized = normalizeHeroCharacter(rawHero, camp);
       const vaultId = normalized.vaultId || normalized.id;
+
+      // Players entering with a previously created/saved hero require GM approval when online
+      if (roleRef.current === 'player' && socketRef.current?.connected) {
+        setHeroJoinFeedback(null);
+        const reqPayload: PlayerRequest = {
+          id: `req-join-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          characterId: normalized.id,
+          characterName: normalized.name,
+          characterPortraitUrl: normalized.portraitUrl,
+          playerColor: myPlayerColor || normalized.playerColor || '#38bdf8',
+          requesterPlayerId: myPlayerId,
+          requesterPlayerName: myPlayerName.trim() || 'Jogador',
+          type: 'import-hero',
+          label: `Entrar como ${normalized.name} (Nv ${normalized.level})`,
+          note: `${myPlayerName.trim() || 'Jogador'} quer entrar na mesa trazendo o herói salvo "${normalized.name}" (Nível ${normalized.level}).`,
+          heroPayload: { ...normalized, vaultId },
+          createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        };
+        setPendingHeroJoinRequest(reqPayload);
+        socketRef.current.emit('request:send', reqPayload);
+        return;
+      }
 
       // Avoid ID collision if importing an independent copy, or reclaim same hero if present
       const existingMatch = camp.characters.find(
@@ -1340,6 +1447,28 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     (characterId: string) => {
       const target = campaignRef.current.characters.find((c) => c.id === characterId);
       if (!target) return;
+
+      // Players claiming an existing campaign hero require GM approval when online
+      if (roleRef.current === 'player' && socketRef.current?.connected) {
+        setHeroJoinFeedback(null);
+        const reqPayload: PlayerRequest = {
+          id: `req-claim-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          characterId: target.id,
+          characterName: target.name,
+          characterPortraitUrl: target.portraitUrl,
+          playerColor: myPlayerColor || target.playerColor || '#38bdf8',
+          requesterPlayerId: myPlayerId,
+          requesterPlayerName: myPlayerName.trim() || 'Jogador',
+          type: 'claim-hero',
+          label: `Entrar como ${target.name} (Nv ${target.level})`,
+          note: `${myPlayerName.trim() || 'Jogador'} quer assumir o controle de "${target.name}" nesta mesa.`,
+          createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        };
+        setPendingHeroJoinRequest(reqPayload);
+        socketRef.current.emit('request:send', reqPayload);
+        return;
+      }
+
       const claimed: Character = {
         ...target,
         ownerPlayerId: myPlayerId,
@@ -1354,7 +1483,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       persistHeroToVault(claimed, { silent: false }).catch(() => {});
       setActiveCharacterId(characterId);
     },
-    [myPlayerId, myPlayerName, persistHeroToVault, setActiveCharacterId, updateCampaign]
+    [myPlayerColor, myPlayerId, myPlayerName, persistHeroToVault, setActiveCharacterId, updateCampaign]
   );
 
   const setMyPlayerColor = useCallback(
@@ -1404,6 +1533,29 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, []);
 
+  const openManualRoll = useCallback((req: Omit<PendingManualRoll, 'id'>) => {
+    setLatestRollForOverlay(null);
+    setPendingManualRoll({
+      ...req,
+      id: `mroll-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    });
+  }, []);
+
+  const cancelManualRoll = useCallback(() => {
+    setPendingManualRoll(null);
+  }, []);
+
+  const executeManualRoll = useCallback((chosenMode?: RollAdvantageMode) => {
+    setPendingManualRoll((curr) => {
+      if (!curr) return null;
+      const modeToUse = chosenMode ?? curr.advantageMode;
+      window.setTimeout(() => {
+        curr.onExecute(modeToUse);
+      }, 0);
+      return null;
+    });
+  }, []);
+
   const quickRollFormula = useCallback(
     (
       title: string,
@@ -1414,56 +1566,78 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     ) => {
       const activeChar = campaignRef.current.characters.find((c) => c.id === activeCharRef.current);
       const stats = activeChar ? computeCharacterStats(activeChar, campaignRef.current) : undefined;
-      const res = evaluateFormula(formula, stats, activeChar, { advantageMode });
+      const resolvedRollerName =
+        rollerName || (roleRef.current === 'gm' ? 'Mestre' : activeChar?.name || myPlayerName);
+      const resolvedRollerColor =
+        roleRef.current === 'gm' ? '#e0b84c' : activeChar?.playerColor || myPlayerColor;
+      const resolvedSkin = (activeChar?.diceSkin || 'gold') as DiceSkin;
+      const isD20Roll = formula.toLowerCase().includes('d20');
 
-      let dmgTotal: number | undefined;
-      let details = `${res.individualRolls.join(' | ')}`;
-      const allRolledDice: RolledDieVisual[] = [...res.rolledDice];
-
-      if (damageFormula) {
-        const dmgRes = evaluateFormula(damageFormula, stats, activeChar, {
-          isCritDamage: res.isCrit,
-        });
-        dmgTotal = Math.max(1, dmgRes.total);
-        details += ` | Dano: ${dmgTotal} (${dmgRes.details})`;
-        allRolledDice.push(...dmgRes.rolledDice);
-      }
-
-      const activeMap = campaignRef.current.maps.find(
-        (m) => m.id === campaignRef.current.activeMapId
-      );
-      const targetToken = activeMap?.tokens.find((t) => t.id === targetTokenId);
-      let hitStatus: 'hit' | 'miss' | null = null;
-      if (targetToken && formula.toLowerCase().includes('d20')) {
-        hitStatus =
-          res.isCrit || (!res.isFumble && res.total >= targetToken.defense) ? 'hit' : 'miss';
-      }
-
-      sendRoll({
-        rollerName:
-          rollerName || (roleRef.current === 'gm' ? 'Mestre' : activeChar?.name || myPlayerName),
-        rollerRole: roleRef.current,
-        rollerColor: roleRef.current === 'gm' ? '#e0b84c' : activeChar?.playerColor || myPlayerColor,
-        diceSkin: (activeChar?.diceSkin || 'gold') as DiceSkin,
+      openManualRoll({
         title,
-        formula: res.resolvedFormula,
-        individualRolls: res.individualRolls,
-        rolledDice: allRolledDice,
-        d20Natural: res.d20Natural,
-        total: res.total,
-        isCrit: res.isCrit,
-        isFumble: res.isFumble,
-        damageTotal: dmgTotal,
-        damageType,
-        targetName: targetToken?.name,
-        targetTokenId: targetToken?.id,
-        targetDefense: targetToken?.defense,
-        hitStatus,
-        isSecret: roleRef.current === 'gm' && secretRoll,
-        details,
+        subtitle: damageFormula ? `Com rolagem secundária: ${formatFormulaForDisplay(damageFormula, stats, activeChar)}` : undefined,
+        formula,
+        displayFormula: formatFormulaForDisplay(formula, stats, activeChar),
+        previewDice: buildPreviewDiceForFormula(formula, advantageMode),
+        rollerName: resolvedRollerName,
+        rollerColor: resolvedRollerColor,
+        diceSkin: resolvedSkin,
+        allowAdvantageToggle: isD20Roll,
+        advantageMode,
+        onExecute: (chosenMode) => {
+          const currChar = campaignRef.current.characters.find((c) => c.id === activeCharRef.current);
+          const currStats = currChar ? computeCharacterStats(currChar, campaignRef.current) : undefined;
+          const res = evaluateFormula(formula, currStats, currChar, { advantageMode: chosenMode });
+
+          let dmgTotal: number | undefined;
+          let details = `${res.individualRolls.join(' | ')}`;
+          const allRolledDice: RolledDieVisual[] = [...res.rolledDice];
+
+          if (damageFormula) {
+            const dmgRes = evaluateFormula(damageFormula, currStats, currChar, {
+              isCritDamage: res.isCrit,
+            });
+            dmgTotal = Math.max(1, dmgRes.total);
+            details += ` | Dano: ${dmgTotal} (${dmgRes.details})`;
+            allRolledDice.push(...dmgRes.rolledDice);
+          }
+
+          const activeMap = campaignRef.current.maps.find(
+            (m) => m.id === campaignRef.current.activeMapId
+          );
+          const targetToken = activeMap?.tokens.find((t) => t.id === targetTokenId);
+          let hitStatus: 'hit' | 'miss' | null = null;
+          if (targetToken && isD20Roll) {
+            hitStatus =
+              res.isCrit || (!res.isFumble && res.total >= targetToken.defense) ? 'hit' : 'miss';
+          }
+
+          sendRoll({
+            rollerName: resolvedRollerName,
+            rollerRole: roleRef.current,
+            rollerColor: resolvedRollerColor,
+            diceSkin: resolvedSkin,
+            title,
+            formula: res.resolvedFormula,
+            individualRolls: res.individualRolls,
+            rolledDice: allRolledDice,
+            d20Natural: res.d20Natural,
+            total: res.total,
+            isCrit: res.isCrit,
+            isFumble: res.isFumble,
+            damageTotal: dmgTotal,
+            damageType,
+            targetName: targetToken?.name,
+            targetTokenId: targetToken?.id,
+            targetDefense: targetToken?.defense,
+            hitStatus,
+            isSecret: roleRef.current === 'gm' && secretRoll,
+            details,
+          });
+        },
       });
     },
-    [advantageMode, myPlayerColor, myPlayerName, secretRoll, sendRoll, targetTokenId]
+    [advantageMode, myPlayerColor, myPlayerName, openManualRoll, secretRoll, sendRoll, targetTokenId]
   );
 
   const rollCharacterAction: CampaignContextValue['rollCharacterAction'] = useCallback(
@@ -1673,77 +1847,101 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ...(attackFormula ? stats.attackDiceBonuses : []),
       ];
 
-      const attackRes = attackFormula
-        ? evaluateFormula(attackFormula, stats, char, {
-            advantageMode,
-            extraFlatBonus: combinedExtraBonus,
-            extraDiceBonuses: combinedDice,
-          })
-        : null;
+      const executeActionRoll = (chosenMode: RollAdvantageMode) => {
+        const attackRes = attackFormula
+          ? evaluateFormula(attackFormula, stats, char, {
+              advantageMode: chosenMode,
+              extraFlatBonus: combinedExtraBonus,
+              extraDiceBonuses: combinedDice,
+            })
+          : null;
 
-      const allRolledDice: RolledDieVisual[] = [...(attackRes?.rolledDice || [])];
+        const allRolledDice: RolledDieVisual[] = [...(attackRes?.rolledDice || [])];
 
-      let dmgTotal: number | undefined;
-      let dmgDetails = '';
-      if (damageFormula) {
-        const isHealing = damageType?.toLowerCase() === 'cura';
-        const dmgRes = evaluateFormula(damageFormula, stats, char, {
-          extraFlatBonus: !isHealing && attackFormula ? stats.damageBonusExtra : 0,
-          isCritDamage: attackRes?.isCrit,
+        let dmgTotal: number | undefined;
+        let dmgDetails = '';
+        if (damageFormula) {
+          const isHealing = damageType?.toLowerCase() === 'cura';
+          const dmgRes = evaluateFormula(damageFormula, stats, char, {
+            extraFlatBonus: !isHealing && attackFormula ? stats.damageBonusExtra : 0,
+            isCritDamage: attackRes?.isCrit,
+          });
+          dmgTotal = Math.max(1, dmgRes.total);
+          dmgDetails = `${damageType || 'Dano'}: ${dmgTotal} (${dmgRes.details})`;
+          allRolledDice.push(...dmgRes.rolledDice);
+        }
+
+        let hitStatus: 'hit' | 'miss' | null = null;
+        if (attackRes && targetToken) {
+          hitStatus =
+            attackRes.isCrit || (!attackRes.isFumble && attackRes.total >= targetToken.defense)
+              ? 'hit'
+              : 'miss';
+        }
+
+        let saveText = '';
+        if (saveSkillId && saveDcFormula) {
+          const dcRes = evaluateFormula(saveDcFormula, stats, char);
+          const skillName =
+            campaignRef.current.compendium.skills.find((s) => s.id === saveSkillId)?.name ||
+            saveSkillId;
+          saveText = `CD ${dcRes.total} (${skillName})`;
+        }
+
+        const detailsParts = [
+          attackRes ? `Ataque: ${attackRes.individualRolls.join(' ')}` : '',
+          dmgDetails,
+          saveText,
+          costMp ? `-${costMp} ${campaignRef.current.settings.resourceShort}` : '',
+        ].filter(Boolean);
+
+        sendRoll({
+          rollerName: char.name,
+          rollerRole: roleRef.current,
+          rollerColor: char.playerColor || char.tokenColor,
+          diceSkin: char.diceSkin || 'gold',
+          title,
+          formula: attackRes ? attackRes.resolvedFormula : damageFormula || 'Efeito',
+          individualRolls: attackRes ? attackRes.individualRolls : [],
+          rolledDice: allRolledDice,
+          d20Natural: attackRes?.d20Natural,
+          total: attackRes ? attackRes.total : dmgTotal || 0,
+          isCrit: attackRes?.isCrit,
+          isFumble: attackRes?.isFumble,
+          damageTotal: dmgTotal,
+          damageType,
+          targetName: targetToken?.name,
+          targetTokenId: targetToken?.id,
+          targetDefense: targetToken?.defense,
+          hitStatus,
+          isSecret: roleRef.current === 'gm' && secretRoll,
+          details: detailsParts.join(' • ') || 'Habilidade ativada.',
         });
-        dmgTotal = Math.max(1, dmgRes.total);
-        dmgDetails = `${damageType || 'Dano'}: ${dmgTotal} (${dmgRes.details})`;
-        allRolledDice.push(...dmgRes.rolledDice);
+      };
+
+      const activeFormula = attackFormula || damageFormula;
+      if (activeFormula && /\d*d\d+/i.test(activeFormula)) {
+        openManualRoll({
+          title,
+          subtitle: damageType?.toLowerCase() === 'cura' ? 'Rolagem de Cura' : undefined,
+          formula: activeFormula,
+          displayFormula: formatFormulaForDisplay(activeFormula, stats, char),
+          previewDice: buildPreviewDiceForFormula(
+            activeFormula,
+            attackFormula ? advantageMode : 'normal'
+          ),
+          rollerName: char.name,
+          rollerColor: char.playerColor || char.tokenColor,
+          diceSkin: char.diceSkin || 'gold',
+          allowAdvantageToggle: Boolean(attackFormula && attackFormula.toLowerCase().includes('d20')),
+          advantageMode: attackFormula ? advantageMode : 'normal',
+          onExecute: executeActionRoll,
+        });
+      } else {
+        executeActionRoll(advantageMode);
       }
-
-      let hitStatus: 'hit' | 'miss' | null = null;
-      if (attackRes && targetToken) {
-        hitStatus =
-          attackRes.isCrit || (!attackRes.isFumble && attackRes.total >= targetToken.defense)
-            ? 'hit'
-            : 'miss';
-      }
-
-      let saveText = '';
-      if (saveSkillId && saveDcFormula) {
-        const dcRes = evaluateFormula(saveDcFormula, stats, char);
-        const skillName =
-          campaignRef.current.compendium.skills.find((s) => s.id === saveSkillId)?.name ||
-          saveSkillId;
-        saveText = `CD ${dcRes.total} (${skillName})`;
-      }
-
-      const detailsParts = [
-        attackRes ? `Ataque: ${attackRes.individualRolls.join(' ')}` : '',
-        dmgDetails,
-        saveText,
-        costMp ? `-${costMp} ${campaignRef.current.settings.resourceShort}` : '',
-      ].filter(Boolean);
-
-      sendRoll({
-        rollerName: char.name,
-        rollerRole: roleRef.current,
-        rollerColor: char.playerColor || char.tokenColor,
-        diceSkin: char.diceSkin || 'gold',
-        title,
-        formula: attackRes ? attackRes.resolvedFormula : damageFormula || 'Efeito',
-        individualRolls: attackRes ? attackRes.individualRolls : [],
-        rolledDice: allRolledDice,
-        d20Natural: attackRes?.d20Natural,
-        total: attackRes ? attackRes.total : dmgTotal || 0,
-        isCrit: attackRes?.isCrit,
-        isFumble: attackRes?.isFumble,
-        damageTotal: dmgTotal,
-        damageType,
-        targetName: targetToken?.name,
-        targetTokenId: targetToken?.id,
-        targetDefense: targetToken?.defense,
-        hitStatus,
-        isSecret: roleRef.current === 'gm' && secretRoll,
-        details: detailsParts.join(' • ') || 'Habilidade ativada.',
-      });
     },
-    [advantageMode, secretRoll, sendRoll, targetTokenId, updateCampaign]
+    [advantageMode, openManualRoll, secretRoll, sendRoll, targetTokenId, updateCampaign]
   );
 
   const applyDamage = useCallback(
@@ -2513,23 +2711,16 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }));
 
       const hasAttackRoll = Boolean(choice.attackFormula && choice.attackFormula.trim());
-      const attackRes = hasAttackRoll
-        ? evaluateFormula(choice.attackFormula!, stats, char, {
-            advantageMode: tacticalMods.effectiveAdvantageMode,
-            extraFlatBonus: stats?.attackBonusExtra,
-            extraDiceBonuses: stats?.attackDiceBonuses,
-          })
-        : null;
-
-      const hitSuccess = !attackRes
-        ? true
-        : attackRes.isCrit || (!attackRes.isFumble && attackRes.total >= effectiveDefenderAc);
-      const effectiveIsCrit = Boolean(
-        attackRes?.isCrit || (hitSuccess && tacticalMods.autoCritOnHit)
-      );
+      const previewAttackDice = hasAttackRoll
+        ? buildPreviewDiceForFormula(choice.attackFormula!, tacticalMods.effectiveAdvantageMode)
+        : [];
+      const displayAtkFormula = hasAttackRoll
+        ? formatFormulaForDisplay(choice.attackFormula!, stats, char)
+        : undefined;
 
       const duel: CombatDuelState = {
         id: `duel-${Date.now()}`,
+        attackerCharacterId: choice.attackerCharacterId,
         attackerName: choice.attackerName,
         attackerColor: choice.attackerColor,
         attackerImageUrl: choice.attackerImageUrl,
@@ -2545,90 +2736,105 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         defenderMaxHp: defenderToken.maxHp,
         actionTitle: choice.actionTitle,
         diceSkin: choice.diceSkin,
-        attackFormula: attackRes?.resolvedFormula,
-        attackRolledDice: attackRes?.rolledDice || [],
-        attackTotal: attackRes?.total,
-        d20Natural: attackRes?.d20Natural,
-        isCrit: effectiveIsCrit,
-        isFumble: attackRes?.isFumble || false,
-        hitSuccess,
+        rawAttackFormula: hasAttackRoll ? choice.attackFormula : undefined,
+        attackFormula: displayAtkFormula,
+        attackRolledDice: previewAttackDice,
+        isCrit: false,
+        isFumble: false,
+        hitSuccess: !hasAttackRoll,
         damageFormula: choice.damageFormula,
         damageType: choice.damageType,
         situationalModifiers: allSituationalBadges,
         effectiveAdvantageMode: tacticalMods.effectiveAdvantageMode,
         autoCritOnHit: tacticalMods.autoCritOnHit,
-        phase: hasAttackRoll ? 'rolling-attack' : 'rolling-damage',
+        // Wait for manual click on "Rolar Ataque" (or "Rolar Dano" for direct auto-hit spells!)
+        phase: hasAttackRoll ? 'ready-attack' : 'attack-result',
       };
 
       activeDuelRef.current = duel;
       emitDuelState(duel);
-      soundEngine.playSfxPreset('dice');
-
-      if (attackRes) {
-        const modSuffix =
-          allSituationalBadges.length > 0
-            ? ` • ${allSituationalBadges.join(' | ')}`
-            : '';
-        sendRoll({
-          rollerName: choice.attackerName,
-          rollerRole: roleRef.current,
-          rollerColor: choice.attackerColor,
-          diceSkin: choice.diceSkin,
-          title: `${choice.actionTitle} → ${defenderToken.name}`,
-          formula: attackRes.resolvedFormula,
-          individualRolls: attackRes.individualRolls,
-          rolledDice: attackRes.rolledDice,
-          d20Natural: attackRes.d20Natural,
-          total: attackRes.total,
-          isCrit: effectiveIsCrit,
-          isFumble: attackRes.isFumble,
-          targetName: defenderToken.name,
-          targetTokenId: defenderToken.id,
-          targetDefense: effectiveDefenderAc,
-          hitStatus: hitSuccess ? 'hit' : 'miss',
-          isSecret: false,
-          details: `${
-            hitSuccess
-              ? `ACERTOU! (${attackRes.total} vs CA ${effectiveDefenderAc})`
-              : `BLOQUEADO! (${attackRes.total} vs CA ${effectiveDefenderAc})`
-          }${modSuffix}`,
-        });
-
-        window.setTimeout(() => {
-          if (activeDuelRef.current?.id === duel.id) {
-            emitDuelState({ ...duel, phase: 'attack-result' });
-          }
-          if (!hitSuccess) {
-            triggerSlashVfx(defenderToken.id, 'block');
-          } else {
-            soundEngine.playSfxPreset('sword');
-          }
-        }, 680);
-      } else if (choice.damageFormula) {
-        // Direct spell/heal without d20 attack roll: roll damage directly!
-        const isHealing = choice.damageType?.toLowerCase() === 'cura';
-        const dmgRes = evaluateFormula(choice.damageFormula, stats, char);
-        const dmgTotal = Math.max(1, dmgRes.total);
-        const dmgDuel: CombatDuelState = {
-          ...duel,
-          damageRolledDice: dmgRes.rolledDice,
-          damageTotal: dmgTotal,
-          phase: 'rolling-damage',
-        };
-        emitDuelState(dmgDuel);
-
-        window.setTimeout(() => {
-          if (activeDuelRef.current?.id === dmgDuel.id) {
-            emitDuelState({ ...dmgDuel, phase: 'damage-result', damageApplied: true });
-          }
-          applyDamage(defenderToken.id, dmgTotal, isHealing, undefined, choice.damageType);
-          triggerSlashVfx(defenderToken.id, isHealing ? 'heal' : 'hit');
-          soundEngine.playSfxPreset(isHealing ? 'heal' : 'fireball');
-        }, 680);
-      }
     },
-    [advantageMode, applyDamage, emitDuelState, sendRoll, showTacticalAlert, triggerOpportunityPrompt, triggerSlashVfx, updateCampaign]
+    [advantageMode, emitDuelState, showTacticalAlert, triggerOpportunityPrompt, updateCampaign]
   );
+
+  const rollDuelAttack = useCallback(() => {
+    const duel = activeDuelRef.current;
+    if (!duel || duel.phase !== 'ready-attack') return;
+    const rawFormula = duel.rawAttackFormula || duel.attackFormula;
+    if (!rawFormula) return;
+
+    const currCampaign = campaignRef.current;
+    const char = duel.attackerCharacterId
+      ? currCampaign.characters.find((c) => c.id === duel.attackerCharacterId)
+      : currCampaign.characters.find((c) => c.name === duel.attackerName);
+    const stats = char ? computeCharacterStats(char, currCampaign) : undefined;
+
+    const attackRes = evaluateFormula(rawFormula, stats, char, {
+      advantageMode: duel.effectiveAdvantageMode || 'normal',
+      extraFlatBonus: stats?.attackBonusExtra,
+      extraDiceBonuses: stats?.attackDiceBonuses,
+    });
+
+    const hitSuccess =
+      attackRes.isCrit || (!attackRes.isFumble && attackRes.total >= duel.defenderDefense);
+    const effectiveIsCrit = Boolean(attackRes.isCrit || (hitSuccess && duel.autoCritOnHit));
+
+    const rollingDuel: CombatDuelState = {
+      ...duel,
+      attackFormula: attackRes.resolvedFormula,
+      attackRolledDice: attackRes.rolledDice,
+      attackTotal: attackRes.total,
+      d20Natural: attackRes.d20Natural,
+      isCrit: effectiveIsCrit,
+      isFumble: attackRes.isFumble,
+      hitSuccess,
+      phase: 'rolling-attack',
+    };
+
+    emitDuelState(rollingDuel);
+    soundEngine.playSfxPreset('dice');
+
+    const modSuffix =
+      duel.situationalModifiers && duel.situationalModifiers.length > 0
+        ? ` • ${duel.situationalModifiers.join(' | ')}`
+        : '';
+
+    sendRoll({
+      rollerName: duel.attackerName,
+      rollerRole: roleRef.current,
+      rollerColor: duel.attackerColor,
+      diceSkin: duel.diceSkin,
+      title: `${duel.actionTitle} → ${duel.defenderName}`,
+      formula: attackRes.resolvedFormula,
+      individualRolls: attackRes.individualRolls,
+      rolledDice: attackRes.rolledDice,
+      d20Natural: attackRes.d20Natural,
+      total: attackRes.total,
+      isCrit: effectiveIsCrit,
+      isFumble: attackRes.isFumble,
+      targetName: duel.defenderName,
+      targetTokenId: duel.defenderTokenId,
+      targetDefense: duel.defenderDefense,
+      hitStatus: hitSuccess ? 'hit' : 'miss',
+      isSecret: false,
+      details: `${
+        hitSuccess
+          ? `ACERTOU! (${attackRes.total} vs CA ${duel.defenderDefense})`
+          : `BLOQUEADO! (${attackRes.total} vs CA ${duel.defenderDefense})`
+      }${modSuffix}`,
+    });
+
+    window.setTimeout(() => {
+      if (activeDuelRef.current?.id === rollingDuel.id) {
+        emitDuelState({ ...rollingDuel, phase: 'attack-result' });
+      }
+      if (!hitSuccess) {
+        triggerSlashVfx(duel.defenderTokenId, 'block');
+      } else {
+        soundEngine.playSfxPreset('sword');
+      }
+    }, 680);
+  }, [emitDuelState, sendRoll, triggerSlashVfx]);
 
   const rollDuelDamage = useCallback(() => {
     const duel = activeDuelRef.current;
@@ -2741,116 +2947,136 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       const stats = computeCharacterStats(char, camp);
       const hasAid = Boolean(prevDs.assistedBy);
-      const res = evaluateFormula('1d20', stats, char, {
-        advantageMode: hasAid ? 'advantage' : 'normal',
-      });
-      const nat = res.d20Natural ?? res.total;
+      const deathMode: RollAdvantageMode = hasAid ? 'advantage' : 'normal';
 
-      let nextSucc = prevDs.successes || 0;
-      let nextFail = prevDs.failures || 0;
-      let nextHp = char.hp;
-      let nextStabilized = false;
-      let nextDead = false;
-      let msg = '';
-
-      if (nat === 20) {
-        nextHp = 1;
-        nextSucc = 0;
-        nextFail = 0;
-        msg = '20 NATURAL! Renasceu imediatamente com 1 PV!';
-      } else if (nat === 1) {
-        nextFail = Math.min(3, nextFail + 2);
-        nextDead = nextFail >= 3;
-        msg = nextDead
-          ? '1 NATURAL! Duas falhas — O herói sucumbiu nos Portões da Morte (3/3 Falhas)!'
-          : `1 NATURAL! Duas falhas nos Portões da Morte (${nextFail}/3).`;
-      } else if (nat >= 10) {
-        nextSucc = Math.min(3, nextSucc + 1);
-        if (nextSucc >= 3) {
-          nextHp = 1;
-          nextSucc = 0;
-          nextFail = 0;
-          nextStabilized = false;
-          msg = '3º Sucesso contra a Morte! O herói venceu os Portões da Morte e renasceu com 1 PV!';
-        } else {
-          msg = `Sucesso contra a Morte (${nextSucc}/3).`;
-        }
-      } else {
-        nextFail = Math.min(3, nextFail + 1);
-        nextDead = nextFail >= 3;
-        msg = nextDead
-          ? `3ª Falha (${nat}) — O personagem MORREU!`
-          : `Falha contra a Morte (${nextFail}/3).`;
-      }
-
-      updateCampaign((prev) => ({
-        ...prev,
-        characters: prev.characters.map((c) =>
-          c.id !== char.id
-            ? c
-            : {
-                ...c,
-                hp: nextHp,
-                deathSaves: {
-                  successes: nextSucc,
-                  failures: nextFail,
-                  stabilized: nextStabilized,
-                  dead: nextDead,
-                  assistedBy: undefined,
-                },
-              }
-        ),
-        maps:
-          nextHp > 0
-            ? prev.maps.map((m) => ({
-                ...m,
-                tokens: m.tokens.map((t) =>
-                  t.type === 'character' && t.referenceId === char.id
-                    ? { ...t, hp: nextHp }
-                    : t
-                ),
-              }))
-            : prev.maps,
-        combat:
-          nextHp > 0
-            ? {
-                ...prev.combat,
-                combatants: prev.combat.combatants.map((cb) =>
-                  cb.type === 'character' && cb.referenceId === char.id
-                    ? { ...cb, hp: nextHp }
-                    : cb
-                ),
-              }
-            : prev.combat,
-      }));
-
-      const activeMap = camp.maps.find((m) => m.id === camp.activeMapId);
-      const charTok = activeMap?.tokens.find(
-        (t) => t.type === 'character' && t.referenceId === char.id
-      );
-      if (nextHp > 0 || nextStabilized) {
-        soundEngine.playSfxPreset('heal');
-        if (charTok) triggerSlashVfx(charTok.id, 'heal');
-      }
-
-      sendRoll({
+      openManualRoll({
+        title: hasAid ? `Teste contra a Morte (Ajuda: ${prevDs.assistedBy})` : 'Teste contra a Morte',
+        subtitle: '10+ Sucesso (3 sucessos = renasce com 1 PV) • 20 Natural = 1 PV imediato • 1 Natural = 2 falhas',
+        formula: '1d20',
+        displayFormula: hasAid ? '2d20 (Vantagem)' : '1d20',
+        previewDice: buildPreviewDiceForFormula('1d20', deathMode),
         rollerName: char.name,
-        rollerRole: roleRef.current,
         rollerColor: char.playerColor || char.tokenColor,
         diceSkin: char.diceSkin || 'blood',
-        title: hasAid ? `Teste contra a Morte (Ajuda: ${prevDs.assistedBy})` : 'Teste contra a Morte',
-        formula: hasAid ? '2d20 (Vantagem)' : '1d20',
-        individualRolls: res.individualRolls,
-        rolledDice: res.rolledDice,
-        d20Natural: nat,
-        total: nat,
-        isCrit: nat === 20,
-        isFumble: nat === 1 || nextDead,
-        isSecret: false,
-        details: msg,
+        allowAdvantageToggle: false,
+        advantageMode: deathMode,
+        onExecute: (chosenMode) => {
+          const liveCamp = campaignRef.current;
+          const liveChar = liveCamp.characters.find((c) => c.id === char.id);
+          if (!liveChar || liveChar.hp > 0) return;
+          const liveDs = liveChar.deathSaves || { successes: 0, failures: 0 };
+          const res = evaluateFormula('1d20', stats, liveChar, {
+            advantageMode: chosenMode,
+          });
+          const nat = res.d20Natural ?? res.total;
+
+          let nextSucc = liveDs.successes || 0;
+          let nextFail = liveDs.failures || 0;
+          let nextHp = liveChar.hp;
+          let nextStabilized = false;
+          let nextDead = false;
+          let msg = '';
+
+          if (nat === 20) {
+            nextHp = 1;
+            nextSucc = 0;
+            nextFail = 0;
+            msg = '20 NATURAL! Renasceu imediatamente com 1 PV!';
+          } else if (nat === 1) {
+            nextFail = Math.min(3, nextFail + 2);
+            nextDead = nextFail >= 3;
+            msg = nextDead
+              ? '1 NATURAL! Duas falhas — O herói sucumbiu nos Portões da Morte (3/3 Falhas)!'
+              : `1 NATURAL! Duas falhas nos Portões da Morte (${nextFail}/3).`;
+          } else if (nat >= 10) {
+            nextSucc = Math.min(3, nextSucc + 1);
+            if (nextSucc >= 3) {
+              nextHp = 1;
+              nextSucc = 0;
+              nextFail = 0;
+              nextStabilized = false;
+              msg = '3º Sucesso contra a Morte! O herói venceu os Portões da Morte e renasceu com 1 PV!';
+            } else {
+              msg = `Sucesso contra a Morte (${nextSucc}/3).`;
+            }
+          } else {
+            nextFail = Math.min(3, nextFail + 1);
+            nextDead = nextFail >= 3;
+            msg = nextDead
+              ? `3ª Falha (${nat}) — O personagem MORREU!`
+              : `Falha contra a Morte (${nextFail}/3).`;
+          }
+
+          updateCampaign((prev) => ({
+            ...prev,
+            characters: prev.characters.map((c) =>
+              c.id !== liveChar.id
+                ? c
+                : {
+                    ...c,
+                    hp: nextHp,
+                    deathSaves: {
+                      successes: nextSucc,
+                      failures: nextFail,
+                      stabilized: nextStabilized,
+                      dead: nextDead,
+                      assistedBy: undefined,
+                    },
+                  }
+            ),
+            maps:
+              nextHp > 0
+                ? prev.maps.map((m) => ({
+                    ...m,
+                    tokens: m.tokens.map((t) =>
+                      t.type === 'character' && t.referenceId === liveChar.id
+                        ? { ...t, hp: nextHp }
+                        : t
+                    ),
+                  }))
+                : prev.maps,
+            combat:
+              nextHp > 0
+                ? {
+                    ...prev.combat,
+                    combatants: prev.combat.combatants.map((cb) =>
+                      cb.type === 'character' && cb.referenceId === liveChar.id
+                        ? { ...cb, hp: nextHp }
+                        : cb
+                    ),
+                  }
+                : prev.combat,
+          }));
+
+          const activeMap = liveCamp.maps.find((m) => m.id === liveCamp.activeMapId);
+          const charTok = activeMap?.tokens.find(
+            (t) => t.type === 'character' && t.referenceId === liveChar.id
+          );
+          if (nextHp > 0 || nextStabilized) {
+            soundEngine.playSfxPreset('heal');
+            if (charTok) triggerSlashVfx(charTok.id, 'heal');
+          }
+
+          sendRoll({
+            rollerName: liveChar.name,
+            rollerRole: roleRef.current,
+            rollerColor: liveChar.playerColor || liveChar.tokenColor,
+            diceSkin: liveChar.diceSkin || 'blood',
+            title: hasAid ? `Teste contra a Morte (Ajuda: ${prevDs.assistedBy})` : 'Teste contra a Morte',
+            formula: hasAid ? '2d20 (Vantagem)' : '1d20',
+            individualRolls: res.individualRolls,
+            rolledDice: res.rolledDice,
+            d20Natural: nat,
+            total: nat,
+            isCrit: nat === 20,
+            isFumble: nat === 1 || nextDead,
+            isSecret: false,
+            details: msg,
+          });
+        },
       });
     },
-    [sendRoll, showTacticalAlert, triggerSlashVfx, updateCampaign]
+    [openManualRoll, sendRoll, showTacticalAlert, triggerSlashVfx, updateCampaign]
   );
 
   const assistDeathSave = useCallback(
@@ -3370,69 +3596,108 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!entry || entry.status !== 'pending') return;
 
       const bonus = tok ? getTokenSaveBonus(tok, prompt.saveSkillId) : 0;
-      const d20 = Math.floor(Math.random() * 20) + 1;
-      const total = d20 + bonus;
-      const passed = total >= prompt.dc;
-      const rawDmg = prompt.rolledRawDamage || 0;
-      const dmgToApply =
-        rawDmg > 0
-          ? passed
-            ? prompt.halfOnSuccess
-              ? Math.floor(rawDmg / 2)
-              : 0
-            : rawDmg
-          : 0;
-
-      const updated: TacticalSavePrompt = {
-        ...prompt,
-        targets: prompt.targets.map((t) =>
-          t.tokenId === tokenId
-            ? {
-                ...t,
-                status: passed ? 'passed' : 'failed',
-                d20,
-                bonus,
-                total,
-                damageToApply: dmgToApply,
-              }
-            : t
-        ),
-      };
-      emitSavePromptState(updated);
-
+      const saveFormula = `1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`;
       const ch = entry.characterId
         ? camp.characters.find((c) => c.id === entry.characterId)
         : undefined;
 
-      sendRoll({
+      openManualRoll({
+        title: `${prompt.title} — ${prompt.saveLabel}`,
+        subtitle: `Dificuldade: CD ${prompt.dc}`,
+        formula: saveFormula,
+        displayFormula: saveFormula,
+        previewDice: buildPreviewDiceForFormula('1d20', 'normal'),
         rollerName: entry.name,
-        rollerRole: entry.type === 'character' ? 'player' : 'gm',
         rollerColor: entry.color,
         diceSkin: (ch?.diceSkin || 'gold') as DiceSkin,
-        title: `${prompt.title} — ${prompt.saveLabel} (CD ${prompt.dc})`,
-        formula: `1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`,
-        individualRolls: [`1d20: [${d20}] ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`],
-        rolledDice: [{ sides: 20, value: d20 }],
-        d20Natural: d20,
-        total,
-        isCrit: d20 === 20,
-        isFumble: d20 === 1,
-        isSecret: false,
-        details:
-          prompt.kind === 'concentration'
-            ? passed
-              ? `CONCENTRAÇÃO MANTIDA! (${total} vs CD ${prompt.dc})`
-              : `CONCENTRAÇÃO QUEBRADA! (${total} vs CD ${prompt.dc})`
-            : passed
-              ? `PASSOU NA SALVAGUARDA! (${total} vs CD ${prompt.dc})${dmgToApply > 0 ? ` • Metade: ${dmgToApply}` : ' • Sem dano'}`
-              : `FALHOU NA SALVAGUARDA! (${total} vs CD ${prompt.dc})${dmgToApply > 0 ? ` • Dano: ${dmgToApply}` : ''}`,
-      });
+        allowAdvantageToggle: true,
+        advantageMode: 'normal',
+        onExecute: (chosenMode) => {
+          const livePrompt = activeSavePromptRef.current;
+          if (!livePrompt || livePrompt.id !== prompt.id) return;
+          const liveEntry = livePrompt.targets.find((t) => t.tokenId === tokenId);
+          if (!liveEntry || liveEntry.status !== 'pending') return;
 
-      if (prompt.kind === 'concentration' && !passed && entry.characterId) {
-        setCharacterConcentration(entry.characterId, null);
-      }
+          const r1 = Math.floor(Math.random() * 20) + 1;
+          const r2 = chosenMode !== 'normal' ? Math.floor(Math.random() * 20) + 1 : undefined;
+          const d20 =
+            r2 === undefined
+              ? r1
+              : chosenMode === 'advantage'
+                ? Math.max(r1, r2)
+                : Math.min(r1, r2);
+          const rolledDice: RolledDieVisual[] =
+            r2 === undefined
+              ? [{ sides: 20, value: r1 }]
+              : [
+                  { sides: 20, value: r1, discarded: r1 !== d20 },
+                  { sides: 20, value: r2, discarded: r2 !== d20 || r1 === r2 },
+                ];
+
+          const total = d20 + bonus;
+          const passed = total >= livePrompt.dc;
+          const rawDmg = livePrompt.rolledRawDamage || 0;
+          const dmgToApply =
+            rawDmg > 0
+              ? passed
+                ? livePrompt.halfOnSuccess
+                  ? Math.floor(rawDmg / 2)
+                  : 0
+                : rawDmg
+              : 0;
+
+          const updated: TacticalSavePrompt = {
+            ...livePrompt,
+            targets: livePrompt.targets.map((t) =>
+              t.tokenId === tokenId
+                ? {
+                    ...t,
+                    status: passed ? 'passed' : 'failed',
+                    d20,
+                    bonus,
+                    total,
+                    damageToApply: dmgToApply,
+                  }
+                : t
+            ),
+          };
+          emitSavePromptState(updated);
+
+          sendRoll({
+            rollerName: liveEntry.name,
+            rollerRole: liveEntry.type === 'character' ? 'player' : 'gm',
+            rollerColor: liveEntry.color,
+            diceSkin: (ch?.diceSkin || 'gold') as DiceSkin,
+            title: `${livePrompt.title} — ${livePrompt.saveLabel} (CD ${livePrompt.dc})`,
+            formula: saveFormula,
+            individualRolls: [
+              r2 !== undefined
+                ? `2d20: [${r1}, ${r2}] → ${d20} ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`
+                : `1d20: [${d20}] ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`,
+            ],
+            rolledDice,
+            d20Natural: d20,
+            total,
+            isCrit: d20 === 20,
+            isFumble: d20 === 1,
+            isSecret: false,
+            details:
+              livePrompt.kind === 'concentration'
+                ? passed
+                  ? `CONCENTRAÇÃO MANTIDA! (${total} vs CD ${livePrompt.dc})`
+                  : `CONCENTRAÇÃO QUEBRADA! (${total} vs CD ${livePrompt.dc})`
+                : passed
+                  ? `PASSOU NA SALVAGUARDA! (${total} vs CD ${livePrompt.dc})${dmgToApply > 0 ? ` • Metade: ${dmgToApply}` : ' • Sem dano'}`
+                  : `FALHOU NA SALVAGUARDA! (${total} vs CD ${livePrompt.dc})${dmgToApply > 0 ? ` • Dano: ${dmgToApply}` : ''}`,
+          });
+
+          if (livePrompt.kind === 'concentration' && !passed && liveEntry.characterId) {
+            setCharacterConcentration(liveEntry.characterId, null);
+          }
+        },
+      });
     },
-    [emitSavePromptState, getTokenSaveBonus, sendRoll, setCharacterConcentration]
+    [emitSavePromptState, getTokenSaveBonus, openManualRoll, sendRoll, setCharacterConcentration]
   );
 
   const rollAllPendingSaveTargets = useCallback(() => {
@@ -3834,6 +4099,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         dismissHandout,
         latestRollForOverlay,
         dismissRollOverlay,
+        pendingManualRoll,
+        openManualRoll,
+        cancelManualRoll,
+        executeManualRoll,
         activeAmbientName,
         activeThemeBanner,
         pings,
@@ -3845,6 +4114,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         submitSkillCheckResult,
         dismissSkillCheck,
         pendingRequests,
+        pendingHeroJoinRequest,
+        heroJoinFeedback,
+        clearHeroJoinFeedback,
+        cancelHeroJoinRequest,
         sendPlayerRequest,
         resolvePlayerRequest,
         requestToast,
@@ -3865,6 +4138,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         performCombatManeuver,
         activeDuel,
         startCombatDuel,
+        rollDuelAttack,
         rollDuelDamage,
         advanceDuelPhase,
         dismissDuel,

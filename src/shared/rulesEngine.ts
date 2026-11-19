@@ -1638,3 +1638,52 @@ export function getMonsterWoundStatus(
   if (pct >= 0.35) return { label: 'Ferido', colorClass: 'text-amber-300' };
   return { label: 'Muito Ferido', colorClass: 'text-red-400' };
 }
+
+/**
+ * Extracts preview polyhedral dice shapes from a formula so the manual Click-to-Roll tray
+ * displays the exact dice waiting to be rolled before any random numbers are generated.
+ */
+export function buildPreviewDiceForFormula(
+  formula: string,
+  mode: 'normal' | 'advantage' | 'disadvantage' = 'normal'
+): RolledDieVisual[] {
+  const out: RolledDieVisual[] = [];
+  const regex = /(\d*)\s*d\s*(\d+)/gi;
+  let match: RegExpExecArray | null;
+  let handledAdvD20 = false;
+
+  while ((match = regex.exec(formula)) !== null) {
+    const rawCount = Math.max(1, Math.min(10, parseInt(match[1] || '1', 10)));
+    const sides = Math.max(2, Math.min(100, parseInt(match[2], 10)));
+    if (sides === 20 && rawCount === 1 && mode !== 'normal' && !handledAdvD20) {
+      handledAdvD20 = true;
+      out.push({ sides: 20, value: 20 });
+      out.push({ sides: 20, value: 20 });
+    } else {
+      for (let i = 0; i < rawCount; i++) {
+        out.push({ sides, value: sides });
+      }
+    }
+  }
+  if (out.length === 0) {
+    out.push({ sides: 20, value: 20 });
+  }
+  return out.slice(0, 10);
+}
+
+/**
+ * Computes an adaptive grid (columns x rows) from an uploaded map image's natural pixel dimensions
+ * so big maps stay big with more squares and preserve the image's exact aspect ratio (zero cropping).
+ */
+export function computeAdaptiveMapGrid(
+  naturalWidth: number,
+  naturalHeight: number,
+  targetPxPerSquare = 70
+): { gridWidth: number; gridHeight: number } {
+  const w = Math.max(1, Math.round(naturalWidth || 1056));
+  const h = Math.max(1, Math.round(naturalHeight || 672));
+  const aspect = h / w;
+  const cols = Math.max(12, Math.min(80, Math.round(w / Math.max(24, targetPxPerSquare))));
+  const rows = Math.max(8, Math.min(80, Math.round(cols * aspect)));
+  return { gridWidth: cols, gridHeight: rows };
+}

@@ -1,5 +1,7 @@
 {
-  "name": "rpg-tabletop",
+  "name": "chronicles",
+  "productName": "Chronicles",
+  "description": "Chronicles — Mesa Virtual de RPG",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -11,7 +13,56 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
     "build": "tsc -b && vite build",
+    "build:server": "esbuild server/index.ts --bundle --platform=node --format=cjs --outfile=dist-server/server.cjs",
+    "build:exe": "npm run build && npm run build:server && electron-builder --win portable",
     "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.chronicles.rpgtabletop",
+    "productName": "Chronicles",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json",
+      "!node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "dist"
+      },
+      {
+        "from": "dist-server",
+        "to": "server"
+      },
+      {
+        "from": "node_modules/cloudflared/bin/cloudflared.exe",
+        "to": "bin/cloudflared.exe"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Chronicles.exe",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "Chronicles.exe"
+    }
   },
   "dependencies": {
     "cloudflared": "^0.7.3",
@@ -33,6 +84,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "electron": "^41.1.0",
+    "electron-builder": "^26.18.0",
     "tailwindcss": "^4.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

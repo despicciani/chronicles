@@ -39,6 +39,10 @@ export const PlayerCharacterSetupModal: React.FC = () => {
     importSavedHeroIntoCampaign,
     claimCampaignCharacter,
     connectedPlayers,
+    pendingHeroJoinRequest,
+    heroJoinFeedback,
+    clearHeroJoinFeedback,
+    cancelHeroJoinRequest,
   } = useCampaign();
 
   const [setupMode, setSetupMode] = useState<'create' | 'vault' | 'claim'>(() =>
@@ -218,6 +222,52 @@ export const PlayerCharacterSetupModal: React.FC = () => {
           </p>
         </div>
 
+        {/* Pending GM Approval Waiting Banner (when player requested to join as an existing/saved hero) */}
+        {pendingHeroJoinRequest && (
+          <div className="my-4 p-4 rounded-lg bg-amber-950/55 border border-amber-400/70 flex flex-wrap items-center justify-between gap-3 shadow-lg">
+            <div className="flex items-center gap-3 min-w-0">
+              <TokenPortrait
+                name={pendingHeroJoinRequest.characterName}
+                imageUrl={pendingHeroJoinRequest.characterPortraitUrl}
+                playerColor={pendingHeroJoinRequest.playerColor || myPlayerColor}
+                frameStyle="gold"
+                sizePx={46}
+              />
+              <div className="min-w-0">
+                <div className="font-display font-bold text-sm text-amber-200 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>Aguardando permissão do Mestre...</span>
+                </div>
+                <p className="text-xs text-amber-100/85 mt-0.5">
+                  Solicitação enviada para <strong>{myPlayerName}</strong> entrar como{' '}
+                  <strong>{pendingHeroJoinRequest.characterName}</strong>. Assim que o Mestre aprovar, você entrará automaticamente.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={cancelHeroJoinRequest}
+              className="rpg-card px-3 py-1.5 rounded-md text-xs text-red-300 hover:border-red-400 cursor-pointer shrink-0"
+            >
+              Cancelar Pedido
+            </button>
+          </div>
+        )}
+
+        {/* Rejected Feedback Banner */}
+        {!pendingHeroJoinRequest && heroJoinFeedback?.status === 'rejected' && (
+          <div className="my-3 p-3 rounded-lg bg-red-950/60 border border-red-500/60 text-red-200 text-xs flex items-center justify-between gap-2">
+            <span>{heroJoinFeedback.message}</span>
+            <button
+              type="button"
+              onClick={clearHeroJoinFeedback}
+              className="underline text-[11px] opacity-80 hover:opacity-100 cursor-pointer shrink-0"
+            >
+              Ok
+            </button>
+          </div>
+        )}
+
         {/* Mode Switch Tabs */}
         <div className="grid grid-cols-3 gap-2 my-4 text-xs">
           <button
@@ -344,10 +394,13 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                       <div className="flex flex-col items-end gap-1.5 shrink-0">
                         <button
                           type="button"
+                          disabled={Boolean(pendingHeroJoinRequest)}
                           onClick={() => importSavedHeroIntoCampaign(h)}
-                          className="rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-[11px] cursor-pointer"
+                          className="rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-[11px] cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
                         >
-                          Entrar com Herói
+                          {pendingHeroJoinRequest?.characterId === h.id
+                            ? 'Aguardando Mestre...'
+                            : 'Pedir para Entrar'}
                         </button>
                         <div className="flex items-center gap-1">
                           <button
@@ -432,10 +485,13 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                       </div>
                       <button
                         type="button"
+                        disabled={Boolean(pendingHeroJoinRequest)}
                         onClick={() => claimCampaignCharacter(ch.id)}
-                        className="rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-[11px] shrink-0 cursor-pointer"
+                        className="rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-[11px] shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
                       >
-                        Assumir Herói
+                        {pendingHeroJoinRequest?.characterId === ch.id
+                          ? 'Aguardando Mestre...'
+                          : 'Pedir para Assumir'}
                       </button>
                     </div>
                   );

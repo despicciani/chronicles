@@ -3,9 +3,11 @@ import {
   ArrowLeft,
   BookOpen,
   CheckCircle2,
+  ChevronRight,
   Crown,
   Download,
   Globe,
+  Image as ImageIcon,
   Moon,
   Plus,
   RefreshCw,
@@ -24,10 +26,55 @@ import {
   pickRandomPlayerColor,
   PLAYER_COLOR_PALETTE,
 } from '../shared/rulesEngine';
-import { FantasyParticlesBackground } from './FantasyEffects';
 import { FileUploadButton } from './FileUploadButton';
 import { OrnateDivider, OrnateFrame } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
+
+interface TitleScene {
+  src: string;
+  label: string;
+  isPixelArt: boolean;
+  objectPosition: string;
+}
+
+const TITLE_SCENES: TitleScene[] = [
+  {
+    src: '/title-bg/scene-1.jpg',
+    label: 'Estalagem do Vale',
+    isPixelArt: false,
+    objectPosition: 'center center',
+  },
+  {
+    src: '/title-bg/scene-2.jpg',
+    label: 'Vila das Cascatas',
+    isPixelArt: true,
+    objectPosition: 'center center',
+  },
+  {
+    src: '/title-bg/scene-3.jpg',
+    label: 'Bosque Ancestral',
+    isPixelArt: false,
+    objectPosition: '60% center',
+  },
+  {
+    src: '/title-bg/scene-4.jpg',
+    label: 'Cidadela das Montanhas',
+    isPixelArt: false,
+    objectPosition: '65% center',
+  },
+  {
+    src: '/title-bg/scene-5.jpg',
+    label: 'Mirante do Crepúsculo',
+    isPixelArt: true,
+    objectPosition: 'center center',
+  },
+  {
+    src: '/title-bg/scene-6.jpg',
+    label: 'Fortaleza do Penhasco',
+    isPixelArt: false,
+    objectPosition: '68% center',
+  },
+];
 
 interface DiscoveredRoom {
   url: string;
@@ -63,6 +110,13 @@ export const LobbyScreen: React.FC = () => {
 
   // Top-level screen flow: 'title' -> 'player' or 'gm'
   const [screen, setScreen] = useState<'title' | 'player' | 'gm'>('title');
+  const [sceneIndex, setSceneIndex] = useState<number>(() =>
+    Math.floor(Math.random() * TITLE_SCENES.length),
+  );
+  const currentScene = TITLE_SCENES[sceneIndex] || TITLE_SCENES[0];
+  const cycleScene = () => {
+    setSceneIndex((prev) => (prev + 1) % TITLE_SCENES.length);
+  };
   const [gmTab, setGmTab] = useState<'continue' | 'create' | 'heroes'>('continue');
   const heroUploadRef = useRef<HTMLInputElement | null>(null);
   const [heroVaultToast, setHeroVaultToast] = useState<string | null>(null);
@@ -114,7 +168,7 @@ export const LobbyScreen: React.FC = () => {
         const parsed = JSON.parse(String(reader.result));
         const hero = parseHeroPayloadFromJson(parsed, campaign);
         if (!hero) {
-          window.alert('Arquivo de herói inválido. Selecione um .hero.json exportado pelo CHRONICLE.');
+          window.alert('Arquivo de herói inválido. Selecione um .hero.json exportado pelo CHRONICLES.');
           return;
         }
         await saveCharacterToVault(hero);
@@ -170,184 +224,197 @@ export const LobbyScreen: React.FC = () => {
   };
 
   return (
-    <div className="h-screen w-screen relative overflow-y-auto flex flex-col">
-      <FantasyParticlesBackground intensity="high" />
+    <div className="h-screen w-screen relative overflow-y-auto flex flex-col bg-[#08090e]">
+      {/* Full-bleed Random Curated Artwork Backdrop */}
+      <div className="fixed inset-0 z-0 pointer-events-none select-none overflow-hidden">
+        <img
+          src={currentScene.src}
+          alt={currentScene.label}
+          className={`w-full h-full object-cover ${currentScene.isPixelArt ? 'pixel-art-scene' : ''}`}
+          style={{ objectPosition: currentScene.objectPosition }}
+          draggable={false}
+        />
 
-      {/* Top Subtle Theme Switcher & Back */}
-      <div className="relative z-10 flex items-center justify-between px-6 py-4">
-        <div>
-          {screen !== 'title' && (
-            <button
-              onClick={() => setScreen('title')}
-              className="rpg-glass-panel px-3.5 py-2 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer hover:brightness-110 transition"
-            >
-              <ArrowLeft className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
-              <span>Voltar ao Início</span>
-            </button>
-          )}
-        </div>
-
-        <button
-          onClick={() => setTheme(theme === 'dark-fantasy' ? 'bright-fantasy' : 'dark-fantasy')}
-          className="rpg-glass-panel px-3.5 py-2 rounded-md text-xs font-display font-semibold flex items-center gap-2 cursor-pointer"
-        >
-          {theme === 'dark-fantasy' ? (
-            <>
-              <Moon className="w-4 h-4 text-amber-400" />
-              <span>Dark Fantasy</span>
-            </>
-          ) : (
-            <>
-              <Sun className="w-4 h-4 text-amber-600" />
-              <span>Bright Fantasy</span>
-            </>
-          )}
-        </button>
+        {screen === 'title' ? (
+          <>
+            {/* Directional left scrim so 75% of the artwork stays vivid & unobstructed */}
+            <div
+              className="absolute inset-0"
+              style={{
+                background:
+                  'linear-gradient(90deg, rgba(7,8,13,0.92) 0%, rgba(7,8,13,0.74) 26%, rgba(7,8,13,0.22) 54%, rgba(7,8,13,0.04) 100%)',
+              }}
+            />
+            <div
+              className="absolute inset-0"
+              style={{
+                background:
+                  'linear-gradient(0deg, rgba(7,8,13,0.58) 0%, rgba(7,8,13,0.12) 22%, transparent 45%)',
+              }}
+            />
+          </>
+        ) : (
+          <div className="absolute inset-0 bg-[#07080d]/82 backdrop-blur-[2px]" />
+        )}
       </div>
 
+      {/* Top Navigation Bar (Only shown on GM/Player subscreens so the Title artwork stays clean) */}
+      {screen !== 'title' && (
+        <div className="relative z-10 flex items-center justify-between px-6 py-4">
+          <button
+            onClick={() => setScreen('title')}
+            className="rpg-glass-panel px-3.5 py-2 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer hover:brightness-110 transition"
+          >
+            <ArrowLeft className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+            <span>Voltar ao Início</span>
+          </button>
+
+          <button
+            onClick={() => setTheme(theme === 'dark-fantasy' ? 'bright-fantasy' : 'dark-fantasy')}
+            className="rpg-glass-panel px-3.5 py-2 rounded-md text-xs font-display font-semibold flex items-center gap-2 cursor-pointer"
+          >
+            {theme === 'dark-fantasy' ? (
+              <>
+                <Moon className="w-4 h-4 text-amber-400" />
+                <span>Dark Fantasy</span>
+              </>
+            ) : (
+              <>
+                <Sun className="w-4 h-4 text-amber-600" />
+                <span>Bright Fantasy</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
+
       {/* =========================================================
-          SCREEN 1: CINEMATIC TITLE SCREEN ("CHRONICLE")
+          SCREEN 1: LEFT-ANCHORED GAME TITLE SCREEN ("CHRONICLES")
          ========================================================= */}
       {screen === 'title' && (
-        <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-6 pb-12 text-center">
-          {/* Carved Heraldic d20 & Sword Crest */}
-          <div className="relative w-28 h-28 flex items-center justify-center mb-4 animate-title-emblem">
-            <svg viewBox="0 0 120 120" className="w-full h-full" style={{ color: 'var(--accent-primary)' }}>
-              {/* Outer Octagonal Brass Frame */}
-              <polygon
-                points="38,8 82,8 112,38 112,82 82,112 38,112 8,82 8,38"
-                fill="rgba(16,14,10,0.65)"
-                stroke="currentColor"
-                strokeWidth="2"
-              />
-              <polygon
-                points="42,15 78,15 105,42 105,78 78,105 42,105 15,78 15,42"
-                fill="none"
-                stroke="currentColor"
-                strokeOpacity="0.45"
-                strokeWidth="1"
-              />
-              {/* Faceted d20 Sacred Geometry */}
-              <polygon
-                points="60,18 96,42 84,88 36,88 24,42"
-                fill="none"
-                stroke="currentColor"
-                strokeOpacity="0.55"
-                strokeWidth="1.2"
-              />
-              <polyline points="24,42 96,42 60,72 24,42" fill="none" stroke="currentColor" strokeOpacity="0.35" strokeWidth="1" />
-              <line x1="60" y1="18" x2="60" y2="72" stroke="currentColor" strokeOpacity="0.35" strokeWidth="1" />
-              <line x1="36" y1="88" x2="60" y2="72" stroke="currentColor" strokeOpacity="0.35" strokeWidth="1" />
-              <line x1="84" y1="88" x2="60" y2="72" stroke="currentColor" strokeOpacity="0.35" strokeWidth="1" />
-            </svg>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="w-12 h-12 rounded-md rpg-glass-panel flex items-center justify-center shadow-[0_8px_24px_rgba(0,0,0,0.85)]">
-                <Swords className="w-6 h-6" style={{ color: 'var(--accent-primary)' }} />
+        <div className="relative z-10 flex-1 flex flex-col justify-between min-h-screen px-8 sm:px-14 md:px-20 py-10">
+          {/* Top spacer for balanced vertical anchoring */}
+          <div className="h-4" />
+
+          {/* Main Left Menu Column */}
+          <div className="max-w-md w-full space-y-8 animate-ui-enter">
+            {/* Wordmark & Minimalist Subtitle */}
+            <div className="space-y-3">
+              <div className="text-[11px] font-display font-semibold uppercase tracking-[0.34em] text-amber-200/80 drop-shadow-[0_1px_4px_rgba(0,0,0,0.95)]">
+                Mesa Tática de RPG
               </div>
+              <h1
+                className="font-chronicle font-black text-5xl sm:text-6xl md:text-[68px] leading-none tracking-[0.09em] select-none"
+                style={{
+                  color: '#f5ebd1',
+                  textShadow: '0 4px 20px rgba(0,0,0,0.92), 0 1px 0 rgba(0,0,0,0.95)',
+                }}
+              >
+                CHRONICLES
+              </h1>
+              <div className="w-28 h-[2px] bg-gradient-to-r from-[#d4aa48] via-[#d4aa48]/60 to-transparent" />
             </div>
-          </div>
 
-          {/* Animated Fantasy Title: CHRONICLE */}
-          <h1 className="font-chronicle font-black text-5xl sm:text-7xl md:text-8xl tracking-widest chronicle-gold-text animate-title-reveal select-none">
-            CHRONICLE
-          </h1>
-
-          <div className="max-w-lg w-full mt-3 mb-2 animate-title-reveal">
-            <OrnateDivider />
-          </div>
-
-          <p
-            className="font-lore italic text-xl sm:text-2xl max-w-xl animate-title-reveal"
-            style={{ color: 'var(--text-secondary)' }}
-          >
-            Forje lendas, domine batalhas táticas e viva suas crônicas em tempo real.
-          </p>
-
-          {isRemoteTunnelSession && (
-            <div className="mt-6 max-w-2xl w-full rpg-glass-panel rounded-lg px-5 py-3 border border-emerald-500/45 flex flex-wrap items-center justify-between gap-3 text-left">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <Globe className="w-5 h-5 text-emerald-400 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-[10px] uppercase tracking-widest font-display font-bold text-emerald-300">
-                    Mesa Online Conectada
-                  </div>
-                  <div className="font-display font-bold text-sm text-amber-100 truncate">
-                    {campaign.name} — Mestre: {campaign.gmName || 'Mestre'}
+            {/* Online Tunnel Status Banner (Only when joining via remote link) */}
+            {isRemoteTunnelSession && (
+              <div className="bg-[#0b0d14]/88 border border-emerald-500/45 rounded-md px-4 py-3 flex items-center justify-between gap-3 backdrop-blur-xs">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Globe className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-widest font-display font-bold text-emerald-300">
+                      Mesa Online Conectada
+                    </div>
+                    <div className="font-display font-bold text-xs text-amber-100 truncate">
+                      {campaign.name} — {campaign.gmName || 'Mestre'}
+                    </div>
                   </div>
                 </div>
               </div>
+            )}
+
+            {/* Clean Vertical Game Menu */}
+            <nav className="flex flex-col gap-2.5 max-w-[320px]">
+              {!isRemoteTunnelSession && (
+                <button
+                  onClick={() => setScreen('gm')}
+                  className="group relative w-full text-left px-4 py-3.5 rounded-sm bg-[#0c0e15]/78 hover:bg-[#151824]/92 border border-amber-500/30 hover:border-amber-400/75 transition-all duration-150 cursor-pointer flex items-center justify-between gap-3 shadow-[0_6px_22px_rgba(0,0,0,0.55)] backdrop-blur-xs"
+                >
+                  <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-amber-400/45 group-hover:bg-amber-400 transition-colors" />
+                  <div className="flex items-center gap-3.5 min-w-0 pl-1">
+                    <Crown className="w-5 h-5 text-amber-400/90 group-hover:text-amber-300 shrink-0 transition-colors" />
+                    <div className="min-w-0">
+                      <div className="font-display font-bold text-sm tracking-[0.12em] text-[#f6eedc] group-hover:text-amber-200 transition-colors">
+                        SOU MESTRE
+                      </div>
+                      <div className="text-[11px] text-[#b4ab97] truncate">
+                        Criar ou comandar campanhas
+                      </div>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-amber-400/60 group-hover:text-amber-300 group-hover:translate-x-0.5 transition-all shrink-0" />
+                </button>
+              )}
+
               <button
                 onClick={() => {
                   setScreen('player');
                   scanRooms();
                 }}
-                className="rpg-btn-primary px-4 py-1.5 rounded-md text-xs font-display font-bold cursor-pointer shrink-0"
+                className="group relative w-full text-left px-4 py-3.5 rounded-sm bg-[#0c0e15]/78 hover:bg-[#151824]/92 border border-slate-400/28 hover:border-sky-300/70 transition-all duration-150 cursor-pointer flex items-center justify-between gap-3 shadow-[0_6px_22px_rgba(0,0,0,0.55)] backdrop-blur-xs"
               >
-                Entrar Agora →
+                <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-sky-300/40 group-hover:bg-sky-300 transition-colors" />
+                <div className="flex items-center gap-3.5 min-w-0 pl-1">
+                  <Swords className="w-5 h-5 text-sky-300/85 group-hover:text-sky-200 shrink-0 transition-colors" />
+                  <div className="min-w-0">
+                    <div className="font-display font-bold text-sm tracking-[0.12em] text-[#f6eedc] group-hover:text-sky-100 transition-colors">
+                      SOU JOGADOR
+                    </div>
+                    <div className="text-[11px] text-[#b4ab97] truncate">
+                      {isRemoteTunnelSession ? 'Entrar nesta mesa online' : 'Conectar em uma mesa ativa'}
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-sky-300/55 group-hover:text-sky-200 group-hover:translate-x-0.5 transition-all shrink-0" />
+              </button>
+            </nav>
+          </div>
+
+          {/* Quiet Footer Bar: Version Left + Subtle Scene/Theme Controls Right */}
+          <div className="flex items-center justify-between gap-4 pt-6">
+            <div className="text-[11px] font-mono-dice tracking-wider text-[#d4cbb8]/75 drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)]">
+              CHRONICLES • LOCAL & ONLINE
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={cycleScene}
+                title={`Cenário: ${currentScene.label} — clique para trocar`}
+                className="px-2.5 py-1.5 rounded-sm bg-[#0a0c12]/72 hover:bg-[#141724]/90 border border-white/15 hover:border-amber-400/50 text-[11px] font-display text-[#e6dec9] flex items-center gap-1.5 cursor-pointer transition backdrop-blur-xs"
+              >
+                <ImageIcon className="w-3.5 h-3.5 text-amber-300/90" />
+                <span className="hidden sm:inline">{currentScene.label}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setTheme(theme === 'dark-fantasy' ? 'bright-fantasy' : 'dark-fantasy')}
+                title="Alternar tema da mesa (Dark / Bright Fantasy)"
+                className="px-2.5 py-1.5 rounded-sm bg-[#0a0c12]/72 hover:bg-[#141724]/90 border border-white/15 hover:border-amber-400/50 text-[11px] font-display text-[#e6dec9] flex items-center gap-1.5 cursor-pointer transition backdrop-blur-xs"
+              >
+                {theme === 'dark-fantasy' ? (
+                  <>
+                    <Moon className="w-3.5 h-3.5 text-amber-400" />
+                    <span className="hidden sm:inline">Dark</span>
+                  </>
+                ) : (
+                  <>
+                    <Sun className="w-3.5 h-3.5 text-amber-300" />
+                    <span className="hidden sm:inline">Bright</span>
+                  </>
+                )}
               </button>
             </div>
-          )}
-
-          {/* The Two Ornate Portals: SOU JOGADOR | SOU MESTRE */}
-          <div
-            className={`grid grid-cols-1 ${isRemoteTunnelSession ? 'max-w-lg' : 'sm:grid-cols-2 max-w-3xl'} gap-6 w-full mt-8 animate-portals-up`}
-          >
-            {/* Portal Jogador */}
-            <button
-              onClick={() => {
-                setScreen('player');
-                scanRooms();
-              }}
-              className="text-left group cursor-pointer focus:outline-none"
-            >
-              <OrnateFrame
-                accentColor="#7ca6c9"
-                className="rpg-glass-panel rounded-xl p-7 transition-all duration-300 group-hover:-translate-y-1.5 group-hover:shadow-[0_18px_45px_rgba(0,0,0,0.85)]"
-              >
-                <div className="flex flex-col items-center text-center gap-3">
-                  <div className="w-14 h-14 rounded-lg bg-[#142030] border border-[#7ca6c9]/50 flex items-center justify-center group-hover:scale-105 transition-transform duration-300 shadow-inner">
-                    <Swords className="w-7 h-7 text-[#9bc4e6]" />
-                  </div>
-                  <div className="font-chronicle font-bold text-2xl tracking-wider text-[#bfd9ef]">
-                    SOU JOGADOR
-                  </div>
-                  <p className="font-lore text-base leading-snug" style={{ color: 'var(--text-secondary)' }}>
-                    Entre facilmente na mesa do seu Mestre, escolha seu herói salvo e role dados em batalha.
-                  </p>
-                  <span className="mt-1 px-4 py-1.5 rounded-md bg-[#162436] border border-[#7ca6c9]/45 text-xs font-display font-bold text-[#c7e0f5] group-hover:border-[#9bc4e6] transition">
-                    Entrar em uma Aventura →
-                  </span>
-                </div>
-              </OrnateFrame>
-            </button>
-
-            {/* Portal Mestre (Host local / Desktop apenas, para link online não expor outras campanhas) */}
-            {!isRemoteTunnelSession && (
-            <button
-              onClick={() => setScreen('gm')}
-              className="text-left group cursor-pointer focus:outline-none"
-            >
-              <OrnateFrame
-                accentColor="#e4ba52"
-                className="rpg-glass-panel rounded-xl p-7 transition-all duration-300 group-hover:-translate-y-1.5 group-hover:shadow-[0_18px_45px_rgba(0,0,0,0.85)]"
-              >
-                <div className="flex flex-col items-center text-center gap-3">
-                  <div className="w-14 h-14 rounded-lg bg-[#241b0c] border border-amber-500/50 flex items-center justify-center group-hover:scale-105 transition-transform duration-300 shadow-inner">
-                    <Crown className="w-7 h-7" style={{ color: 'var(--accent-primary)' }} />
-                  </div>
-                  <div className="font-chronicle font-bold text-2xl tracking-wider" style={{ color: 'var(--accent-primary)' }}>
-                    SOU MESTRE
-                  </div>
-                  <p className="font-lore text-base leading-snug" style={{ color: 'var(--text-secondary)' }}>
-                    Crie um novo mundo com suas regras, gerencie mapas, monstros e comande a história.
-                  </p>
-                  <span className="mt-1 px-4 py-1.5 rounded-md bg-[#261d0d] border border-amber-500/45 text-xs font-display font-bold text-amber-200 group-hover:border-amber-300 transition">
-                    Criar ou Continuar Mesa →
-                  </span>
-                </div>
-              </OrnateFrame>
-            </button>
-            )}
           </div>
         </div>
       )}
@@ -356,7 +423,7 @@ export const LobbyScreen: React.FC = () => {
           SCREEN 2: GM HUB (CONTINUE OR CREATE CAMPAIGN)
          ========================================================= */}
       {screen === 'gm' && (
-        <div className="relative z-10 flex-1 max-w-6xl w-full mx-auto px-6 pb-10 space-y-5 animate-dice-tumble">
+        <div className="relative z-10 flex-1 max-w-6xl w-full mx-auto px-6 pb-10 space-y-5 animate-ui-enter">
           <div className="text-center space-y-1">
             <h2 className="font-chronicle font-bold text-3xl chronicle-gold-text">
               Santuário do Mestre
@@ -723,7 +790,7 @@ export const LobbyScreen: React.FC = () => {
           SCREEN 3: PLAYER JOIN (SIMPLE FOR LAYPEOPLE)
          ========================================================= */}
       {screen === 'player' && (
-        <div className="relative z-10 flex-1 max-w-4xl w-full mx-auto px-6 pb-10 space-y-5 animate-dice-tumble">
+        <div className="relative z-10 flex-1 max-w-4xl w-full mx-auto px-6 pb-10 space-y-5 animate-ui-enter">
           <div className="text-center space-y-1">
             <h2 className="font-chronicle font-bold text-3xl text-[#bfd9ef]">
               Chamado à Aventura

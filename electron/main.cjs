@@ -1,5 +1,6 @@
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell } = require('electron');
 const { spawn, exec } = require('node:child_process');
+const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 
@@ -8,6 +9,8 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 
 let mainWindow = null;
 let serverProc = null;
+
+app.setName('Chronicles');
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -25,6 +28,7 @@ if (!gotLock) {
 function checkServerReady() {
   return new Promise((resolve) => {
     const req = http.get(`http://127.0.0.1:${SERVER_PORT}/api/health`, (res) => {
+      res.resume();
       resolve(res.statusCode === 200);
     });
     req.on('error', () => resolve(false));
@@ -35,7 +39,7 @@ function checkServerReady() {
   });
 }
 
-async function waitForServer(maxAttempts = 50) {
+async function waitForServer(maxAttempts = 80) {
   for (let i = 0; i < maxAttempts; i++) {
     const ready = await checkServerReady();
     if (ready) return true;
@@ -48,6 +52,37 @@ async function startBackendServer() {
   const alreadyRunning = await checkServerReady();
   if (alreadyRunning) return;
 
+  if (app.isPackaged) {
+    const serverBundle = path.join(process.resourcesPath, 'server', 'server.cjs');
+    const distDir = path.join(process.resourcesPath, 'dist');
+    const userDataDir = app.getPath('userData');
+    const dataDir = path.join(userDataDir, 'data');
+    const bundledCloudflared = path.join(process.resourcesPath, 'bin', 'cloudflared.exe');
+    const cloudflaredPath = fs.existsSync(bundledCloudflared)
+      ? bundledCloudflared
+      : path.join(userDataDir, 'bin', 'cloudflared.exe');
+
+    fs.mkdirSync(dataDir, { recursive: true });
+    const logPath = path.join(userDataDir, 'chronicles-server.log');
+    const logFd = fs.openSync(logPath, 'w');
+
+    serverProc = spawn(process.execPath, [serverBundle], {
+      cwd: userDataDir,
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
+        PORT: String(SERVER_PORT),
+        CHRONICLES_DATA_DIR: dataDir,
+        CHRONICLES_DIST_DIR: distDir,
+        CLOUDFLARED_BIN: cloudflaredPath,
+      },
+      windowsHide: true,
+      stdio: ['ignore', logFd, logFd],
+    });
+    return;
+  }
+
+  // Development mode: prefer compiled bundle if available, fallback to tsx
   const tsxCli = path.join(ROOT_DIR, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   const serverEntry = path.join(ROOT_DIR, 'server', 'index.ts');
 
@@ -75,7 +110,21 @@ function stopBackendServer() {
 
 async function createDesktopWindow() {
   await startBackendServer();
-  await waitForServer();
+  const ready = await waitForServer();
+
+  if (!ready) {
+    dialog.showErrorBox(
+      'Chronicles — Erro ao iniciar servidor local',
+      'Não foi possível iniciar o servidor interno na porta 3001. Verifique se nenhum firewall ou outro programa está bloqueando a porta 3001 e tente novamente.'
+    );
+    stopBackendServer();
+    app.quit();
+    return;
+  }
+
+  const iconCandidate = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(ROOT_DIR, 'build', 'icon.png');
 
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -83,9 +132,10 @@ async function createDesktopWindow() {
     minWidth: 1024,
     minHeight: 680,
     show: true,
-    title: 'CHRONICLE — Mesa Virtual de RPG',
+    title: 'Chronicles — Mesa Virtual de RPG',
     backgroundColor: '#06070c',
     autoHideMenuBar: true,
+    ...(fs.existsSync(iconCandidate) ? { icon: iconCandidate } : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

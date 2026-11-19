@@ -3,7 +3,7 @@
   "character": {
     "id": "char-lyra",
     "vaultId": "char-lyra",
-    "lastSyncedAt": "2026-11-19T01:29:42.030Z",
+    "lastSyncedAt": "2026-11-19T14:48:11.883Z",
     "ownerPlayerId": "plr-1795033400216-wyyn9s",
     "playerName": "Nigger 5 Games",
     "playerColor": "#06b6d4",
@@ -30,7 +30,7 @@
     ],
     "hp": 17,
     "tempHp": 0,
-    "mp": 18,
+    "mp": 13,
     "knownAbilityIds": [
       "mag-misseis-magicos",
       "mag-escudo-arcano",
@@ -84,7 +84,7 @@
     }
   },
   "savedAt": "2026-11-18T23:41:32.807Z",
-  "updatedAt": "2026-11-19T01:29:42.030Z",
+  "updatedAt": "2026-11-19T14:48:11.883Z",
   "originCampaignId": "campanha-cronicas-01",
   "originCampaignName": "Crônicas de Valdris: A Sombra da Cripta"
 }

@@ -29,6 +29,7 @@ import {
 import { useCampaign } from '../context/CampaignContext';
 import {
   calculateMovementCostMeters,
+  computeAdaptiveMapGrid,
   computeCharacterStats,
   DAMAGE_TYPE_OPTIONS,
   doesTokenCollideAt,
@@ -265,6 +266,7 @@ export const StageCanvas: React.FC = () => {
     shiftFree: boolean;
   } | null>(null);
   const [dragPath, setDragPath] = useState<Array<{ x: number; y: number }>>([]);
+  const [dropHighlightCell, setDropHighlightCell] = useState<{ x: number; y: number } | null>(null);
   const [hoveredTokenId, setHoveredTokenId] = useState<string | null>(null);
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
   const [draggingTemplateId, setDraggingTemplateId] = useState<string | null>(null);
@@ -622,6 +624,9 @@ export const StageCanvas: React.FC = () => {
     setSelectedTemplateId(null);
     setSelectedTokenId(null);
     setSelectedMarkerId(null);
+    if (e.button === 0 && !pendingAttackChoice) {
+      setTargetTokenId(null);
+    }
     if (e.button === 2) {
       if (pendingAttackChoice) setPendingAttackChoice(null);
       if (secretMarkerKind) setSecretMarkerKind(null);
@@ -824,6 +829,185 @@ export const StageCanvas: React.FC = () => {
     setDraggingTemplateId(null);
   };
 
+  const handleGridDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (role !== 'gm' || !activeMap) return;
+    const types = Array.from(e.dataTransfer.types || []);
+    if (
+      !types.includes('application/x-chronicle-hero') &&
+      !types.includes('application/x-chronicle-npc')
+    ) {
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!gridRef.current) return;
+    const rect = gridRef.current.getBoundingClientRect();
+    const cellPxLocal = activeMap.gridSizePx * zoom;
+    const gx = Math.max(
+      0,
+      Math.min(activeMap.gridWidth - 1, Math.floor((e.clientX - rect.left) / cellPxLocal))
+    );
+    const gy = Math.max(
+      0,
+      Math.min(activeMap.gridHeight - 1, Math.floor((e.clientY - rect.top) / cellPxLocal))
+    );
+    setDropHighlightCell({ x: gx, y: gy });
+  };
+
+  const handleGridDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    setDropHighlightCell(null);
+    if (role !== 'gm' || !activeMap || !gridRef.current) return;
+    const heroId = e.dataTransfer.getData('application/x-chronicle-hero');
+    const npcId = e.dataTransfer.getData('application/x-chronicle-npc');
+    if (!heroId && !npcId) return;
+    e.preventDefault();
+
+    const rect = gridRef.current.getBoundingClientRect();
+    const cellPxLocal = activeMap.gridSizePx * zoom;
+    const gx = Math.max(
+      0,
+      Math.min(activeMap.gridWidth - 1, Math.floor((e.clientX - rect.left) / cellPxLocal))
+    );
+    const gy = Math.max(
+      0,
+      Math.min(activeMap.gridHeight - 1, Math.floor((e.clientY - rect.top) / cellPxLocal))
+    );
+
+    if (heroId) {
+      const ch = campaign.characters.find((c) => c.id === heroId);
+      if (!ch) return;
+      const stats = computeCharacterStats(ch, campaign);
+      const existing = activeMap.tokens.find(
+        (t) => t.type === 'character' && t.referenceId === ch.id
+      );
+      const mapWithoutSelf = existing
+        ? { ...activeMap, tokens: activeMap.tokens.filter((t) => t.id !== existing.id) }
+        : activeMap;
+      const pos = findNearestFreeGridCell(mapWithoutSelf, gx, gy, 1);
+      const targetId = existing ? existing.id : `tok-${ch.id}-${Date.now()}`;
+      updateActiveMap((m) => {
+        if (existing) {
+          return {
+            ...m,
+            tokens: m.tokens.map((t) =>
+              t.id === existing.id
+                ? {
+                    ...t,
+                    x: pos.x,
+                    y: pos.y,
+                    hp: ch.hp,
+                    maxHp: stats.maxHp,
+                    defense: stats.defense,
+                    color: ch.playerColor || ch.tokenColor,
+                    frameStyle: ch.tokenFrameStyle || 'gold',
+                    imageUrl: ch.portraitUrl,
+                  }
+                : t
+            ),
+          };
+        }
+        return {
+          ...m,
+          tokens: [
+            ...m.tokens,
+            {
+              id: targetId,
+              name: ch.name.split(' ')[0],
+              type: 'character',
+              referenceId: ch.id,
+              x: pos.x,
+              y: pos.y,
+              size: 1,
+              hp: ch.hp,
+              maxHp: stats.maxHp,
+              defense: stats.defense,
+              activeConditionIds: ch.activeConditionIds,
+              isHidden: false,
+              color: ch.playerColor || ch.tokenColor,
+              frameStyle: ch.tokenFrameStyle || 'gold',
+              imageUrl: ch.portraitUrl,
+            },
+          ],
+        };
+      });
+      setActiveCharacterId(ch.id);
+      setTargetTokenId(targetId);
+      return;
+    }
+
+    if (npcId) {
+      const npc = campaign.npcs.find((n) => n.id === npcId);
+      if (!npc) return;
+      const npcColor =
+        npc.tokenColor ||
+        (npc.disposition === 'Hostil'
+          ? '#ef4444'
+          : npc.disposition === 'Aliado'
+            ? '#22c55e'
+            : '#e0b84c');
+      const npcFrame =
+        npc.disposition === 'Hostil'
+          ? 'crimson'
+          : npc.disposition === 'Aliado'
+            ? 'emerald'
+            : 'gold';
+      const existing = activeMap.tokens.find(
+        (t) => t.type === 'npc' && t.referenceId === npc.id
+      );
+      const mapWithoutSelf = existing
+        ? { ...activeMap, tokens: activeMap.tokens.filter((t) => t.id !== existing.id) }
+        : activeMap;
+      const pos = findNearestFreeGridCell(mapWithoutSelf, gx, gy, 1);
+      const targetId = existing ? existing.id : `tok-npc-${npc.id}-${Date.now()}`;
+      updateActiveMap((m) => {
+        if (existing) {
+          return {
+            ...m,
+            tokens: m.tokens.map((t) =>
+              t.id === existing.id
+                ? {
+                    ...t,
+                    x: pos.x,
+                    y: pos.y,
+                    name: npc.name,
+                    imageUrl: npc.imageUrl,
+                    color: npcColor,
+                    frameStyle: npcFrame,
+                    maxHp: npc.maxHp || 15,
+                    defense: npc.defense || 11,
+                  }
+                : t
+            ),
+          };
+        }
+        return {
+          ...m,
+          tokens: [
+            ...m.tokens,
+            {
+              id: targetId,
+              name: npc.name,
+              type: 'npc',
+              referenceId: npc.id,
+              x: pos.x,
+              y: pos.y,
+              size: 1,
+              hp: npc.maxHp || 15,
+              maxHp: npc.maxHp || 15,
+              defense: npc.defense || 11,
+              activeConditionIds: [],
+              isHidden: !npc.revealedToPlayers,
+              color: npcColor,
+              frameStyle: npcFrame,
+              imageUrl: npc.imageUrl,
+            },
+          ],
+        };
+      });
+      setTargetTokenId(targetId);
+    }
+  };
+
   const handleGridMouseLeave = () => {
     finalizeTokenDrag();
     setDraggingTemplateId(null);
@@ -858,6 +1042,7 @@ export const StageCanvas: React.FC = () => {
       isHidden: spawnHidden,
       color: mon.tokenColor,
       frameStyle: 'crimson',
+      imageUrl: mon.imageUrl,
     };
     updateActiveMap((m) => ({ ...m, tokens: [...m.tokens, newToken] }));
   };
@@ -1043,6 +1228,73 @@ export const StageCanvas: React.FC = () => {
     };
     setIsPanningWorld(true);
   };
+
+  const applyMapImageWithAdaptiveGrid = (url: string) => {
+    const resolved = resolveAssetUrl(url);
+    const img = new Image();
+    img.onload = () => {
+      const natW = img.naturalWidth || 1056;
+      const natH = img.naturalHeight || 672;
+      const { gridWidth, gridHeight } = computeAdaptiveMapGrid(natW, natH, 70);
+      updateActiveMap((m) => ({
+        ...m,
+        backgroundUrl: url,
+        backgroundNaturalWidth: natW,
+        backgroundNaturalHeight: natH,
+        gridWidth,
+        gridHeight,
+      }));
+      const baseCell = activeMap?.gridSizePx || 48;
+      const availW = Math.max(400, window.innerWidth - 120);
+      const availH = Math.max(300, window.innerHeight - 220);
+      const fitZoom = Math.min(1, availW / (gridWidth * baseCell), availH / (gridHeight * baseCell));
+      setZoom(Math.max(0.25, Math.min(1.25, Number(fitZoom.toFixed(2)))));
+      setCameraPan({ x: 0, y: 0 });
+    };
+    img.onerror = () => {
+      updateActiveMap((m) => ({ ...m, backgroundUrl: url }));
+    };
+    img.src = resolved;
+  };
+
+  // Auto-detect natural image dimensions for maps uploaded before adaptive grid support
+  useEffect(() => {
+    if (
+      !activeMap ||
+      !activeMap.backgroundUrl ||
+      (activeMap.backgroundNaturalWidth && activeMap.backgroundNaturalHeight)
+    ) {
+      return;
+    }
+    const resolved = resolveAssetUrl(activeMap.backgroundUrl);
+    if (!resolved) return;
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled || !img.naturalWidth || !img.naturalHeight) return;
+      const natW = img.naturalWidth;
+      const natH = img.naturalHeight;
+      const { gridWidth, gridHeight } = computeAdaptiveMapGrid(natW, natH, 70);
+      updateCampaign((prev) => ({
+        ...prev,
+        maps: prev.maps.map((m) =>
+          m.id === activeMap.id
+            ? {
+                ...m,
+                backgroundNaturalWidth: natW,
+                backgroundNaturalHeight: natH,
+                gridWidth,
+                gridHeight,
+              }
+            : m
+        ),
+      }));
+    };
+    img.src = resolved;
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMap, resolveAssetUrl, updateCampaign]);
 
   if (!activeMap) return null;
 
@@ -1298,9 +1550,9 @@ export const StageCanvas: React.FC = () => {
             )}
             <div className="flex items-center gap-0.5 rpg-socket rounded-md px-1.5 py-0.5">
               <button
-                onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.15).toFixed(2))))}
+                onClick={() => setZoom((z) => Math.max(0.25, Number((z - 0.15).toFixed(2))))}
                 className="p-0.5 cursor-pointer hover:opacity-75"
-                title="Diminuir Zoom"
+                title="Diminuir Zoom (até 25%)"
               >
                 <ZoomOut className="w-3.5 h-3.5" />
               </button>
@@ -1308,9 +1560,9 @@ export const StageCanvas: React.FC = () => {
                 {Math.round(zoom * 100)}%
               </span>
               <button
-                onClick={() => setZoom((z) => Math.min(1.8, Number((z + 0.15).toFixed(2))))}
+                onClick={() => setZoom((z) => Math.min(2.0, Number((z + 0.15).toFixed(2))))}
                 className="p-0.5 cursor-pointer hover:opacity-75"
-                title="Aumentar Zoom"
+                title="Aumentar Zoom (até 200%)"
               >
                 <ZoomIn className="w-3.5 h-3.5" />
               </button>
@@ -1321,7 +1573,7 @@ export const StageCanvas: React.FC = () => {
         {/* ROW 2: Collapsible Contextual Sub-Bar (Only visible when GM opens a category tab) */}
         {role === 'gm' && gmDrawerTab && (
           <div
-            className="w-full max-w-[99%] pt-1.5 border-t flex items-center justify-center gap-2 flex-wrap animate-modal-unfurl"
+            className="w-full max-w-[99%] pt-1.5 border-t flex items-center justify-center gap-2 flex-wrap animate-ui-enter"
             style={{ borderColor: 'rgba(212, 170, 72, 0.22)' }}
           >
             {gmDrawerTab === 'aoe' && (
@@ -1589,7 +1841,7 @@ export const StageCanvas: React.FC = () => {
                   <FileUploadButton
                     accept="image/*"
                     label="Subir Mapa"
-                    onUploaded={(url) => updateActiveMap((m) => ({ ...m, backgroundUrl: url }))}
+                    onUploaded={applyMapImageWithAdaptiveGrid}
                     className="rounded-md"
                   />
                   <button
@@ -1599,7 +1851,7 @@ export const StageCanvas: React.FC = () => {
                     }`}
                   >
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>Clima &amp; Bioma</span>
+                    <span>Configurar Mapa</span>
                   </button>
                 </div>
               </>
@@ -1615,9 +1867,79 @@ export const StageCanvas: React.FC = () => {
           </div>
         )}
 
-        {/* GM Map / Scene Settings Floating Drawer */}
+        {/* GM Map / Grid / Weather Settings Drawer */}
         {showMapConfig && role === 'gm' && (
           <div className="rpg-glass-panel rounded-xl px-4 py-2.5 flex flex-wrap items-center gap-3 text-xs pointer-events-auto shadow-2xl">
+            <div className="flex items-center gap-2">
+              <span className="font-display font-bold text-amber-200/90">Grid (Colunas):</span>
+              <input
+                type="range"
+                min={8}
+                max={80}
+                value={activeMap.gridWidth}
+                onChange={(e) => {
+                  const nextCols = Math.max(8, Math.min(80, Number(e.target.value) || 22));
+                  updateActiveMap((m) => {
+                    if (m.backgroundNaturalWidth && m.backgroundNaturalHeight) {
+                      const nextRows = Math.max(
+                        6,
+                        Math.min(
+                          80,
+                          Math.round(nextCols * (m.backgroundNaturalHeight / m.backgroundNaturalWidth))
+                        )
+                      );
+                      return { ...m, gridWidth: nextCols, gridHeight: nextRows };
+                    }
+                    return { ...m, gridWidth: nextCols };
+                  });
+                }}
+                className="w-24 accent-amber-400 cursor-pointer"
+                title="Ajusta a quantidade de quadrados mantendo 100% da imagem sem cortar"
+              />
+              <input
+                type="number"
+                min={8}
+                max={80}
+                value={activeMap.gridWidth}
+                onChange={(e) => {
+                  const nextCols = Math.max(8, Math.min(80, Number(e.target.value) || 22));
+                  updateActiveMap((m) => {
+                    if (m.backgroundNaturalWidth && m.backgroundNaturalHeight) {
+                      const nextRows = Math.max(
+                        6,
+                        Math.min(
+                          80,
+                          Math.round(nextCols * (m.backgroundNaturalHeight / m.backgroundNaturalWidth))
+                        )
+                      );
+                      return { ...m, gridWidth: nextCols, gridHeight: nextRows };
+                    }
+                    return { ...m, gridWidth: nextCols };
+                  });
+                }}
+                className="rpg-input w-14 py-0.5 text-center font-mono-dice text-xs"
+              />
+              <span className="text-[11px] font-mono-dice opacity-75">
+                × {activeMap.gridHeight}
+              </span>
+              {!activeMap.backgroundUrl && (
+                <input
+                  type="number"
+                  min={6}
+                  max={80}
+                  value={activeMap.gridHeight}
+                  onChange={(e) => {
+                    const nextRows = Math.max(6, Math.min(80, Number(e.target.value) || 14));
+                    updateActiveMap((m) => ({ ...m, gridHeight: nextRows }));
+                  }}
+                  className="rpg-input w-14 py-0.5 text-center font-mono-dice text-xs"
+                  title="Linhas do grid (mapa sem imagem)"
+                />
+              )}
+            </div>
+
+            <span className="h-4 w-px bg-white/15 hidden sm:inline-block" />
+
             <div className="flex items-center gap-1.5">
               <span>Tema:</span>
               <select
@@ -1662,7 +1984,14 @@ export const StageCanvas: React.FC = () => {
 
             {activeMap.backgroundUrl && (
               <button
-                onClick={() => updateActiveMap((m) => ({ ...m, backgroundUrl: '' }))}
+                onClick={() =>
+                  updateActiveMap((m) => ({
+                    ...m,
+                    backgroundUrl: '',
+                    backgroundNaturalWidth: undefined,
+                    backgroundNaturalHeight: undefined,
+                  }))
+                }
                 className="rpg-card px-2 py-1 rounded text-red-400 cursor-pointer"
               >
                 Remover Imagem do Mapa
@@ -1736,6 +2065,13 @@ export const StageCanvas: React.FC = () => {
       {/* MAIN VIEWPORT: Pan the World by dragging outside the map, Middle-Click, or Space+Drag */}
       <div
         onMouseDown={(e) => {
+          // Clicking outside the map also clears selected token/hero in the bottom dock
+          if (e.button === 0 && e.target === e.currentTarget) {
+            setSelectedTokenId(null);
+            setSelectedTemplateId(null);
+            setSelectedMarkerId(null);
+            if (!pendingAttackChoice) setTargetTokenId(null);
+          }
           // Pan world when clicking outside the map grid, or middle-click anywhere, or holding Space
           const isMiddle = e.button === 1;
           const isOutsideMap = e.button === 0 && e.target === e.currentTarget;
@@ -1755,7 +2091,7 @@ export const StageCanvas: React.FC = () => {
         style={{ backgroundColor: 'var(--canvas-bg)' }}
         title="Segure o mouse fora do mapa (ou botão do meio / Espaço) para mover a câmera • Duplo clique fora para centralizar"
       >
-          {/* Sculpted Brass & Obsidian Coordinate Tabletop Rim */}
+          {/* Sculpted Brass & Obsidian Tabletop Rim (Coordinate numbers removed for clean full-map framing) */}
           <div
             onMouseDown={(e) => {
               if (
@@ -1766,58 +2102,31 @@ export const StageCanvas: React.FC = () => {
                 beginWorldPan(e);
               }
             }}
-            className="rpg-panel rounded-lg p-2.5 sm:p-3 shadow-[0_30px_85px_rgba(0,0,0,0.95)] shrink-0 relative cursor-default"
+            className="rpg-panel rounded-lg p-2 shadow-[0_30px_85px_rgba(0,0,0,0.95)] shrink-0 relative cursor-default"
             style={{
               transform: `translate3d(${cameraPan.x}px, ${cameraPan.y}px, 0)`,
               willChange: isPanningWorld ? 'transform' : 'auto',
             }}
           >
-            {/* Column Coordinates (A, B, C...) */}
-            <div className="flex pl-5 mb-1 select-none pointer-events-none">
-              {Array.from({ length: activeMap.gridWidth }).map((_, idx) => (
-                <div
-                  key={idx}
-                  style={{ width: cellPx }}
-                  className="text-center text-[9px] font-display font-bold opacity-45 text-amber-200"
-                >
-                  {String.fromCharCode(65 + (idx % 26))}
-                </div>
-              ))}
-            </div>
-
-            <div className="flex items-start">
-              {/* Row Coordinates (1, 2, 3...) */}
-              <div className="flex flex-col pr-1.5 select-none pointer-events-none">
-                {Array.from({ length: activeMap.gridHeight }).map((_, idx) => (
-                  <div
-                    key={idx}
-                    style={{ height: cellPx }}
-                    className="w-4 flex items-center justify-end text-[9px] font-display font-bold opacity-45 text-amber-200"
-                  >
-                    {idx + 1}
-                  </div>
-                ))}
-              </div>
-
               <div
                 ref={gridRef}
                 onMouseDown={handleGridMouseDown}
                 onMouseMove={handleGridMouseMove}
                 onMouseUp={handleGridMouseUp}
                 onMouseLeave={handleGridMouseLeave}
+                onDragOver={handleGridDragOver}
+                onDragLeave={() => setDropHighlightCell(null)}
+                onDrop={handleGridDrop}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   if (pendingAttackChoice) setPendingAttackChoice(null);
                   if (secretMarkerKind) setSecretMarkerKind(null);
                 }}
-                className="relative shadow-2xl select-none shrink-0 rounded border-2 overflow-hidden"
+                className="relative shadow-2xl select-none shrink-0 rounded border-2"
                 style={{
                   width: totalW,
                   height: totalH,
                   borderColor: 'var(--border-ornate)',
-                  background: resolvedMapBg
-                    ? `url(${resolvedMapBg}) center/cover no-repeat`
-                    : PRESET_GRADIENTS[activeMap.themePreset],
                   cursor:
                     secretMarkerKind || tool === 'ruler' || tool === 'ping' || tool === 'pointer'
                       ? 'crosshair'
@@ -1826,19 +2135,47 @@ export const StageCanvas: React.FC = () => {
                       : 'default',
                 }}
               >
-                {/* Architectural Biome Floor Texture & Torchlight when no custom map image is uploaded */}
-                {!resolvedMapBg && (
-                  <BiomeFloorOverlay preset={activeMap.themePreset} cellPx={cellPx} />
-                )}
-
-                {/* Grid Lines */}
+                {/* Clipped Background + Biome + Grid Layer (Keeps popovers & token menus 100% unclipped outside the map!) */}
                 <div
-                  className="absolute inset-0 pointer-events-none"
+                  className="absolute inset-0 rounded overflow-hidden pointer-events-none"
                   style={{
-                    backgroundImage: `linear-gradient(to right, var(--grid-line) 1px, transparent 1px), linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px)`,
-                    backgroundSize: `${cellPx}px ${cellPx}px`,
+                    background: resolvedMapBg
+                      ? `url(${resolvedMapBg}) 0 0 / 100% 100% no-repeat`
+                      : PRESET_GRADIENTS[activeMap.themePreset],
                   }}
-                />
+                >
+                  {/* Architectural Biome Floor Texture & Torchlight when no custom map image is uploaded */}
+                  {!resolvedMapBg && (
+                    <BiomeFloorOverlay preset={activeMap.themePreset} cellPx={cellPx} />
+                  )}
+
+                  {/* Grid Lines */}
+                  <div
+                    className="absolute inset-0 pointer-events-none"
+                    style={{
+                      backgroundImage: `linear-gradient(to right, var(--grid-line) 1px, transparent 1px), linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px)`,
+                      backgroundSize: `${cellPx}px ${cellPx}px`,
+                    }}
+                  />
+
+                  {/* Weather Layer (clipped cleanly to map bounds) */}
+                  {weatherClass && (
+                    <div className={`absolute inset-0 pointer-events-none z-25 ${weatherClass}`} />
+                  )}
+                </div>
+
+                {/* Live Drop Highlight Square when dragging a Hero or NPC from Left Panel */}
+                {dropHighlightCell && (
+                  <div
+                    className="absolute pointer-events-none z-35 border-2 border-amber-400 bg-amber-400/25 rounded shadow-[0_0_18px_rgba(251,191,36,0.65)]"
+                    style={{
+                      left: dropHighlightCell.x * cellPx,
+                      top: dropHighlightCell.y * cellPx,
+                      width: cellPx,
+                      height: cellPx,
+                    }}
+                  />
+                )}
 
                 {/* Tactical Terrain Cells: Walls, Cover (+2/+5 CA), Difficult Terrain (2x) */}
                 {activeMap.terrainCells &&
@@ -2977,10 +3314,10 @@ export const StageCanvas: React.FC = () => {
                         </svg>
                       )}
                       {s.kind === 'block' && (
-                        <div className="w-full h-full rounded-full border-4 border-sky-400 animate-ping opacity-75" />
+                        <div className="w-full h-full rounded-full border-4 border-sky-400 animate-impact-ripple" />
                       )}
                       {s.kind === 'heal' && (
-                        <div className="w-full h-full rounded-full border-4 border-emerald-400 animate-ping opacity-75" />
+                        <div className="w-full h-full rounded-full border-4 border-emerald-400 animate-impact-ripple" />
                       )}
                     </div>
                   ))}
@@ -3024,12 +3361,27 @@ export const StageCanvas: React.FC = () => {
                     </div>
                   ))}
 
-                  {/* Token Floating Context Action Menu */}
-                  {isMenuOpen && (
+                  {/* Token Floating Context Action Menu (Unclipped + Auto-Flip Above/Below & Left/Right!) */}
+                  {isMenuOpen && (() => {
+                    const gRect = gridRef.current?.getBoundingClientRect();
+                    const tokScreenY = gRect ? gRect.top + tok.y * cellPx : tok.y * cellPx;
+                    const tokScreenX = gRect
+                      ? gRect.left + (tok.x + tok.size / 2) * cellPx
+                      : (tok.x + tok.size / 2) * cellPx;
+                    const openBelow = tokScreenY < window.innerHeight * 0.48;
+                    const horizClass =
+                      tokScreenX < 180
+                        ? 'left-0'
+                        : tokScreenX > window.innerWidth - 180
+                          ? 'right-0'
+                          : 'left-1/2 -translate-x-1/2';
+                    return (
                     <div
                       onMouseDown={(e) => e.stopPropagation()}
                       onMouseUp={(e) => e.stopPropagation()}
-                      className="absolute bottom-[112%] left-1/2 -translate-x-1/2 w-60 rpg-glass-panel rounded-xl p-3 space-y-2 text-xs shadow-2xl z-50 cursor-default animate-dice-tumble"
+                      className={`absolute ${
+                        openBelow ? 'top-[115%]' : 'bottom-[115%]'
+                      } ${horizClass} w-64 max-h-[62vh] overflow-y-auto rpg-glass-panel rounded-xl p-3 space-y-2 text-xs shadow-2xl z-50 cursor-default animate-popover`}
                     >
                       <div className="flex items-center justify-between border-b pb-1.5" style={{ borderColor: 'var(--border-subtle)' }}>
                         <div>
@@ -3412,6 +3764,48 @@ export const StageCanvas: React.FC = () => {
                             </div>
                           )}
 
+                          {tok.type === 'npc' &&
+                            tok.referenceId &&
+                            (() => {
+                              const linkedNpc = campaign.npcs.find((n) => n.id === tok.referenceId);
+                              if (!linkedNpc?.combatEnabled || !linkedNpc.attacks?.length) return null;
+                              return (
+                                <div className="space-y-1">
+                                  <div className="text-[10px] uppercase tracking-wider text-amber-300">
+                                    Ataques de {tok.name}:
+                                  </div>
+                                  {linkedNpc.attacks.map((natk, i) => (
+                                    <button
+                                      key={i}
+                                      onClick={() => {
+                                        setSelectedTokenId(null);
+                                        setPendingAttackChoice({
+                                          attackerTokenId: tok.id,
+                                          attackerName: tok.name,
+                                          attackerColor: tok.color,
+                                          attackerImageUrl: tok.imageUrl,
+                                          attackerFrame: tok.frameStyle || 'gold',
+                                          diceSkin: 'gold',
+                                          actionTitle: natk.name,
+                                          attackFormula: `1d20 + ${natk.attackBonus}`,
+                                          damageFormula: natk.damageFormula,
+                                          damageType: natk.damageType,
+                                          range: natk.range,
+                                          actionCost: 'Padrão',
+                                        });
+                                      }}
+                                      className="w-full rpg-card px-2 py-1 rounded text-[11px] flex items-center justify-between hover:border-amber-400 cursor-pointer"
+                                    >
+                                      <span className="truncate">{natk.name}</span>
+                                      <span className="font-mono-dice text-[10px] text-amber-300">
+                                        +{natk.attackBonus} | {natk.damageFormula}
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              );
+                            })()}
+
                           <div className="flex items-center justify-between gap-1">
                             <button
                               onClick={() => applyDamage(tok.id, 5, false)}
@@ -3483,7 +3877,8 @@ export const StageCanvas: React.FC = () => {
                         </div>
                       )}
                     </div>
-                  )}
+                    );
+                  })()}
                 </div>
               );
             })}
@@ -4142,12 +4537,6 @@ export const StageCanvas: React.FC = () => {
                   }}
                 />
               ))}
-
-            {/* Weather Layer */}
-            {weatherClass && (
-              <div className={`absolute inset-0 pointer-events-none z-25 ${weatherClass}`} />
-            )}
-          </div>
           </div>
           </div>
         </div>

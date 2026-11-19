@@ -16,7 +16,9 @@ import {
   FlaskConical,
   Footprints,
   Heart,
+  MapPin,
   Moon,
+  Plus,
   Save,
   Shield,
   ShieldAlert,
@@ -30,11 +32,13 @@ import {
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import {
+  buildPreviewDiceForFormula,
   computeCharacterStats,
   evaluateFormula,
+  findNearestFreeGridCell,
   formatFormulaForDisplay,
 } from '../shared/rulesEngine';
-import { ActionEconomyCost } from '../shared/types';
+import { ActionEconomyCost, NpcEntry } from '../shared/types';
 import { DraggablePanel, DragGripBadge } from './DraggablePanel';
 import { OrnateFrame, SculptedHealthBar } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
@@ -90,11 +94,12 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     dismissSavePrompt,
     setCharacterConcentration,
     unreadChatCount,
+    openManualRoll,
   } = useCampaign();
 
   const [showRestMenu, setShowRestMenu] = useState(false);
   const [gmRosterCollapsed, setGmRosterCollapsed] = useState(true);
-  const [gmRosterTab, setGmRosterTab] = useState<'heroes' | 'monsters'>('heroes');
+  const [gmRosterTab, setGmRosterTab] = useState<'heroes' | 'npcs' | 'monsters'>('heroes');
   const [expandedHeroId, setExpandedHeroId] = useState<string | null>(null);
 
   // STRICT ROLE SEPARATION:
@@ -177,95 +182,102 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
 
     const formulaMatch = def.description.match(/(\d+d\d+(?:\s*[+-]\s*\d+)?)/i)?.[1];
     const formula = def.damageFormula || formulaMatch || '2d4+2';
-    const res = evaluateFormula(formula, stats, hero);
-    const amount = Math.max(1, res.total);
     const isMp =
       def.name.toLowerCase().includes('mana') ||
       def.name.toLowerCase().includes('éter') ||
       /\bpm\b/i.test(def.description);
 
-    const nextHp = isMp ? hero.hp : Math.min(stats.maxHp, hero.hp + amount);
-    const nextMp = isMp ? Math.min(stats.maxMp, hero.mp + amount) : hero.mp;
-
-    updateCampaign((prev) => ({
-      ...prev,
-      characters: prev.characters.map((c) =>
-        c.id !== hero.id
-          ? c
-          : {
-              ...c,
-              hp: nextHp,
-              mp: nextMp,
-              inventory: c.inventory
-                .map((inv) =>
-                  inv.id === entryId ? { ...inv, quantity: inv.quantity - 1 } : inv
-                )
-                .filter((inv) => inv.quantity > 0),
-            }
-      ),
-      maps: prev.maps.map((m) =>
-        m.id !== prev.activeMapId
-          ? m
-          : {
-              ...m,
-              tokens: m.tokens.map((t) =>
-                t.type === 'character' && t.referenceId === hero.id
-                  ? { ...t, hp: nextHp, maxHp: stats.maxHp }
-                  : t
-              ),
-            }
-      ),
-      combat: isMp
-        ? prev.combat
-        : {
-            ...prev.combat,
-            combatants: prev.combat.combatants.map((c) =>
-              c.type === 'character' && c.referenceId === hero.id
-                ? { ...c, hp: nextHp, maxHp: stats.maxHp }
-                : c
-            ),
-          },
-    }));
-
-    const heroToken = activeMap?.tokens.find(
-      (t) => t.type === 'character' && t.referenceId === hero.id
-    );
-    if (heroToken && !isMp) {
-      triggerSlashVfx(heroToken.id, 'heal');
-    }
-
-    sendRoll({
+    openManualRoll({
+      title: `Usar ${def.name}`,
+      subtitle: isMp ? `Recupera ${campaign.settings.resourceShort}` : 'Recupera Pontos de Vida',
+      formula,
+      displayFormula: formatFormulaForDisplay(formula, stats, hero),
+      previewDice: buildPreviewDiceForFormula(formula, 'normal'),
       rollerName: hero.name,
-      rollerRole: role,
       rollerColor: heroColor,
       diceSkin: hero.diceSkin || 'emerald',
-      title: `Usou ${def.name}`,
-      formula: res.resolvedFormula,
-      individualRolls: res.individualRolls,
-      rolledDice: res.rolledDice,
-      total: res.total,
-      isCrit: false,
-      isFumble: false,
-      isSecret: false,
-      details: `${def.name} recuperou +${amount} ${
-        isMp ? campaign.settings.resourceShort : 'PV'
-      } (${res.details})`,
+      allowAdvantageToggle: false,
+      advantageMode: 'normal',
+      onExecute: () => {
+        const res = evaluateFormula(formula, stats, hero);
+        const amount = Math.max(1, res.total);
+        const nextHp = isMp ? hero.hp : Math.min(stats.maxHp, hero.hp + amount);
+        const nextMp = isMp ? Math.min(stats.maxMp, hero.mp + amount) : hero.mp;
+
+        updateCampaign((prev) => ({
+          ...prev,
+          characters: prev.characters.map((c) =>
+            c.id !== hero.id
+              ? c
+              : {
+                  ...c,
+                  hp: nextHp,
+                  mp: nextMp,
+                  inventory: c.inventory
+                    .map((inv) =>
+                      inv.id === entryId ? { ...inv, quantity: inv.quantity - 1 } : inv
+                    )
+                    .filter((inv) => inv.quantity > 0),
+                }
+          ),
+          maps: prev.maps.map((m) =>
+            m.id !== prev.activeMapId
+              ? m
+              : {
+                  ...m,
+                  tokens: m.tokens.map((t) =>
+                    t.type === 'character' && t.referenceId === hero.id
+                      ? { ...t, hp: nextHp, maxHp: stats.maxHp }
+                      : t
+                  ),
+                }
+          ),
+          combat: isMp
+            ? prev.combat
+            : {
+                ...prev.combat,
+                combatants: prev.combat.combatants.map((c) =>
+                  c.type === 'character' && c.referenceId === hero.id
+                    ? { ...c, hp: nextHp, maxHp: stats.maxHp }
+                    : c
+                ),
+              },
+        }));
+
+        const heroToken = activeMap?.tokens.find(
+          (t) => t.type === 'character' && t.referenceId === hero.id
+        );
+        if (heroToken && !isMp) {
+          triggerSlashVfx(heroToken.id, 'heal');
+        }
+
+        sendRoll({
+          rollerName: hero.name,
+          rollerRole: role,
+          rollerColor: heroColor,
+          diceSkin: hero.diceSkin || 'emerald',
+          title: `Usou ${def.name}`,
+          formula: res.resolvedFormula,
+          individualRolls: res.individualRolls,
+          rolledDice: res.rolledDice,
+          total: res.total,
+          isCrit: false,
+          isFumble: false,
+          isSecret: false,
+          details: `${def.name} recuperou +${amount} ${
+            isMp ? campaign.settings.resourceShort : 'PV'
+          } (${res.details})`,
+        });
+      },
     });
   };
 
   const heroColor = hero?.playerColor || hero?.tokenColor || '#e0b84c';
 
-  // GM Tactical Command Dock State: inspect whichever map token is selected (or active combatant token)
+  // GM Tactical Command Dock State: ONLY inspect when a token is actively selected (clicking empty map clears targetTokenId -> clean compact dock!)
   const gmInspectedToken =
-    role === 'gm'
-      ? activeMap?.tokens.find((t) => t.id === targetTokenId) ||
-        (activeTurnCombatant
-          ? activeMap?.tokens.find(
-              (t) =>
-                t.id === activeTurnCombatant.tokenId ||
-                (t.referenceId && t.referenceId === activeTurnCombatant.referenceId)
-            )
-          : undefined)
+    role === 'gm' && targetTokenId
+      ? activeMap?.tokens.find((t) => t.id === targetTokenId)
       : undefined;
 
   const gmInspectedMonster =
@@ -273,22 +285,162 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
       ? campaign.compendium.monsters.find((m) => m.id === gmInspectedToken.referenceId)
       : undefined;
 
+  const gmInspectedNpc =
+    gmInspectedToken?.type === 'npc' && gmInspectedToken.referenceId
+      ? campaign.npcs.find((n) => n.id === gmInspectedToken.referenceId)
+      : undefined;
+
   const gmInspectedChar =
-    role === 'gm'
-      ? (gmInspectedToken?.type === 'character' && gmInspectedToken.referenceId
-          ? campaign.characters.find((c) => c.id === gmInspectedToken.referenceId)
-          : undefined) ||
-        (!gmInspectedMonster
-          ? campaign.characters.find((c) => c.id === activeCharacterId) ||
-            campaign.characters[0]
-          : undefined)
+    role === 'gm' && gmInspectedToken?.type === 'character' && gmInspectedToken.referenceId
+      ? campaign.characters.find((c) => c.id === gmInspectedToken.referenceId)
       : undefined;
 
   const gmInspectedCharStats = gmInspectedChar
     ? computeCharacterStats(gmInspectedChar, campaign)
     : null;
 
-  const gmMapMonsters = (activeMap?.tokens || []).filter((t) => t.type === 'monster');
+  const gmMapMonsters = (activeMap?.tokens || []).filter(
+    (t) => t.type === 'monster' || t.type === 'npc'
+  );
+
+  const placeHeroOnActiveMap = (characterId: string) => {
+    const ch = campaign.characters.find((c) => c.id === characterId);
+    if (!ch || !activeMap) return;
+    const stats = computeCharacterStats(ch, campaign);
+    const existing = activeMap.tokens.find(
+      (t) => t.type === 'character' && t.referenceId === ch.id
+    );
+    if (existing) {
+      setActiveCharacterId(ch.id);
+      setTargetTokenId(existing.id);
+      return;
+    }
+    const pos = findNearestFreeGridCell(
+      activeMap,
+      Math.floor(activeMap.gridWidth / 2),
+      Math.floor(activeMap.gridHeight / 2),
+      1
+    );
+    const newId = `tok-${ch.id}-${Date.now()}`;
+    updateCampaign((prev) => ({
+      ...prev,
+      maps: prev.maps.map((m) =>
+        m.id !== prev.activeMapId
+          ? m
+          : {
+              ...m,
+              tokens: [
+                ...m.tokens,
+                {
+                  id: newId,
+                  name: ch.name.split(' ')[0],
+                  type: 'character',
+                  referenceId: ch.id,
+                  x: pos.x,
+                  y: pos.y,
+                  size: 1,
+                  hp: ch.hp,
+                  maxHp: stats.maxHp,
+                  defense: stats.defense,
+                  activeConditionIds: ch.activeConditionIds,
+                  isHidden: false,
+                  color: ch.playerColor || ch.tokenColor,
+                  frameStyle: ch.tokenFrameStyle || 'gold',
+                  imageUrl: ch.portraitUrl,
+                },
+              ],
+            }
+      ),
+    }));
+    setActiveCharacterId(ch.id);
+    setTargetTokenId(newId);
+  };
+
+  const quickCreateNpc = () => {
+    const name = window.prompt('Nome do novo NPC:', 'Novo NPC');
+    if (!name || !name.trim()) return;
+    const npc: NpcEntry = {
+      id: `npc-${Date.now()}`,
+      name: name.trim(),
+      role: 'Habitante / Aliado',
+      location: activeMap?.name || 'Local Atual',
+      imageUrl: '',
+      tokenColor: '#e0b84c',
+      publicBio: 'Descrição visível para os jogadores.',
+      secretNotes: '',
+      sharedPartyNotes: '',
+      revealedToPlayers: false,
+      disposition: 'Neutro',
+      combatEnabled: false,
+      maxHp: 15,
+      defense: 11,
+      speed: 9,
+      attacks: [],
+    };
+    updateCampaign((prev) => ({ ...prev, npcs: [npc, ...prev.npcs] }));
+  };
+
+  const placeNpcOnActiveMap = (npc: NpcEntry) => {
+    if (!activeMap) return;
+    const npcColor =
+      npc.tokenColor ||
+      (npc.disposition === 'Hostil'
+        ? '#ef4444'
+        : npc.disposition === 'Aliado'
+          ? '#22c55e'
+          : '#e0b84c');
+    const npcFrame =
+      npc.disposition === 'Hostil'
+        ? 'crimson'
+        : npc.disposition === 'Aliado'
+          ? 'emerald'
+          : 'gold';
+    const existing = activeMap.tokens.find(
+      (t) => t.type === 'npc' && t.referenceId === npc.id
+    );
+    if (existing) {
+      setTargetTokenId(existing.id);
+      return;
+    }
+    const pos = findNearestFreeGridCell(
+      activeMap,
+      Math.floor(activeMap.gridWidth / 2),
+      Math.floor(activeMap.gridHeight / 2),
+      1
+    );
+    const newId = `tok-npc-${npc.id}-${Date.now()}`;
+    updateCampaign((prev) => ({
+      ...prev,
+      maps: prev.maps.map((m) =>
+        m.id !== prev.activeMapId
+          ? m
+          : {
+              ...m,
+              tokens: [
+                ...m.tokens,
+                {
+                  id: newId,
+                  name: npc.name,
+                  type: 'npc',
+                  referenceId: npc.id,
+                  x: pos.x,
+                  y: pos.y,
+                  size: 1,
+                  hp: npc.maxHp || 15,
+                  maxHp: npc.maxHp || 15,
+                  defense: npc.defense || 11,
+                  activeConditionIds: [],
+                  isHidden: !npc.revealedToPlayers,
+                  color: npcColor,
+                  frameStyle: npcFrame,
+                  imageUrl: npc.imageUrl,
+                },
+              ],
+            }
+      ),
+    }));
+    setTargetTokenId(newId);
+  };
 
   const adjustHeroHp = (characterId: string, maxHp: number, delta: number) => {
     const mapTok = activeMap?.tokens.find(
@@ -310,16 +462,95 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
 
   return (
     <>
-      {/* GM Floating Pending Requests from Players */}
-      {role === 'gm' && pendingRequests.length > 0 && (
-        <DraggablePanel
-          storageKey="gm-pending-requests"
-          className="fixed top-20 right-4 z-40 w-80 space-y-2 pointer-events-auto"
-        >
-          {pendingRequests.map((req) => (
+      {/* GM Prominent Modal Overlay for Player Hero Join Approval (claim-hero / import-hero) */}
+      {role === 'gm' &&
+        pendingRequests.some((r) => r.type === 'claim-hero' || r.type === 'import-hero') && (
+          <div className="fixed inset-0 z-[75] bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-4 pointer-events-auto">
+            <div className="max-w-md w-full space-y-3">
+              {pendingRequests
+                .filter((r) => r.type === 'claim-hero' || r.type === 'import-hero')
+                .map((req) => (
+                  <OrnateFrame
+                    key={req.id}
+                    accentColor="#e4ba52"
+                    className="rpg-glass-panel rounded-lg p-5 space-y-4 shadow-[0_24px_70px_rgba(0,0,0,0.95)] animate-modal-unfurl"
+                  >
+                    <div className="flex items-start justify-between gap-2 border-b pb-2.5" style={{ borderColor: 'var(--border-subtle)' }}>
+                      <div className="flex items-center gap-2">
+                        <Shield className="w-5 h-5 text-amber-400 shrink-0" />
+                        <div>
+                          <div className="text-[10px] font-display font-bold uppercase tracking-[0.2em] text-amber-300">
+                            Autorização do Mestre
+                          </div>
+                          <h3 className="font-chronicle font-bold text-base text-amber-100">
+                            Jogador quer entrar como Herói
+                          </h3>
+                        </div>
+                      </div>
+                      <span className="text-[10px] opacity-65 font-mono-dice">{req.createdAt}</span>
+                    </div>
+
+                    <div className="rpg-card rounded-lg p-3 flex items-center gap-3">
+                      <TokenPortrait
+                        name={req.characterName}
+                        imageUrl={req.characterPortraitUrl}
+                        playerColor={req.playerColor || '#38bdf8'}
+                        frameStyle="gold"
+                        sizePx={52}
+                      />
+                      <div className="min-w-0 flex-1 text-xs space-y-0.5">
+                        <div>
+                          <strong style={{ color: req.playerColor || '#38bdf8' }}>
+                            {req.requesterPlayerName || 'Jogador'}
+                          </strong>{' '}
+                          deseja entrar controlando:
+                        </div>
+                        <div className="font-display font-bold text-sm text-amber-200 truncate">
+                          {req.characterName}
+                        </div>
+                        <div className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                          {req.type === 'import-hero'
+                            ? 'Herói carregado do Cofre / arquivo salvo'
+                            : 'Herói já existente nesta campanha'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        onClick={() => resolvePlayerRequest(req.id, true)}
+                        className="flex-1 py-2.5 rounded-md bg-emerald-700 hover:bg-emerald-600 border border-emerald-400/50 text-white text-xs font-display font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-lg"
+                      >
+                        <Check className="w-4 h-4" />
+                        <span>Permitir Entrada</span>
+                      </button>
+                      <button
+                        onClick={() => resolvePlayerRequest(req.id, false)}
+                        className="flex-1 py-2.5 rounded-md bg-red-900/90 hover:bg-red-800 border border-red-400/50 text-white text-xs font-display font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                        <span>Recusar</span>
+                      </button>
+                    </div>
+                  </OrnateFrame>
+                ))}
+            </div>
+          </div>
+        )}
+
+      {/* GM Floating Pending Requests from Players (Rests / Heals) */}
+      {role === 'gm' &&
+        pendingRequests.some((r) => r.type !== 'claim-hero' && r.type !== 'import-hero') && (
+          <DraggablePanel
+            storageKey="gm-pending-requests"
+            className="fixed top-20 right-4 z-40 w-80 space-y-2 pointer-events-auto"
+          >
+            {pendingRequests
+              .filter((r) => r.type !== 'claim-hero' && r.type !== 'import-hero')
+              .map((req) => (
             <div
               key={req.id}
-              className="rpg-glass-panel rounded-lg p-3.5 space-y-2.5 animate-dice-tumble shadow-2xl"
+              className="rpg-glass-panel rounded-lg p-3.5 space-y-2.5 animate-ui-enter shadow-2xl"
               style={{ borderColor: req.playerColor }}
             >
               <div className="flex items-start justify-between gap-2">
@@ -606,7 +837,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
 
       {/* Tactical Rule Alert (Range / Action Economy / Turn Guard) */}
       {tacticalAlert && (
-        <div className="fixed bottom-32 left-1/2 -translate-x-1/2 z-45 pointer-events-none animate-dice-tumble">
+        <div className="fixed bottom-32 left-1/2 -translate-x-1/2 z-45 pointer-events-none animate-ui-enter">
           <div className="rpg-glass-panel rounded-md px-4 py-2 text-xs font-semibold border border-red-400/70 text-red-200 flex items-center gap-2 shadow-2xl">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
             <span>{tacticalAlert.message}</span>
@@ -616,7 +847,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
 
       {/* Player Feedback Toast when GM approves/denies */}
       {requestToast && (
-        <div className="fixed bottom-28 left-1/2 -translate-x-1/2 z-40 pointer-events-none animate-dice-tumble">
+        <div className="fixed bottom-28 left-1/2 -translate-x-1/2 z-40 pointer-events-none animate-ui-enter">
           <div
             className={`rpg-glass-panel rounded-md px-5 py-2 text-xs font-bold shadow-2xl flex items-center gap-2 ${
               requestToast.approved
@@ -682,30 +913,41 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               </div>
 
               <div
-                className="px-2.5 pt-2 pb-1.5 grid grid-cols-2 gap-1.5 border-b shrink-0"
+                className="px-2 pt-2 pb-1.5 grid grid-cols-3 gap-1 border-b shrink-0"
                 style={{ borderColor: 'var(--border-subtle)' }}
               >
                 <button
                   onClick={() => setGmRosterTab('heroes')}
-                  className={`px-2 py-1 rounded-md text-[11px] font-display font-bold flex items-center justify-center gap-1 cursor-pointer transition ${
+                  className={`px-1.5 py-1 rounded-md text-[10px] font-display font-bold flex items-center justify-center gap-1 cursor-pointer transition ${
                     gmRosterTab === 'heroes'
                       ? 'rpg-btn-primary'
                       : 'rpg-card opacity-80 hover:opacity-100'
                   }`}
                 >
-                  <Users className="w-3 h-3" />
-                  <span>Heróis ({campaign.characters.length})</span>
+                  <Users className="w-3 h-3 shrink-0" />
+                  <span className="truncate">Heróis ({campaign.characters.length})</span>
+                </button>
+                <button
+                  onClick={() => setGmRosterTab('npcs')}
+                  className={`px-1.5 py-1 rounded-md text-[10px] font-display font-bold flex items-center justify-center gap-1 cursor-pointer transition ${
+                    gmRosterTab === 'npcs'
+                      ? 'rpg-btn-primary'
+                      : 'rpg-card opacity-80 hover:opacity-100'
+                  }`}
+                >
+                  <Sparkles className="w-3 h-3 shrink-0" />
+                  <span className="truncate">NPCs ({campaign.npcs.length})</span>
                 </button>
                 <button
                   onClick={() => setGmRosterTab('monsters')}
-                  className={`px-2 py-1 rounded-md text-[11px] font-display font-bold flex items-center justify-center gap-1 cursor-pointer transition ${
+                  className={`px-1.5 py-1 rounded-md text-[10px] font-display font-bold flex items-center justify-center gap-1 cursor-pointer transition ${
                     gmRosterTab === 'monsters'
                       ? 'rpg-btn-crimson'
                       : 'rpg-card opacity-80 hover:opacity-100'
                   }`}
                 >
-                  <Swords className="w-3 h-3" />
-                  <span>No Mapa ({gmMapMonsters.length})</span>
+                  <Swords className="w-3 h-3 shrink-0" />
+                  <span className="truncate">Mapa ({gmMapMonsters.length})</span>
                 </button>
               </div>
 
@@ -744,12 +986,32 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                       return (
                         <div
                           key={ch.id}
-                          className={`rpg-card rounded-lg p-2.5 space-y-2 transition ${
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData('application/x-chronicle-hero', ch.id);
+                            e.dataTransfer.setData('text/plain', ch.name);
+                            e.dataTransfer.effectAllowed = 'copyMove';
+                          }}
+                          title={`Arraste ${ch.name} para qualquer quadrado do mapa para posicioná-lo`}
+                          className={`rpg-card rounded-lg p-2.5 space-y-2 transition cursor-grab active:cursor-grabbing ${
                             isSelected
                               ? 'border-amber-400/90 bg-amber-500/10 shadow-[0_0_18px_rgba(245,158,11,0.16)]'
                               : ''
                           }`}
                         >
+                          <div className="flex items-center justify-between text-[9px] font-display uppercase tracking-wider text-amber-300/75">
+                            <span>⠿ Arraste p/ mapa</span>
+                            {!chToken && (
+                              <button
+                                type="button"
+                                onClick={() => placeHeroOnActiveMap(ch.id)}
+                                className="px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-400/50 text-amber-200 hover:bg-amber-500/35 cursor-pointer flex items-center gap-0.5"
+                                title={`Colocar ${ch.name} neste mapa`}
+                              >
+                                <MapPin className="w-2.5 h-2.5" /> + Mapa
+                              </button>
+                            )}
+                          </div>
                           {/* Top Row: Medallion + Name + Class/Level + CA Shield */}
                           <div className="flex items-start gap-2.5">
                             <button
@@ -1197,6 +1459,86 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                       );
                     })
                   )
+                ) : gmRosterTab === 'npcs' ? (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={quickCreateNpc}
+                      className="w-full rpg-btn-primary py-1.5 rounded-md text-[11px] font-display font-bold flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Novo NPC Rápido
+                    </button>
+                    {campaign.npcs.length === 0 ? (
+                      <div className="rpg-card rounded-md p-4 text-center text-xs font-lore italic opacity-75">
+                        Nenhum NPC criado. Clique acima ou abra o Diário → NPCs para editar foto, bio e combate.
+                      </div>
+                    ) : (
+                      campaign.npcs.map((npc) => {
+                        const npcColor =
+                          npc.tokenColor ||
+                          (npc.disposition === 'Hostil'
+                            ? '#ef4444'
+                            : npc.disposition === 'Aliado'
+                              ? '#22c55e'
+                              : '#e0b84c');
+                        const npcFrame =
+                          npc.disposition === 'Hostil'
+                            ? 'crimson'
+                            : npc.disposition === 'Aliado'
+                              ? 'emerald'
+                              : 'gold';
+                        const npcTok = activeMap?.tokens.find(
+                          (t) => t.type === 'npc' && t.referenceId === npc.id
+                        );
+                        return (
+                          <div
+                            key={npc.id}
+                            draggable
+                            onDragStart={(e) => {
+                              e.dataTransfer.setData('application/x-chronicle-npc', npc.id);
+                              e.dataTransfer.setData('text/plain', npc.name);
+                              e.dataTransfer.effectAllowed = 'copyMove';
+                            }}
+                            title={`Arraste ${npc.name} para qualquer quadrado do mapa`}
+                            className="rpg-card rounded-lg p-2.5 space-y-1.5 cursor-grab active:cursor-grabbing hover:border-amber-400/60 transition"
+                          >
+                            <div className="flex items-center gap-2">
+                              <TokenPortrait
+                                name={npc.name}
+                                imageUrl={npc.imageUrl}
+                                playerColor={npcColor}
+                                frameStyle={npcFrame}
+                                sizePx={36}
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="font-display font-bold text-xs truncate text-amber-100">
+                                  {npc.name}
+                                </div>
+                                <div className="text-[10px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                                  {npc.role} • {npc.disposition}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between gap-1 text-[10px] pt-1 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                              <span className="opacity-70 font-display uppercase text-[9px]">
+                                {npc.combatEnabled
+                                  ? `PV ${npc.maxHp || 15} • CA ${npc.defense || 11}`
+                                  : '⠿ Arraste p/ mapa'}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => placeNpcOnActiveMap(npc)}
+                                className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-amber-200 hover:bg-amber-500/35 font-display font-bold text-[10px] flex items-center gap-0.5 cursor-pointer"
+                              >
+                                <MapPin className="w-2.5 h-2.5" />
+                                <span>{npcTok ? 'Focar' : '+ Mapa'}</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
                 ) : gmMapMonsters.length === 0 ? (
                   <div className="rpg-card rounded-md p-4 text-center text-xs font-lore italic opacity-75">
                     Nenhuma criatura posicionada no mapa ativo.
@@ -1336,21 +1678,21 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
       )}
 
       {/* =====================================================================
-          MODE A: GM TACTICAL COMMAND DOCK (Mestre)
+          MODE A: GM TACTICAL COMMAND DOCK (Mestre — Clean & Unselected on Empty Map Click)
          ===================================================================== */}
       {role === 'gm' && (
         <DraggablePanel
           storageKey="gm-bottom-command-dock"
-          className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[96vw] pointer-events-auto"
+          className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[95vw] pointer-events-auto"
         >
           <OrnateFrame
             accentColor="#d4aa48"
             cornerSize={16}
-            className="rpg-glass-panel rounded-lg px-4 py-2 flex items-center gap-3 shadow-[0_22px_60px_rgba(0,0,0,0.92)]"
+            className="rpg-glass-panel rounded-lg px-3.5 py-2 flex items-center gap-3 max-w-[95vw] overflow-hidden shadow-[0_22px_60px_rgba(0,0,0,0.92)]"
           >
-            {/* GM Badge & Selected Map Monster OR Active Character Inspector */}
+            {/* GM Badge & Selected Map Monster OR NPC OR Character Inspector */}
             {gmInspectedMonster && gmInspectedToken ? (
-              <div className="flex items-center gap-3 pr-3 border-r" style={{ borderColor: 'var(--border-subtle)' }}>
+              <div className="flex items-center gap-3 pr-3 border-r min-w-0 flex-1" style={{ borderColor: 'var(--border-subtle)' }}>
                 <TokenPortrait
                   name={gmInspectedToken.name}
                   imageUrl={gmInspectedToken.imageUrl}
@@ -1498,7 +1840,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 const isCharDead = gmInspectedChar.hp <= 0;
 
                 return (
-                  <div className="flex items-center gap-3 pr-3 border-r" style={{ borderColor: 'var(--border-subtle)' }}>
+                  <div className="flex items-center gap-3 pr-3 border-r min-w-0 flex-1" style={{ borderColor: 'var(--border-subtle)' }}>
                     <button
                       onClick={() => {
                         setActiveCharacterId(gmInspectedChar.id);
@@ -1618,7 +1960,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     </div>
 
                     {/* Direct 1-Click Attacks & Abilities of the Selected Character in GM Dock */}
-                    <div className="flex items-center gap-1.5 overflow-x-auto max-w-[460px] py-0.5">
+                    <div className="flex items-center gap-1.5 overflow-x-auto min-w-0 flex-1 max-w-[420px] py-0.5">
                       {(gmInspectedChar.customAttacks || []).map((atk) => {
                         const isSel = Boolean(
                           pendingAttackChoice &&
@@ -1796,24 +2138,89 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                   </div>
                 );
               })()
-            ) : (
-              <div
-                className="flex items-center gap-2 pr-3 border-r text-xs"
-                style={{ borderColor: 'var(--border-subtle)' }}
-              >
-                <div className="w-9 h-9 rounded-md bg-amber-950/50 border border-amber-500/40 flex items-center justify-center shrink-0">
-                  <Crown className="w-4 h-4 text-amber-400" />
-                </div>
-                <div className="leading-tight hidden sm:block">
-                  <div className="font-display font-bold text-xs text-amber-200">
-                    Console do Mestre
+            ) : gmInspectedNpc && gmInspectedToken ? (
+              <div className="flex items-center gap-3 pr-3 border-r min-w-0 flex-1" style={{ borderColor: 'var(--border-subtle)' }}>
+                <TokenPortrait
+                  name={gmInspectedToken.name}
+                  imageUrl={gmInspectedToken.imageUrl}
+                  playerColor={gmInspectedToken.color}
+                  frameStyle={gmInspectedToken.frameStyle || 'gold'}
+                  sizePx={44}
+                  isDead={gmInspectedToken.hp <= 0}
+                />
+                <div className="min-w-[130px] max-w-[180px] shrink-0">
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="font-display font-bold text-xs truncate text-amber-100">
+                      {gmInspectedToken.name}
+                    </span>
+                    <span className="px-1.5 py-0.2 rounded bg-black/70 border border-amber-400/50 text-[10px] font-display font-bold text-amber-300 shrink-0">
+                      CA {gmInspectedToken.defense}
+                    </span>
                   </div>
-                  <div className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
-                    Clique em um token no mapa para inspecionar ou atacar
+                  <div className="text-[10px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                    {gmInspectedNpc.role} • {gmInspectedNpc.disposition}
                   </div>
+                  {gmInspectedNpc.combatEnabled && (
+                    <div className="flex items-center justify-between text-[10px] mt-1 font-mono-dice">
+                      <span className="text-amber-200 font-bold">
+                        PV {gmInspectedToken.hp}/{gmInspectedToken.maxHp}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => applyDamage(gmInspectedToken.id, 5, false)}
+                          className="px-1 rounded bg-red-950/90 border border-red-500/40 text-red-200 hover:bg-red-800 cursor-pointer"
+                        >
+                          -5
+                        </button>
+                        <button
+                          onClick={() => applyDamage(gmInspectedToken.id, 1, true)}
+                          className="px-1 rounded bg-emerald-950/80 border border-emerald-500/40 text-emerald-200 hover:bg-emerald-800 cursor-pointer"
+                        >
+                          +1
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
+                {gmInspectedNpc.combatEnabled && gmInspectedNpc.attacks && gmInspectedNpc.attacks.length > 0 && (
+                  <div className="flex items-center gap-1.5 overflow-x-auto min-w-0 flex-1 max-w-[320px] py-0.5">
+                    {gmInspectedNpc.attacks.map((natk, idx) => (
+                      <button
+                        key={idx}
+                        disabled={gmInspectedToken.hp <= 0}
+                        onClick={() =>
+                          setPendingAttackChoice({
+                            attackerTokenId: gmInspectedToken.id,
+                            attackerName: gmInspectedToken.name,
+                            attackerColor: gmInspectedToken.color,
+                            attackerImageUrl: gmInspectedToken.imageUrl,
+                            attackerFrame: gmInspectedToken.frameStyle || 'gold',
+                            diceSkin: 'gold',
+                            actionTitle: natk.name,
+                            attackFormula: `1d20 + ${natk.attackBonus}`,
+                            damageFormula: natk.damageFormula,
+                            damageType: natk.damageType,
+                            range: natk.range,
+                            actionCost: 'Padrão',
+                          })
+                        }
+                        className="rpg-card hover:border-amber-400 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-35"
+                      >
+                        <Swords className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                        <div className="leading-tight">
+                          <div className="text-[11px] font-display font-bold text-amber-100">
+                            {natk.name}
+                          </div>
+                          <div className="text-[9px] font-mono-dice text-amber-300/90">
+                            +{natk.attackBonus} • {natk.damageFormula}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
+            ) : null}
 
             {/* Right: Dice Mode + Open Sheets + Dice Tray + Drag Grip */}
             <div className="flex items-center gap-1.5 shrink-0">
@@ -1894,7 +2301,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 className="rpg-glass-panel rounded-lg px-4 py-2 flex flex-wrap items-center justify-center gap-3 shadow-[0_14px_40px_rgba(180,25,25,0.55)] animate-death-pulse"
               >
                 <div className="flex items-center gap-2">
-                  <Skull className="w-5 h-5 text-red-400 animate-pulse shrink-0" />
+                  <Skull className="w-5 h-5 text-red-400 shrink-0" />
                   <div className="leading-tight">
                     <div className="font-display font-bold text-xs text-red-200 uppercase tracking-wider">
                       {isHeroPermDead
@@ -2121,7 +2528,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               >
                 {hero.hp <= 0 ? (
                   <>
-                    <Skull className="w-4 h-4 text-red-300 animate-pulse" />
+                    <Skull className="w-4 h-4 text-red-300" />
                     <span className="font-display font-black text-[9px] text-red-200 leading-none mt-0.5">
                       0 PV
                     </span>
@@ -2214,7 +2621,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                   className="px-2.5 py-1.5 rounded-md bg-red-950/80 border border-red-500/70 text-red-200 text-[10px] font-display font-bold flex items-center gap-1.5 shrink-0 cursor-pointer hover:bg-red-900/70"
                   title="Seu personagem está caído com 0 PV! Abra a Ficha para Testes contra a Morte"
                 >
-                  <Skull className="w-3.5 h-3.5 text-red-400 animate-pulse" />
+                  <Skull className="w-3.5 h-3.5 text-red-400" />
                   <span>Caído (0 PV) — Abrir Ficha</span>
                 </button>
               )}
