@@ -2,15 +2,18 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   BookOpen,
+  Compass,
   Copy,
   Crown,
   Download,
   Eye,
   Globe,
+  Menu,
   Moon,
   RotateCcw,
   ScrollText,
   Shield,
+  Skull,
   Sun,
   Swords,
   Undo2,
@@ -25,14 +28,19 @@ import {
 import { useCampaign } from '../context/CampaignContext';
 import { PLAYER_COLOR_PALETTE } from '../shared/rulesEngine';
 import { DraggablePanel, DragGripBadge } from './DraggablePanel';
+import { openEntitySheet } from './EntitySheetModal';
 import { OrnateFrame } from './OrnateFrame';
+import { openAlertDialog, openConfirmDialog } from './PromptDialog';
 
 export type ActiveModalType =
   | null
   | 'sheet'
   | 'compendium'
+  | 'bestiary'
+  | 'npcs'
   | 'gm-shield'
   | 'diary'
+  | 'quests'
   | 'soundboard';
 
 interface TopHeaderProps {
@@ -62,18 +70,48 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
     setRole,
     activeCharacterId,
     setActiveCharacterId,
+    targetTokenId,
     activeAmbientName,
     resetCampaign,
     importCampaign,
     canUndo,
     undoCount,
     undoLastAction,
+    partyRest,
   } = useCampaign();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [showOnlineRoster, setShowOnlineRoster] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
+  const [showMainMenu, setShowMainMenu] = useState(false);
+  const [showRestMenu, setShowRestMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const restMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!showMainMenu && !showRestMenu) return;
+    const onDocDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowMainMenu(false);
+      }
+      if (restMenuRef.current && !restMenuRef.current.contains(e.target as Node)) {
+        setShowRestMenu(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowMainMenu(false);
+        setShowRestMenu(false);
+      }
+    };
+    window.addEventListener('mousedown', onDocDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDocDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [showMainMenu, showRestMenu]);
   const [remoteInput, setRemoteInput] = useState(serverUrl);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [hasGmPrivilege, setHasGmPrivilege] = useState(() => role === 'gm');
@@ -85,6 +123,24 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
   }, [role]);
 
   const toggleModal = (modal: ActiveModalType) => {
+    if (modal === 'sheet' && role === 'gm' && targetTokenId) {
+      const activeMap =
+        campaign.maps.find((m) => m.id === campaign.activeMapId) || campaign.maps[0];
+      const tok = activeMap?.tokens.find((t) => t.id === targetTokenId);
+      if (tok?.type === 'monster' && tok.referenceId) {
+        setActiveModal(null);
+        openEntitySheet({ kind: 'monster', id: tok.referenceId });
+        return;
+      }
+      if (tok?.type === 'npc' && tok.referenceId) {
+        setActiveModal(null);
+        openEntitySheet({ kind: 'npc', id: tok.referenceId });
+        return;
+      }
+      if (tok?.type === 'character' && tok.referenceId) {
+        setActiveCharacterId(tok.referenceId);
+      }
+    }
     setActiveModal(activeModal === modal ? null : modal);
   };
 
@@ -107,7 +163,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
         const parsed = JSON.parse(String(reader.result));
         await importCampaign(parsed);
       } catch {
-        alert('Erro ao importar arquivo JSON da campanha.');
+        openAlertDialog('Erro ao importar arquivo JSON da campanha.', 'Erro de Importação');
       }
     };
     reader.readAsText(file);
@@ -127,14 +183,17 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
     gmOnly?: boolean;
   }> = [
     { id: 'sheet', label: 'Ficha', icon: <User className="w-4 h-4" /> },
-    { id: 'compendium', label: 'Compêndio', icon: <BookOpen className="w-4 h-4" /> },
+    { id: 'compendium', label: 'Regras', icon: <BookOpen className="w-4 h-4" /> },
+    { id: 'bestiary', label: 'Bestiário', icon: <Skull className="w-4 h-4" />, gmOnly: true },
+    { id: 'npcs', label: 'NPCs', icon: <Users className="w-4 h-4" /> },
+    { id: 'quests', label: 'Missões', icon: <Compass className="w-4 h-4" /> },
     { id: 'diary', label: 'Diário', icon: <ScrollText className="w-4 h-4" /> },
     { id: 'gm-shield', label: 'Escudo GM', icon: <Shield className="w-4 h-4" />, gmOnly: true },
-    { id: 'soundboard', label: 'Mesa de Som', icon: <Volume2 className="w-4 h-4" /> },
+    { id: 'soundboard', label: 'Som', icon: <Volume2 className="w-4 h-4" /> },
   ];
 
   const currentColor =
-    role === 'player' ? myCharacter?.playerColor || myPlayerColor : '#e0b84c';
+    role === 'player' ? myCharacter?.playerColor || myPlayerColor : myPlayerColor || '#e0b84c';
 
   return (
     <>
@@ -170,28 +229,58 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
             </div>
           </div>
 
-          <nav className="flex items-center gap-1 ml-1">
-            {navButtons.map((btn) => {
-              if (btn.gmOnly && role !== 'gm') return null;
-              const active = activeModal === btn.id;
-              return (
-                <button
-                  key={btn.id}
-                  onClick={() => toggleModal(btn.id)}
-                  className={`px-2.5 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
-                    active ? 'rpg-btn-primary shadow-sm' : 'rpg-card hover:opacity-90'
-                  }`}
-                  style={!active ? { color: 'var(--text-primary)' } : undefined}
-                >
-                  {btn.icon}
-                  <span className="hidden sm:inline">{btn.label}</span>
-                  {btn.id === 'soundboard' && activeAmbientName && (
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]" />
-                  )}
-                </button>
-              );
-            })}
-          </nav>
+          {/* Collapsible Top Menu Button */}
+          <div ref={menuRef} className="relative ml-1">
+            <button
+              type="button"
+              onClick={() => setShowMainMenu((v) => !v)}
+              className={`px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-2 transition cursor-pointer ${
+                showMainMenu || activeModal ? 'rpg-btn-primary shadow-sm' : 'rpg-card hover:border-amber-400/60'
+              }`}
+              title="Abrir menu de opções (Ficha, Regras, Bestiário, NPCs, Diário, Som)"
+            >
+              <Menu className="w-4 h-4" />
+              <span>
+                {activeModal
+                  ? navButtons.find((b) => b.id === activeModal)?.label || 'Menu'
+                  : 'Menu'}
+              </span>
+              {activeAmbientName && (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]" />
+              )}
+            </button>
+
+            {showMainMenu && (
+              <div className="absolute left-0 top-full mt-2 w-56 rpg-glass-panel rounded-lg p-1.5 shadow-2xl border border-amber-500/40 z-50 animate-popover space-y-1">
+                {navButtons.map((btn) => {
+                  if (btn.gmOnly && role !== 'gm') return null;
+                  const active = activeModal === btn.id;
+                  return (
+                    <button
+                      key={btn.id}
+                      type="button"
+                      onClick={() => {
+                        toggleModal(btn.id);
+                        setShowMainMenu(false);
+                      }}
+                      className={`w-full px-3 py-2 rounded-md text-xs font-display font-semibold flex items-center justify-between gap-2 transition cursor-pointer text-left ${
+                        active ? 'rpg-btn-primary' : 'hover:bg-white/8'
+                      }`}
+                      style={!active ? { color: 'var(--text-primary)' } : undefined}
+                    >
+                      <span className="flex items-center gap-2.5">
+                        {btn.icon}
+                        <span>{btn.label}</span>
+                      </span>
+                      {btn.id === 'soundboard' && activeAmbientName && (
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Right: Color Swatch, Char Selector, Role Switch, Theme, Network */}
@@ -300,6 +389,74 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
             )}
           </div>
 
+          {/* GM Quick Party Rest (Short / Long) */}
+          {role === 'gm' && campaign.characters.length > 0 && (
+            <div ref={restMenuRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setShowRestMenu((v) => !v)}
+                className="rpg-card px-2.5 py-1 rounded-md text-xs font-display font-semibold flex items-center gap-1.5 hover:border-amber-400/60 cursor-pointer"
+                title="Conceder Descanso Curto ou Longo para todo o grupo"
+              >
+                <Moon className="w-3.5 h-3.5 text-amber-300" />
+                <span className="hidden xl:inline">Descanso</span>
+              </button>
+              {showRestMenu && (
+                <div className="absolute right-0 top-full mt-2 w-60 rpg-glass-panel rounded-lg p-2 shadow-2xl border border-amber-500/40 z-50 animate-popover space-y-1.5">
+                  <div className="text-[10px] font-display uppercase tracking-wider text-amber-300/90 px-1.5">
+                    Descanso em Grupo
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setShowRestMenu(false);
+                      const ok = await openConfirmDialog(
+                        'Aplicar Descanso Curto para todos os heróis vivos? (Recupera Dado de Vida, 1/3 de energia e cargas de descanso curto)',
+                        'Descanso Curto da Party',
+                        { confirmLabel: 'Descanso Curto', cancelLabel: 'Cancelar' }
+                      );
+                      if (ok) partyRest('short');
+                    }}
+                    className="w-full px-2.5 py-2 rounded-md text-left hover:bg-amber-500/12 border border-amber-500/25 flex items-center gap-2 cursor-pointer transition"
+                  >
+                    <Sun className="w-4 h-4 text-amber-400 shrink-0" />
+                    <div className="leading-tight">
+                      <div className="text-xs font-display font-bold text-amber-200">
+                        Descanso Curto
+                      </div>
+                      <div className="text-[10px] opacity-75">
+                        Dado de Vida + 1/3 MP + cargas curtas
+                      </div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setShowRestMenu(false);
+                      const ok = await openConfirmDialog(
+                        'Aplicar Descanso Longo para todos os heróis vivos? (Restaura 100% PV, MP, recursos, usos de habilidades, remove Exaustão e encerra concentrações)',
+                        'Descanso Longo da Party',
+                        { confirmLabel: 'Descanso Longo', cancelLabel: 'Cancelar' }
+                      );
+                      if (ok) partyRest('long');
+                    }}
+                    className="w-full px-2.5 py-2 rounded-md text-left hover:bg-indigo-500/15 border border-indigo-400/25 flex items-center gap-2 cursor-pointer transition"
+                  >
+                    <Moon className="w-4 h-4 text-indigo-300 shrink-0" />
+                    <div className="leading-tight">
+                      <div className="text-xs font-display font-bold text-indigo-200">
+                        Descanso Longo
+                      </div>
+                      <div className="text-[10px] opacity-75">
+                        100% PV/MP + todas as cargas + zera fadiga
+                      </div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* GM Quick Undo (Ctrl+Z) */}
           {role === 'gm' && (
             <button
@@ -351,8 +508,13 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ activeModal, setActiveModa
             />
             {role === 'gm' && (
               <button
-                onClick={() => {
-                  if (window.confirm('Restaurar esta campanha para o pacote inicial padrão?')) {
+                onClick={async () => {
+                  if (
+                    await openConfirmDialog(
+                      'Restaurar esta campanha para o pacote inicial padrão?',
+                      'Restaurar Campanha'
+                    )
+                  ) {
                     resetCampaign();
                   }
                 }}

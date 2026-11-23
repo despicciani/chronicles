@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
 import {
+  ArrowDownCircle,
   ArrowUpCircle,
   Backpack,
   BookOpen,
@@ -26,6 +27,7 @@ import {
 } from 'lucide-react';
 import { triggerHeroJsonDownload, useCampaign } from '../context/CampaignContext';
 import {
+  ATTACK_RANGE_OPTIONS,
   computeCharacterStats,
   DAMAGE_TYPE_OPTIONS,
   EQUIP_SLOT_LABELS,
@@ -33,6 +35,9 @@ import {
   extractItemDefenseBonus,
   formatFormulaForDisplay,
   formatSigned,
+  getCampaignDamageTypes,
+  getCharacterCustomResourceState,
+  getNextLevelXp,
   parseHeroPayloadFromJson,
   PLAYER_COLOR_PALETTE,
   resolveItemEquipSlot,
@@ -51,6 +56,7 @@ import { EquipmentPaperdoll } from './EquipmentPaperdoll';
 import { FileUploadButton } from './FileUploadButton';
 import { FormulaBuilderInput } from './FormulaBuilderInput';
 import { OrnateFrame, SculptedHealthBar } from './OrnateFrame';
+import { openAlertDialog, openConfirmDialog, openTextPrompt } from './PromptDialog';
 import { TokenPortrait } from './TokenPortrait';
 
 interface CharacterSheetModalProps {
@@ -68,10 +74,12 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     updateCampaign,
     deleteCharacter,
     rollDeathSave,
+    setDeathSaveManual,
     assistDeathSave,
     gmResolveDeathSave,
     quickRollFormula,
     rollCharacterAction,
+    awardXp,
     sendRoll,
     grantCardReward,
     playCharacterTheme,
@@ -102,11 +110,17 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
   const [forgeDamageType, setForgeDamageType] = useState('Corte');
   const [forgeRange, setForgeRange] = useState('Corpo a Corpo (1,5m)');
   const [forgeCostMp, setForgeCostMp] = useState(2);
+  const [forgeActionType, setForgeActionType] = useState<CharacterCustomAbility['actionType']>('Padrão');
   const [forgeRarity, setForgeRarity] = useState<CardRarity>('raro');
   const [forgeDesc, setForgeDesc] = useState('');
+  const [forgeImageUrl, setForgeImageUrl] = useState('');
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [editingAbilityId, setEditingAbilityId] = useState<string | null>(null);
+  const [editingAttackId, setEditingAttackId] = useState<string | null>(null);
+  const campaignDamageTypes = getCampaignDamageTypes(campaign);
 
-  const handleCreateCharacter = () => {
-    const name = window.prompt('Nome do novo Personagem:', 'Novo Aventureiro');
+  const handleCreateCharacter = async () => {
+    const name = await openTextPrompt('Nome do novo Personagem:', 'Novo Aventureiro');
     if (!name) return;
     const defaultAttrs: Record<string, number> = {};
     campaign.compendium.attributes.forEach((a) => {
@@ -123,6 +137,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
       classId: campaign.compendium.classes[0]?.id || '',
       level: 1,
       attributes: defaultAttrs,
+      unspentAttributePoints: campaign.settings.attributePointBudget ?? 15,
       trainedSkillIds: [],
       hp: 12,
       tempHp: 0,
@@ -196,15 +211,33 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     }));
   };
 
+  const ASI_LEVELS = [4, 8, 12, 16, 19];
+
+  const getAvailableAttributePoints = (c: Character): number => {
+    if (typeof c.unspentAttributePoints === 'number') {
+      return Math.max(0, c.unspentAttributePoints);
+    }
+    const budget = campaign.settings.attributePointBudget ?? 15;
+    const spent = campaign.compendium.attributes.reduce(
+      (sum, a) => sum + Math.max(0, (c.attributes[a.id] ?? 10) - 10),
+      0
+    );
+    return Math.max(0, budget - spent);
+  };
+
+  const availableAttrPoints = getAvailableAttributePoints(character);
+
   const handleLevelUp = () => {
     const nextLevel = Math.min(20, character.level + 1);
     const unlockedFeatures =
       charClass?.levelFeatures.filter((f) => f.level === nextLevel) || [];
     const newAbilities = unlockedFeatures.flatMap((f) => f.abilityIds || []);
+    const gainedAsi = ASI_LEVELS.includes(nextLevel) ? 2 : 0;
 
     const nextCharDraft: Character = {
       ...character,
       level: nextLevel,
+      unspentAttributePoints: getAvailableAttributePoints(character) + gainedAsi,
       knownAbilityIds: Array.from(new Set([...character.knownAbilityIds, ...newAbilities])),
     };
     const nextStats = computeCharacterStats(nextCharDraft, campaign);
@@ -216,11 +249,30 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     }));
 
     const featureNames = unlockedFeatures.map((f) => f.featureName).join(', ');
-    window.alert(
+    openAlertDialog(
       `${character.name} subiu para o Nível ${nextLevel}!\nPV Máx: ${nextStats.maxHp} | ${campaign.settings.resourceShort} Máx: ${nextStats.maxMp}${
-        featureNames ? `\nNovos Recursos: ${featureNames}` : ''
-      }`
+        gainedAsi > 0 ? `\n✨ +${gainedAsi} Pontos de Atributo (ASI D&D 5e) disponíveis para distribuir na Ficha!` : ''
+      }${featureNames ? `\nNovos Recursos: ${featureNames}` : ''}`,
+      'Level Up!'
     );
+  };
+
+  const handleLevelDown = () => {
+    if (character.level <= 1) return;
+    const lostAsi = ASI_LEVELS.includes(character.level) ? 2 : 0;
+    const prevLevel = Math.max(1, character.level - 1);
+    const nextCharDraft: Character = {
+      ...character,
+      level: prevLevel,
+      unspentAttributePoints: Math.max(0, getAvailableAttributePoints(character) - lostAsi),
+    };
+    const nextStats = computeCharacterStats(nextCharDraft, campaign);
+
+    updateChar(() => ({
+      ...nextCharDraft,
+      hp: Math.min(character.hp, nextStats.maxHp),
+      mp: Math.min(character.mp, nextStats.maxMp),
+    }));
   };
 
   const handleShortRest = () => {
@@ -241,12 +293,46 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
       }
     });
 
-    updateChar((c) => ({
-      ...c,
-      hp: nextHp,
-      mp: nextMp,
-      abilityUsesRemaining: resetUses,
-      deathSaves: { successes: 0, failures: 0 },
+    updateCampaign((prev) => ({
+      ...prev,
+      characters: prev.characters.map((c) =>
+        c.id !== character.id
+          ? c
+          : {
+              ...c,
+              hp: nextHp,
+              mp: nextMp,
+              abilityUsesRemaining: resetUses,
+              resourceTrackers: (c.resourceTrackers || []).map((tr) =>
+                tr.resetOn === 'short' ? { ...tr, current: tr.max } : tr
+              ),
+              customResourceValues: (() => {
+                const next = { ...(c.customResourceValues || {}) };
+                (prev.compendium.customResources || []).forEach((resDef) => {
+                  if (resDef.resetOn === 'short') {
+                    const st = getCharacterCustomResourceState(c, resDef);
+                    next[resDef.id] = { ...(next[resDef.id] || {}), current: st.max };
+                  }
+                });
+                return next;
+              })(),
+              deathSaves: { successes: 0, failures: 0 },
+            }
+      ),
+      maps: prev.maps.map((m) => ({
+        ...m,
+        tokens: m.tokens.map((t) =>
+          t.type === 'character' && t.referenceId === character.id
+            ? { ...t, hp: Math.min(t.maxHp, nextHp) }
+            : t
+        ),
+      })),
+      combat: {
+        ...prev.combat,
+        combatants: prev.combat.combatants.map((cb) =>
+          cb.referenceId === character.id ? { ...cb, hp: Math.min(cb.maxHp, nextHp) } : cb
+        ),
+      },
     }));
 
     quickRollFormula('Descanso Curto (Dado de Vida)', healFormula, character.name);
@@ -263,14 +349,60 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
         resetUses[aid] = ab.maxUsesPerRest;
       }
     });
-    updateChar((c) => ({
-      ...c,
-      hp: stats.maxHp,
-      mp: stats.maxMp,
-      tempHp: 0,
-      abilityUsesRemaining: resetUses,
-      activeConditionIds: c.activeConditionIds.filter((id) => id !== 'cond-exausto'),
-      deathSaves: { successes: 0, failures: 0 },
+    if (character.concentratingSpell) {
+      setCharacterConcentration(character.id, null);
+    }
+    updateCampaign((prev) => ({
+      ...prev,
+      characters: prev.characters.map((c) =>
+        c.id !== character.id
+          ? c
+          : {
+              ...c,
+              hp: stats.maxHp,
+              mp: stats.maxMp,
+              tempHp: 0,
+              abilityUsesRemaining: resetUses,
+              resourceTrackers: (c.resourceTrackers || []).map((tr) =>
+                tr.resetOn === 'short' || tr.resetOn === 'long' ? { ...tr, current: tr.max } : tr
+              ),
+              customResourceValues: (() => {
+                const next = { ...(c.customResourceValues || {}) };
+                (prev.compendium.customResources || []).forEach((resDef) => {
+                  if (resDef.resetOn === 'short' || resDef.resetOn === 'long') {
+                    const st = getCharacterCustomResourceState(c, resDef);
+                    next[resDef.id] = { ...(next[resDef.id] || {}), current: st.max };
+                  }
+                });
+                return next;
+              })(),
+              activeConditionIds: c.activeConditionIds.filter((id) => id !== 'cond-exausto'),
+              deathSaves: { successes: 0, failures: 0 },
+            }
+      ),
+      maps: prev.maps.map((m) => ({
+        ...m,
+        tokens: m.tokens.map((t) =>
+          t.type === 'character' && t.referenceId === character.id
+            ? {
+                ...t,
+                hp: stats.maxHp,
+                maxHp: stats.maxHp,
+                activeConditionIds: (t.activeConditionIds || []).filter(
+                  (id) => id !== 'cond-exausto'
+                ),
+              }
+            : t
+        ),
+      })),
+      combat: {
+        ...prev.combat,
+        combatants: prev.combat.combatants.map((cb) =>
+          cb.referenceId === character.id
+            ? { ...cb, hp: stats.maxHp, maxHp: stats.maxHp }
+            : cb
+        ),
+      },
     }));
   };
 
@@ -326,6 +458,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
         range: forgeRange.trim() || 'Corpo a Corpo',
         rarity: forgeRarity,
         notes: forgeDesc.trim(),
+        imageUrl: forgeImageUrl.trim() || undefined,
       };
       updateChar((c) => ({
         ...c,
@@ -343,14 +476,15 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
       const abil: CharacterCustomAbility = {
         id: `cabil-${Date.now()}`,
         name: forgeName.trim(),
-        actionType: 'Padrão',
-        costMp: forgeCostMp,
+        actionType: forgeActionType,
+        costMp: forgeActionType === 'Passiva' ? 0 : forgeCostMp,
         attackFormula: forgeAttack.trim() || undefined,
         damageFormula: forgeDamage.trim() || undefined,
         damageType: forgeDamageType.trim() || 'Arcano',
         range: forgeRange.trim() || '18m',
         rarity: forgeRarity,
         description: forgeDesc.trim() || 'Poder especial concedido pelo Mestre.',
+        imageUrl: forgeImageUrl.trim() || undefined,
       };
       updateChar((c) => ({
         ...c,
@@ -368,14 +502,27 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
 
     setForgeName('');
     setForgeDesc('');
+    setForgeImageUrl('');
   };
 
   const toggleCondition = (condId: string) => {
-    updateChar((c) => ({
-      ...c,
-      activeConditionIds: c.activeConditionIds.includes(condId)
-        ? c.activeConditionIds.filter((id) => id !== condId)
-        : [...c.activeConditionIds, condId],
+    const isRemoving = character.activeConditionIds.includes(condId);
+    const nextConds = isRemoving
+      ? character.activeConditionIds.filter((id) => id !== condId)
+      : [...character.activeConditionIds, condId];
+    updateCampaign((prev) => ({
+      ...prev,
+      characters: prev.characters.map((c) =>
+        c.id === character.id ? { ...c, activeConditionIds: nextConds } : c
+      ),
+      maps: prev.maps.map((m) => ({
+        ...m,
+        tokens: m.tokens.map((t) =>
+          t.type === 'character' && t.referenceId === character.id
+            ? { ...t, activeConditionIds: nextConds }
+            : t
+        ),
+      })),
     }));
   };
 
@@ -443,10 +590,11 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                       <UserPlus className="w-3.5 h-3.5" /> Novo
                     </button>
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         if (
-                          window.confirm(
-                            `Excluir permanentemente o personagem "${character.name}" da campanha?`
+                          await openConfirmDialog(
+                            `Excluir permanentemente o personagem "${character.name}" da campanha?`,
+                            'Excluir Personagem'
                           )
                         ) {
                           deleteCharacter(character.id);
@@ -548,12 +696,12 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                         const parsed = JSON.parse(String(reader.result));
                         const imported = parseHeroPayloadFromJson(parsed, campaign);
                         if (!imported) {
-                          window.alert('Arquivo de herói inválido.');
+                          openAlertDialog('Arquivo de herói inválido.');
                           return;
                         }
                         importSavedHeroIntoCampaign(imported);
                       } catch {
-                        window.alert('Erro ao ler arquivo JSON do personagem.');
+                        openAlertDialog('Erro ao ler arquivo JSON do personagem.');
                       }
                     };
                     reader.readAsText(file);
@@ -566,11 +714,36 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
             {role === 'gm' ? (
               <>
                 <button
+                  onClick={async () => {
+                    const raw = await openTextPrompt(`Dar XP para ${character.name} (Atual: ${character.xp ?? 0} XP):`, '150');
+                    const val = Number(raw);
+                    if (raw && Number.isFinite(val) && val !== 0) {
+                      awardXp([character.id], val);
+                    }
+                  }}
+                  className="rpg-card px-2.5 py-1.5 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer text-amber-300 hover:border-amber-400/70"
+                  title="Conceder XP (sobe de nível automaticamente ao atingir o limite)"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  +XP ({character.xp ?? 0}/{getNextLevelXp(character.level, campaign.settings.xpThresholds) ?? 'MAX'})
+                </button>
+                <button
                   onClick={handleLevelUp}
-                  className="rpg-card px-2.5 py-1.5 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer text-amber-400 hover:opacity-85"
+                  disabled={character.level >= 20}
+                  className="rpg-card px-2.5 py-1.5 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer text-amber-400 hover:opacity-85 disabled:opacity-35 disabled:cursor-not-allowed"
+                  title="Subir 1 nível"
                 >
                   <ArrowUpCircle className="w-4 h-4" />
                   Level Up
+                </button>
+                <button
+                  onClick={handleLevelDown}
+                  disabled={character.level <= 1}
+                  className="rpg-card px-2.5 py-1.5 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer text-rose-300 hover:opacity-85 disabled:opacity-35 disabled:cursor-not-allowed"
+                  title="Reduzir 1 nível"
+                >
+                  <ArrowDownCircle className="w-4 h-4" />
+                  Level Down
                 </button>
                 <button
                   disabled={character.hp <= 0}
@@ -676,19 +849,13 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                     <button
                       key={i}
                       disabled={role !== 'gm' && myCharacter?.id !== character.id}
-                      onClick={() =>
-                        updateChar((c) => {
-                          const nextSucc = i + 1 === (c.deathSaves?.successes || 0) ? i : i + 1;
-                          return {
-                            ...c,
-                            deathSaves: {
-                              ...c.deathSaves,
-                              successes: nextSucc,
-                              stabilized: nextSucc >= 3,
-                            },
-                          };
-                        })
-                      }
+                      onClick={() => {
+                        const nextSucc = i + 1 === (ds.successes || 0) ? i : i + 1;
+                        setDeathSaveManual(character.id, {
+                          successes: nextSucc,
+                          stabilized: nextSucc >= 3,
+                        });
+                      }}
                       className={`w-4 h-4 rounded-full border cursor-pointer disabled:cursor-default ${
                         i < (ds.successes || 0)
                           ? 'bg-emerald-400 border-emerald-200 shadow-[0_0_8px_#34d399]'
@@ -703,19 +870,13 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                     <button
                       key={i}
                       disabled={role !== 'gm' && myCharacter?.id !== character.id}
-                      onClick={() =>
-                        updateChar((c) => {
-                          const nextFail = i + 1 === (c.deathSaves?.failures || 0) ? i : i + 1;
-                          return {
-                            ...c,
-                            deathSaves: {
-                              ...c.deathSaves,
-                              failures: nextFail,
-                              dead: nextFail >= 3,
-                            },
-                          };
-                        })
-                      }
+                      onClick={() => {
+                        const nextFail = i + 1 === (ds.failures || 0) ? i : i + 1;
+                        setDeathSaveManual(character.id, {
+                          failures: nextFail,
+                          dead: nextFail >= 3,
+                        });
+                      }}
                       className={`w-4 h-4 rounded-full border cursor-pointer disabled:cursor-default ${
                         i < (ds.failures || 0)
                           ? 'bg-red-500 border-red-200 shadow-[0_0_8px_#ef4444]'
@@ -792,31 +953,36 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
           className="px-4 py-2 border-b flex items-center gap-1.5 overflow-x-auto shrink-0"
           style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'rgba(0,0,0,0.14)' }}
         >
-          <button
-            onClick={() => {
-              if (character.concentratingSpell) {
-                setCharacterConcentration(character.id, null);
-              } else {
-                const spell = window.prompt('Qual magia/efeito está mantendo em Concentração?', 'Bênção');
-                if (spell && spell.trim()) {
-                  setCharacterConcentration(character.id, spell.trim());
-                }
+          <div className="flex items-center gap-1 shrink-0">
+            <Sparkles className="w-3 h-3 text-sky-400 shrink-0" />
+            <select
+              value={character.concentratingSpell || ''}
+              onChange={(e) =>
+                setCharacterConcentration(character.id, e.target.value ? e.target.value : null)
               }
-            }}
-            title="Concentração D&D 5e: ao sofrer dano, exige teste de CON (CD = máx(10, metade do dano)). Clique para ativar ou encerrar."
-            className={`px-2 py-0.5 rounded-md text-[11px] font-display font-bold flex items-center gap-1 shrink-0 border transition cursor-pointer ${
-              character.concentratingSpell
-                ? 'border-sky-400/80 bg-sky-950/60 text-sky-200'
-                : 'border-white/15 bg-black/25 text-slate-300 hover:border-sky-400/50'
-            }`}
-          >
-            <Sparkles className="w-3 h-3 text-sky-400" />
-            <span>
-              {character.concentratingSpell
-                ? `Conc: ${character.concentratingSpell} ×`
-                : '+ Concentração'}
-            </span>
-          </button>
+              title="Concentração D&D 5e: selecione uma magia/habilidade da ficha para manter em concentração"
+              className={`px-2 py-0.5 rounded-md text-[11px] font-display font-bold border transition cursor-pointer bg-[#0c0e16] ${
+                character.concentratingSpell
+                  ? 'border-sky-400/80 text-sky-200'
+                  : 'border-white/15 text-slate-300 hover:border-sky-400/50'
+              }`}
+            >
+              <option value="">Sem Concentração</option>
+              {Array.from(
+                new Set([
+                  ...(character.knownAbilityIds || [])
+                    .map((id) => campaign.compendium.abilities.find((a) => a.id === id)?.name)
+                    .filter((n): n is string => Boolean(n)),
+                  ...(character.customAbilities || []).map((a) => a.name),
+                  ...(character.concentratingSpell ? [character.concentratingSpell] : []),
+                ])
+              ).map((spName) => (
+                <option key={spName} value={spName}>
+                  Conc: {spName}
+                </option>
+              ))}
+            </select>
+          </div>
 
           <span className="h-3.5 w-px bg-white/15 mx-0.5 shrink-0" />
 
@@ -991,6 +1157,92 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   </div>
                 </div>
 
+                {/* Custom Resource Bars (Estamina, Ki, Sanidade, etc.) */}
+                {(campaign.compendium.customResources || []).length > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {(campaign.compendium.customResources || []).map((res) => {
+                      const st = getCharacterCustomResourceState(character, res);
+                      const pct = Math.max(0, Math.min(100, (st.current / Math.max(1, st.max)) * 100));
+                      const setResVal = (nextCur: number, nextMaxOverride?: number) =>
+                        updateChar((c) => ({
+                          ...c,
+                          customResourceValues: {
+                            ...(c.customResourceValues || {}),
+                            [res.id]: {
+                              ...(c.customResourceValues?.[res.id] || {}),
+                              current: Math.max(0, Math.min(nextMaxOverride ?? st.max, nextCur)),
+                              ...(nextMaxOverride !== undefined ? { maxOverride: nextMaxOverride } : {}),
+                            },
+                          },
+                        }));
+                      return (
+                        <div key={res.id} className="rpg-card rounded-lg p-2.5 space-y-1.5">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-display font-bold" style={{ color: res.color }}>
+                              {res.name} ({res.shortName})
+                            </span>
+                            <span className="font-mono-dice text-[11px] font-bold">
+                              {st.current} / {st.max}
+                            </span>
+                          </div>
+                          <div className="w-full h-2.5 rounded-full bg-black/70 border border-white/10 overflow-hidden">
+                            <div
+                              className="h-full transition-all duration-300"
+                              style={{ width: `${pct}%`, backgroundColor: res.color }}
+                            />
+                          </div>
+                          <div className="flex items-center justify-between gap-1 text-[10px]">
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setResVal(st.current - 5)}
+                                className="rpg-card px-1.5 py-0.5 rounded cursor-pointer"
+                              >
+                                -5
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setResVal(st.current - 1)}
+                                className="rpg-card px-1.5 py-0.5 rounded cursor-pointer"
+                              >
+                                -1
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setResVal(st.current + 1)}
+                                className="rpg-card px-1.5 py-0.5 rounded cursor-pointer"
+                              >
+                                +1
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setResVal(st.current + 5)}
+                                className="rpg-card px-1.5 py-0.5 rounded cursor-pointer"
+                              >
+                                +5
+                              </button>
+                            </div>
+                            {role === 'gm' && (
+                              <div className="flex items-center gap-1">
+                                <span className="opacity-65">Máx:</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={st.max}
+                                  onChange={(e) =>
+                                    setResVal(st.current, Math.max(1, Number(e.target.value) || 1))
+                                  }
+                                  className="rpg-input w-12 py-0 px-1 text-center font-mono-dice text-[10px]"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
                 {/* Defense, Initiative, Speed, Passive Perception */}
                 <div className="grid grid-cols-4 gap-2 text-center">
                   <div className="rpg-card rounded-xl p-2.5 cursor-help" title={stats.defenseBreakdown.join('\n')}>
@@ -1032,11 +1284,56 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
 
                 {/* Octagonal Bronze & Obsidian Attribute Medallions */}
                 <div className="rpg-card rounded-lg p-3">
-                  <h3 className="font-display font-bold text-sm mb-2.5 flex items-center justify-between">
+                  <h3 className="font-display font-bold text-sm mb-2.5 flex flex-wrap items-center justify-between gap-2">
                     <span>Atributos (Clique para testar)</span>
-                    <span className="text-xs font-mono-dice" style={{ color: 'var(--accent-primary)' }}>
-                      Prof: +{stats.proficiencyBonus}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {(availableAttrPoints > 0 || role === 'gm') && (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-display font-bold border ${
+                            availableAttrPoints > 0
+                              ? 'bg-amber-500/20 border-amber-400/70 text-amber-200 shadow-[0_0_12px_rgba(245,158,11,0.28)]'
+                              : 'bg-black/40 border-white/15 text-slate-300'
+                          }`}
+                          title="Pontos de atributo salvos disponíveis para distribuir"
+                        >
+                          <Sparkles className="w-3 h-3 text-amber-300" />
+                          <span>Pontos disponíveis: {availableAttrPoints}</span>
+                          {role === 'gm' && (
+                            <span className="inline-flex items-center gap-0.5 ml-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    unspentAttributePoints: Math.max(0, getAvailableAttributePoints(c) - 1),
+                                  }))
+                                }
+                                className="px-1 rounded bg-black/50 hover:bg-black/80 text-amber-200 cursor-pointer"
+                                title="Remover 1 ponto disponível"
+                              >
+                                -
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    unspentAttributePoints: getAvailableAttributePoints(c) + 1,
+                                  }))
+                                }
+                                className="px-1 rounded bg-black/50 hover:bg-black/80 text-amber-200 cursor-pointer"
+                                title="Conceder +1 ponto disponível"
+                              >
+                                +
+                              </button>
+                            </span>
+                          )}
+                        </span>
+                      )}
+                      <span className="text-xs font-mono-dice" style={{ color: 'var(--accent-primary)' }}>
+                        Prof: +{stats.proficiencyBonus}
+                      </span>
+                    </div>
                   </h3>
                   <div className="grid grid-cols-3 gap-2.5">
                     {campaign.compendium.attributes.map((attr) => {
@@ -1099,11 +1396,39 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                               />
                             </div>
                           ) : (
-                            <div
-                              className="relative z-10 text-[10px] font-display font-bold px-2 py-0.5 rounded-xs bg-black/55 border border-amber-500/30 inline-block mt-0.5"
-                              style={{ color: 'var(--text-secondary)' }}
-                            >
-                              Valor {comp.value}
+                            <div className="relative z-10 flex items-center justify-center gap-1 mt-0.5">
+                              <div
+                                className="text-[10px] font-display font-bold px-2 py-0.5 rounded-xs bg-black/55 border border-amber-500/30 inline-block"
+                                style={{ color: 'var(--text-secondary)' }}
+                              >
+                                Valor {comp.value}
+                              </div>
+                              {availableAttrPoints > 0 &&
+                                myCharacter?.id === character.id &&
+                                comp.value < 20 && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updateChar((c) => {
+                                        const pts = getAvailableAttributePoints(c);
+                                        if (pts <= 0) return c;
+                                        const curBase = c.attributes[attr.id] ?? 10;
+                                        return {
+                                          ...c,
+                                          unspentAttributePoints: pts - 1,
+                                          attributes: {
+                                            ...c.attributes,
+                                            [attr.id]: curBase + 1,
+                                          },
+                                        };
+                                      })
+                                    }
+                                    className="px-1.5 py-0.5 rounded bg-amber-500/90 hover:bg-amber-400 text-[#140e04] font-display font-black text-[10px] cursor-pointer shadow"
+                                    title={`Gastar 1 ponto de atributo em ${attr.name} (Restantes: ${availableAttrPoints})`}
+                                  >
+                                    +1
+                                  </button>
+                                )}
                             </div>
                           )}
                         </div>
@@ -1257,13 +1582,18 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                       />
                     </div>
                     <div>
-                      <label className="block mb-1">Tipo</label>
-                      <input
+                      <label className="block mb-1">Tipo de Dano</label>
+                      <select
                         value={forgeDamageType}
                         onChange={(e) => setForgeDamageType(e.target.value)}
-                        placeholder="Fogo, Corte, Cura"
                         className="rpg-input w-full"
-                      />
+                      >
+                        {campaignDamageTypes.map((dt) => (
+                          <option key={dt} value={dt}>
+                            {dt}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                     <div>
                       <label className="block mb-1">Raridade</label>
@@ -1282,25 +1612,62 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
 
                   <div className="grid grid-cols-1 sm:grid-cols-6 gap-2.5 items-end">
                     {forgeMode === 'ability' && (
-                      <div>
-                        <label className="block mb-1">Custo ({campaign.settings.resourceShort})</label>
-                        <input
-                          type="number"
-                          value={forgeCostMp}
-                          onChange={(e) => setForgeCostMp(Number(e.target.value))}
-                          className="rpg-input w-full"
-                        />
-                      </div>
+                      <>
+                        <div>
+                          <label className="block mb-1">Tipo de Ação</label>
+                          <select
+                            value={forgeActionType}
+                            onChange={(e) =>
+                              setForgeActionType(
+                                e.target.value as CharacterCustomAbility['actionType']
+                              )
+                            }
+                            className="rpg-input w-full"
+                          >
+                            <option value="Padrão">Padrão</option>
+                            <option value="Bônus">Bônus</option>
+                            <option value="Reação">Reação</option>
+                            <option value="Movimento">Movimento</option>
+                            <option value="Livre">Livre</option>
+                            <option value="Passiva">Passiva</option>
+                          </select>
+                        </div>
+                        {forgeActionType !== 'Passiva' && (
+                          <div>
+                            <label className="block mb-1">Custo ({campaign.settings.resourceShort})</label>
+                            <input
+                              type="number"
+                              value={forgeCostMp}
+                              onChange={(e) => setForgeCostMp(Number(e.target.value))}
+                              className="rpg-input w-full"
+                            />
+                          </div>
+                        )}
+                      </>
                     )}
                     <div>
                       <label className="block mb-1">Alcance</label>
-                      <input
+                      <select
                         value={forgeRange}
                         onChange={(e) => setForgeRange(e.target.value)}
                         className="rpg-input w-full"
-                      />
+                      >
+                        {ATTACK_RANGE_OPTIONS.map((rng) => (
+                          <option key={rng} value={rng}>
+                            {rng}
+                          </option>
+                        ))}
+                      </select>
                     </div>
-                    <div className={forgeMode === 'ability' ? 'sm:col-span-3' : 'sm:col-span-4'}>
+                    <div
+                      className={
+                        forgeMode === 'ability'
+                          ? forgeActionType === 'Passiva'
+                            ? 'sm:col-span-3'
+                            : 'sm:col-span-2'
+                          : 'sm:col-span-4'
+                      }
+                    >
                       <label className="block mb-1">Descrição / Efeito Especial</label>
                       <input
                         value={forgeDesc}
@@ -1315,6 +1682,32 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                     >
                       ✨ Forjar &amp; Entregar
                     </button>
+                  </div>
+
+                  {/* Optional Artwork Upload for Attack/Ability Card */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <FileUploadButton
+                      label={forgeImageUrl ? 'Trocar Imagem da Carta' : 'Subir Imagem da Carta (Opcional)'}
+                      accept="image/*"
+                      className="rpg-card px-2.5 py-1 rounded text-[11px]"
+                      onUploaded={(url) => setForgeImageUrl(url)}
+                    />
+                    {forgeImageUrl && (
+                      <>
+                        <img
+                          src={resolveAssetUrl(forgeImageUrl)}
+                          alt="Prévia da carta"
+                          className="w-8 h-8 rounded object-cover border border-amber-400/50"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setForgeImageUrl('')}
+                          className="text-[11px] text-red-400 underline cursor-pointer"
+                        >
+                          Remover
+                        </button>
+                      </>
+                    )}
                   </div>
                 </form>
               )}
@@ -1340,6 +1733,15 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                       className={`rpg-card rpg-magic-card rarity-${atk.rarity} rounded-xl p-3.5 flex flex-col justify-between gap-2.5`}
                     >
                       <div>
+                        {atk.imageUrl && (
+                          <div className="mb-2.5 rounded-lg overflow-hidden border border-white/10 h-28 bg-black/40">
+                            <img
+                              src={resolveAssetUrl(atk.imageUrl)}
+                              alt={atk.name}
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                        )}
                         <div className="flex items-start justify-between gap-2">
                           <div>
                             <div className="text-[10px] uppercase tracking-widest opacity-70">
@@ -1350,17 +1752,41 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                             </h4>
                           </div>
                           {role === 'gm' && (
-                            <button
-                              onClick={() =>
-                                updateChar((c) => ({
-                                  ...c,
-                                  customAttacks: c.customAttacks.filter((x) => x.id !== atk.id),
-                                }))
-                              }
-                              className="text-red-400 opacity-70 hover:opacity-100 cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setEditingAttackId((curr) => (curr === atk.id ? null : atk.id))
+                                }
+                                className="rpg-card px-1.5 py-0.5 rounded text-[10px] text-amber-200 cursor-pointer"
+                              >
+                                {editingAttackId === atk.id ? 'Fechar' : 'Editar'}
+                              </button>
+                              <FileUploadButton
+                                label={atk.imageUrl ? 'Foto' : '+ Foto'}
+                                accept="image/*"
+                                className="rpg-card px-1.5 py-0.5 rounded text-[10px]"
+                                onUploaded={(url) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAttacks: c.customAttacks.map((x) =>
+                                      x.id === atk.id ? { ...x, imageUrl: url } : x
+                                    ),
+                                  }))
+                                }
+                              />
+                              <button
+                                onClick={() =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAttacks: c.customAttacks.filter((x) => x.id !== atk.id),
+                                  }))
+                                }
+                                className="text-red-400 opacity-70 hover:opacity-100 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           )}
                         </div>
                         <div className="mt-2 text-xs font-mono-dice space-y-0.5" style={{ color: 'var(--text-secondary)' }}>
@@ -1372,6 +1798,90 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                           <p className="text-[11px] mt-1.5" style={{ color: 'var(--text-muted)' }}>
                             {atk.notes}
                           </p>
+                        )}
+                        {role === 'gm' && editingAttackId === atk.id && (
+                          <div className="mt-2.5 pt-2 border-t border-white/10 space-y-1.5 text-[11px]">
+                            <input
+                              maxLength={32}
+                              value={atk.name}
+                              onChange={(e) =>
+                                updateChar((c) => ({
+                                  ...c,
+                                  customAttacks: c.customAttacks.map((x) =>
+                                    x.id === atk.id ? { ...x, name: e.target.value } : x
+                                  ),
+                                }))
+                              }
+                              className="rpg-input w-full py-1"
+                              placeholder="Nome do ataque"
+                            />
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <input
+                                value={atk.attackBonusFormula}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAttacks: c.customAttacks.map((x) =>
+                                      x.id === atk.id ? { ...x, attackBonusFormula: e.target.value } : x
+                                    ),
+                                  }))
+                                }
+                                className="rpg-input w-full py-1 font-mono-dice"
+                                placeholder="Acerto"
+                              />
+                              <input
+                                value={atk.damageFormula}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAttacks: c.customAttacks.map((x) =>
+                                      x.id === atk.id ? { ...x, damageFormula: e.target.value } : x
+                                    ),
+                                  }))
+                                }
+                                className="rpg-input w-full py-1 font-mono-dice"
+                                placeholder="Dano"
+                              />
+                            </div>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <select
+                                value={atk.damageType}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAttacks: c.customAttacks.map((x) =>
+                                      x.id === atk.id ? { ...x, damageType: e.target.value } : x
+                                    ),
+                                  }))
+                                }
+                                className="rpg-input w-full py-1"
+                              >
+                                {campaignDamageTypes.map((dt) => (
+                                  <option key={dt} value={dt}>
+                                    {dt}
+                                  </option>
+                                ))}
+                              </select>
+                              <select
+                                value={atk.range}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAttacks: c.customAttacks.map((x) =>
+                                      x.id === atk.id ? { ...x, range: e.target.value } : x
+                                    ),
+                                  }))
+                                }
+                                className="rpg-input w-full py-1"
+                              >
+                                {ATTACK_RANGE_OPTIONS.map((rng) => (
+                                  <option key={rng} value={rng}>
+                                    {rng}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
                         )}
                       </div>
 
@@ -1478,6 +1988,15 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                       className={`rpg-card rpg-magic-card rarity-${ab.rarity} rounded-xl p-3.5 flex flex-col justify-between gap-2.5`}
                     >
                       <div>
+                        {ab.imageUrl && (
+                          <div className="mb-2.5 rounded-lg overflow-hidden border border-white/10 h-28 bg-black/40">
+                            <img
+                              src={resolveAssetUrl(ab.imageUrl)}
+                              alt={ab.name}
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                        )}
                         <div className="flex items-start justify-between gap-2">
                           <div>
                             <div className="text-[10px] uppercase tracking-widest opacity-70">
@@ -1492,17 +2011,41 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                               </span>
                             )}
                             {role === 'gm' && (
-                              <button
-                                onClick={() =>
-                                  updateChar((c) => ({
-                                    ...c,
-                                    customAbilities: c.customAbilities.filter((x) => x.id !== ab.id),
-                                  }))
-                                }
-                                className="text-red-400 opacity-70 hover:opacity-100 cursor-pointer"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setEditingAbilityId((curr) => (curr === ab.id ? null : ab.id))
+                                  }
+                                  className="rpg-card px-1.5 py-0.5 rounded text-[10px] text-amber-200 cursor-pointer"
+                                >
+                                  {editingAbilityId === ab.id ? 'Fechar' : 'Editar'}
+                                </button>
+                                <FileUploadButton
+                                  label={ab.imageUrl ? 'Foto' : '+ Foto'}
+                                  accept="image/*"
+                                  className="rpg-card px-1.5 py-0.5 rounded text-[10px]"
+                                  onUploaded={(url) =>
+                                    updateChar((c) => ({
+                                      ...c,
+                                      customAbilities: c.customAbilities.map((x) =>
+                                        x.id === ab.id ? { ...x, imageUrl: url } : x
+                                      ),
+                                    }))
+                                  }
+                                />
+                                <button
+                                  onClick={() =>
+                                    updateChar((c) => ({
+                                      ...c,
+                                      customAbilities: c.customAbilities.filter((x) => x.id !== ab.id),
+                                    }))
+                                  }
+                                  className="text-red-400 opacity-70 hover:opacity-100 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </>
                             )}
                           </div>
                         </div>
@@ -1512,6 +2055,130 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                         {ab.damageFormula && (
                           <div className="text-[11px] mt-1.5 font-mono-dice text-amber-300">
                             Efeito: {formatFormulaForDisplay(ab.damageFormula, stats, character)} ({ab.damageType})
+                          </div>
+                        )}
+                        {role === 'gm' && editingAbilityId === ab.id && (
+                          <div className="mt-2.5 pt-2 border-t border-white/10 space-y-1.5 text-[11px]">
+                            <input
+                              maxLength={32}
+                              value={ab.name}
+                              onChange={(e) =>
+                                updateChar((c) => ({
+                                  ...c,
+                                  customAbilities: c.customAbilities.map((x) =>
+                                    x.id === ab.id ? { ...x, name: e.target.value } : x
+                                  ),
+                                }))
+                              }
+                              className="rpg-input w-full py-1"
+                              placeholder="Nome da habilidade"
+                            />
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <select
+                                value={ab.actionType}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAbilities: c.customAbilities.map((x) =>
+                                      x.id === ab.id
+                                        ? {
+                                            ...x,
+                                            actionType: e.target
+                                              .value as CharacterCustomAbility['actionType'],
+                                          }
+                                        : x
+                                    ),
+                                  }))
+                                }
+                                className="rpg-input w-full py-1"
+                              >
+                                <option value="Padrão">Padrão</option>
+                                <option value="Bônus">Bônus</option>
+                                <option value="Reação">Reação</option>
+                                <option value="Movimento">Movimento</option>
+                                <option value="Livre">Livre</option>
+                                <option value="Passiva">Passiva</option>
+                              </select>
+                              <input
+                                type="number"
+                                min={0}
+                                value={ab.costMp}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAbilities: c.customAbilities.map((x) =>
+                                      x.id === ab.id ? { ...x, costMp: Math.max(0, Number(e.target.value) || 0) } : x
+                                    ),
+                                  }))
+                                }
+                                className="rpg-input w-full py-1 text-center"
+                                title="Custo de PM"
+                              />
+                            </div>
+                            <input
+                              value={ab.damageFormula || ''}
+                              onChange={(e) =>
+                                updateChar((c) => ({
+                                  ...c,
+                                  customAbilities: c.customAbilities.map((x) =>
+                                    x.id === ab.id ? { ...x, damageFormula: e.target.value } : x
+                                  ),
+                                }))
+                              }
+                              className="rpg-input w-full py-1 font-mono-dice"
+                              placeholder="Fórmula dano/cura"
+                            />
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <select
+                                value={ab.damageType || campaignDamageTypes[0]}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAbilities: c.customAbilities.map((x) =>
+                                      x.id === ab.id ? { ...x, damageType: e.target.value } : x
+                                    ),
+                                  }))
+                                }
+                                className="rpg-input w-full py-1"
+                              >
+                                {campaignDamageTypes.map((dt) => (
+                                  <option key={dt} value={dt}>
+                                    {dt}
+                                  </option>
+                                ))}
+                              </select>
+                              <select
+                                value={ab.range}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAbilities: c.customAbilities.map((x) =>
+                                      x.id === ab.id ? { ...x, range: e.target.value } : x
+                                    ),
+                                  }))
+                                }
+                                className="rpg-input w-full py-1"
+                              >
+                                {ATTACK_RANGE_OPTIONS.map((rng) => (
+                                  <option key={rng} value={rng}>
+                                    {rng}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <textarea
+                              rows={2}
+                              value={ab.description}
+                              onChange={(e) =>
+                                updateChar((c) => ({
+                                  ...c,
+                                  customAbilities: c.customAbilities.map((x) =>
+                                    x.id === ab.id ? { ...x, description: e.target.value } : x
+                                  ),
+                                }))
+                              }
+                              className="rpg-input w-full py-1"
+                            />
                           </div>
                         )}
                       </div>
@@ -1616,10 +2283,15 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                                 saveSkillId: ab.saveSkillId,
                                 saveDcFormula: ab.saveDcFormula,
                                 costMp: ab.costMp,
+                                costResourceId: ab.costResourceId,
                                 applyConditionId: ab.applyConditionId,
                                 conditionDurationRounds: ab.conditionDurationRounds,
+                                aoeShape: ab.aoeShape,
+                                aoeSizeMeters: ab.aoeSizeMeters,
+                                aoeColor: ab.aoeColor,
+                                aoePersistent: ab.aoePersistent,
                               });
-                              if ((ab.attackFormula || (ab.damageFormula && ab.damageType?.toLowerCase() !== 'cura')) && !ab.applyConditionId) {
+                              if (ab.aoeShape || ab.attackFormula || ab.damageFormula) {
                                 onClose();
                               }
                             }}
@@ -1719,8 +2391,17 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   if (!item) return null;
                   const itemSlot = inv.equippedSlot || resolveItemEquipSlot(item);
                   return (
-                    <div key={inv.id} className="rpg-card rounded-xl p-3 flex items-start justify-between gap-3">
-                      <div className="min-w-0">
+                    <div key={inv.id} className="rpg-card rounded-xl p-3 space-y-2.5">
+                      <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex items-start gap-2.5">
+                        {item.imageUrl && (
+                          <img
+                            src={resolveAssetUrl(item.imageUrl)}
+                            alt={item.name}
+                            className="w-11 h-11 rounded-md object-cover border border-amber-400/45 shrink-0"
+                          />
+                        )}
+                        <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <span className="font-bold text-sm truncate">{item.name}</span>
                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/25">
@@ -1747,13 +2428,29 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                         <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
                           {item.description}
                         </p>
+                        {inv.customNotes && (
+                          <p className="text-[11px] mt-1 italic text-amber-200/80">
+                            Nota: {inv.customNotes}
+                          </p>
+                        )}
                         <div className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>
                           Peso: {item.weight}kg • Valor: {item.valueGold} PO
+                        </div>
                         </div>
                       </div>
 
                       <div className="flex flex-col items-end gap-1.5 shrink-0">
                         <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEditingItemId((curr) => (curr === inv.id ? null : inv.id))
+                            }
+                            className="rpg-card px-2 py-0.5 rounded text-[10px] font-display font-bold text-amber-200 hover:border-amber-400/60 cursor-pointer"
+                            title="Editar item / notas"
+                          >
+                            {editingItemId === inv.id ? 'Fechar' : 'Editar'}
+                          </button>
                           {role === 'gm' ? (
                             <>
                               <input
@@ -1825,6 +2522,179 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                           </button>
                         )}
                       </div>
+                      </div>
+
+                      {editingItemId === inv.id && (
+                        <div className="pt-2.5 border-t border-white/10 space-y-2 text-[11px]">
+                          {role === 'gm' && (
+                            <>
+                              <div className="grid grid-cols-2 gap-2">
+                                <label className="block">
+                                  <span className="opacity-70 block mb-0.5">Nome do Item</span>
+                                  <input
+                                    maxLength={40}
+                                    value={item.name}
+                                    onChange={(e) =>
+                                      updateCampaign((prev) => ({
+                                        ...prev,
+                                        compendium: {
+                                          ...prev.compendium,
+                                          items: prev.compendium.items.map((it) =>
+                                            it.id === item.id ? { ...it, name: e.target.value } : it
+                                          ),
+                                        },
+                                      }))
+                                    }
+                                    className="rpg-input w-full py-1"
+                                  />
+                                </label>
+                                <label className="block">
+                                  <span className="opacity-70 block mb-0.5">Dano / Efeito</span>
+                                  <input
+                                    value={item.damageFormula || ''}
+                                    onChange={(e) =>
+                                      updateCampaign((prev) => ({
+                                        ...prev,
+                                        compendium: {
+                                          ...prev.compendium,
+                                          items: prev.compendium.items.map((it) =>
+                                            it.id === item.id
+                                              ? { ...it, damageFormula: e.target.value }
+                                              : it
+                                          ),
+                                        },
+                                      }))
+                                    }
+                                    placeholder="Ex: 1d8 + @for"
+                                    className="rpg-input w-full py-1 font-mono-dice"
+                                  />
+                                </label>
+                              </div>
+                              <div className="grid grid-cols-3 gap-2">
+                                <label className="block">
+                                  <span className="opacity-70 block mb-0.5">Bônus CA</span>
+                                  <input
+                                    type="number"
+                                    value={item.defenseBonus ?? 0}
+                                    onChange={(e) =>
+                                      updateCampaign((prev) => ({
+                                        ...prev,
+                                        compendium: {
+                                          ...prev.compendium,
+                                          items: prev.compendium.items.map((it) =>
+                                            it.id === item.id
+                                              ? { ...it, defenseBonus: Number(e.target.value) || 0 }
+                                              : it
+                                          ),
+                                        },
+                                      }))
+                                    }
+                                    className="rpg-input w-full py-1 text-center"
+                                  />
+                                </label>
+                                <label className="block">
+                                  <span className="opacity-70 block mb-0.5">Peso (kg)</span>
+                                  <input
+                                    type="number"
+                                    step={0.1}
+                                    min={0}
+                                    value={item.weight}
+                                    onChange={(e) =>
+                                      updateCampaign((prev) => ({
+                                        ...prev,
+                                        compendium: {
+                                          ...prev.compendium,
+                                          items: prev.compendium.items.map((it) =>
+                                            it.id === item.id
+                                              ? { ...it, weight: Math.max(0, Number(e.target.value) || 0) }
+                                              : it
+                                          ),
+                                        },
+                                      }))
+                                    }
+                                    className="rpg-input w-full py-1 text-center"
+                                  />
+                                </label>
+                                <label className="block">
+                                  <span className="opacity-70 block mb-0.5">Valor (PO)</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={item.valueGold}
+                                    onChange={(e) =>
+                                      updateCampaign((prev) => ({
+                                        ...prev,
+                                        compendium: {
+                                          ...prev.compendium,
+                                          items: prev.compendium.items.map((it) =>
+                                            it.id === item.id
+                                              ? { ...it, valueGold: Math.max(0, Number(e.target.value) || 0) }
+                                              : it
+                                          ),
+                                        },
+                                      }))
+                                    }
+                                    className="rpg-input w-full py-1 text-center"
+                                  />
+                                </label>
+                              </div>
+                              <label className="block">
+                                <span className="opacity-70 block mb-0.5">Descrição do Item</span>
+                                <textarea
+                                  rows={2}
+                                  value={item.description}
+                                  onChange={(e) =>
+                                    updateCampaign((prev) => ({
+                                      ...prev,
+                                      compendium: {
+                                        ...prev.compendium,
+                                        items: prev.compendium.items.map((it) =>
+                                          it.id === item.id ? { ...it, description: e.target.value } : it
+                                        ),
+                                      },
+                                    }))
+                                  }
+                                  className="rpg-input w-full py-1"
+                                />
+                              </label>
+                              <div className="flex items-center gap-2 pt-0.5">
+                                <FileUploadButton
+                                  label={item.imageUrl ? 'Trocar Imagem do Item' : 'Subir Imagem do Item'}
+                                  accept="image/*"
+                                  className="rpg-card px-2 py-1 rounded text-[10px]"
+                                  onUploaded={(url) =>
+                                    updateCampaign((prev) => ({
+                                      ...prev,
+                                      compendium: {
+                                        ...prev.compendium,
+                                        items: prev.compendium.items.map((it) =>
+                                          it.id === item.id ? { ...it, imageUrl: url } : it
+                                        ),
+                                      },
+                                    }))
+                                  }
+                                />
+                              </div>
+                            </>
+                          )}
+                          <label className="block">
+                            <span className="opacity-70 block mb-0.5">Anotações Pessoais deste Item</span>
+                            <input
+                              value={inv.customNotes || ''}
+                              onChange={(e) =>
+                                updateChar((c) => ({
+                                  ...c,
+                                  inventory: c.inventory.map((x) =>
+                                    x.id === inv.id ? { ...x, customNotes: e.target.value } : x
+                                  ),
+                                }))
+                              }
+                              placeholder="Ex: Presente do ferreiro, 2 cargas restantes..."
+                              className="rpg-input w-full py-1"
+                            />
+                          </label>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1875,8 +2745,33 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                     <label className="block mb-1">Nome do Personagem</label>
                     <input
                       type="text"
+                      maxLength={28}
                       value={character.name}
-                      onChange={(e) => updateChar((c) => ({ ...c, name: e.target.value }))}
+                      onChange={(e) => {
+                        const nextName = e.target.value;
+                        updateCampaign((prev) => ({
+                          ...prev,
+                          characters: prev.characters.map((c) =>
+                            c.id === character.id ? { ...c, name: nextName } : c
+                          ),
+                          maps: prev.maps.map((m) => ({
+                            ...m,
+                            tokens: m.tokens.map((t) =>
+                              t.type === 'character' && t.referenceId === character.id
+                                ? { ...t, name: nextName || t.name }
+                                : t
+                            ),
+                          })),
+                          combat: {
+                            ...prev.combat,
+                            combatants: prev.combat.combatants.map((cb) =>
+                              cb.type === 'character' && cb.referenceId === character.id
+                                ? { ...cb, name: nextName || cb.name }
+                                : cb
+                            ),
+                          },
+                        }));
+                      }}
                       className="rpg-input w-full"
                     />
                   </div>

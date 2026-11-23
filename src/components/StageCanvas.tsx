@@ -4,6 +4,7 @@ import {
   ChevronUp,
   CloudRain,
   Crosshair,
+  Crown,
   Eye,
   EyeOff,
   Flame,
@@ -27,6 +28,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
+import { ProjectileVfxCanvas } from './ProjectileVfxCanvas';
 import {
   calculateMovementCostMeters,
   computeAdaptiveMapGrid,
@@ -46,6 +48,7 @@ import {
 } from '../shared/rulesEngine';
 import {
   AoETemplate,
+  ElementalSurfaceKind,
   GmMapMarker,
   GmMarkerKind,
   MapToken,
@@ -54,7 +57,11 @@ import {
   TerrainCellKind,
 } from '../shared/types';
 import { FileUploadButton } from './FileUploadButton';
+import { openEntitySheet } from './EntitySheetModal';
+import { openInspectEntity } from './InspectEntityModal';
 import { SculptedHealthBar } from './OrnateFrame';
+import { openConfirmDialog, openTextPrompt } from './PromptDialog';
+import { MapWeatherCanvas } from './MapWeatherCanvas';
 import { TokenPortrait } from './TokenPortrait';
 
 type StageTool =
@@ -67,7 +74,11 @@ type StageTool =
   | 'terrain-wall'
   | 'terrain-cover'
   | 'terrain-difficult'
-  | 'terrain-erase';
+  | 'terrain-erase'
+  | 'surface-fire'
+  | 'surface-ice'
+  | 'surface-acid'
+  | 'surface-water';
 
 const PRESET_GRADIENTS: Record<TacticalMap['themePreset'], string> = {
   crypt: 'radial-gradient(circle at 50% 45%, #23273a 0%, #141621 55%, #090b10 100%)',
@@ -197,6 +208,59 @@ const BiomeFloorOverlay: React.FC<{
   );
 };
 
+const TOKEN_LIGHT_PRESETS: Array<{
+  id: NonNullable<MapToken['lightSource']>;
+  label: string;
+  short: string;
+  radiusMeters: number;
+}> = [
+  { id: 'none', label: 'Apagada', short: 'Off', radiusMeters: 0 },
+  { id: 'torch', label: 'Tocha (6m)', short: '🔥 6m', radiusMeters: 6 },
+  { id: 'lantern', label: 'Lanterna (9m)', short: '🏮 9m', radiusMeters: 9 },
+  { id: 'darkvision', label: 'Visão no Escuro (18m)', short: '👁 18m', radiusMeters: 18 },
+];
+
+function getTokenLightRadiusMeters(tok: MapToken): number {
+  if (typeof tok.lightRadiusMeters === 'number' && tok.lightRadiusMeters > 0) {
+    return tok.lightRadiusMeters;
+  }
+  if (tok.lightSource === 'torch') return 6;
+  if (tok.lightSource === 'lantern') return 9;
+  if (tok.lightSource === 'darkvision') return 18;
+  return 0;
+}
+
+function revealFogCellsAroundToken(
+  map: TacticalMap,
+  tok: MapToken,
+  sqMeters: number
+): string[] {
+  const radiusM = getTokenLightRadiusMeters(tok);
+  if (!map.fogEnabled || radiusM <= 0) return map.revealedCells;
+  const radiusSq = radiusM / Math.max(0.5, sqMeters);
+  const cx = tok.x + (tok.size || 1) / 2;
+  const cy = tok.y + (tok.size || 1) / 2;
+  const nextSet = new Set(map.revealedCells);
+  let changed = false;
+  const minX = Math.max(0, Math.floor(cx - radiusSq - 1));
+  const maxX = Math.min(map.gridWidth - 1, Math.ceil(cx + radiusSq + 1));
+  const minY = Math.max(0, Math.floor(cy - radiusSq - 1));
+  const maxY = Math.min(map.gridHeight - 1, Math.ceil(cy + radiusSq + 1));
+  for (let gx = minX; gx <= maxX; gx++) {
+    for (let gy = minY; gy <= maxY; gy++) {
+      const dist = Math.hypot(gx + 0.5 - cx, gy + 0.5 - cy);
+      if (dist <= radiusSq + 0.35) {
+        const key = `${gx},${gy}`;
+        if (!nextSet.has(key)) {
+          nextSet.add(key);
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed ? Array.from(nextSet) : map.revealedCells;
+}
+
 export const StageCanvas: React.FC = () => {
   const {
     campaign,
@@ -215,10 +279,14 @@ export const StageCanvas: React.FC = () => {
     emitPointerHide,
     floatingVfx,
     slashVfx,
+    projectileVfx,
+    screenShakeActive,
     pendingAttackChoice,
     setPendingAttackChoice,
     startCombatDuel,
+    castAoEAbility,
     applyDamage,
+    pushCombatLog,
     deleteCharacter,
     assistDeathSave,
     gmResolveDeathSave,
@@ -227,10 +295,14 @@ export const StageCanvas: React.FC = () => {
     showTacticalAlert,
     opportunityPrompt,
     triggerOpportunityPrompt,
+    enqueueOpportunityPrompts,
+    performCombatManeuver,
     activeDuel,
     advantageMode,
     setCharacterNextAttackOverride,
     triggerTrapOnToken,
+    triggerSecretPassage,
+    moveTokensToMap,
     triggerAoESavePrompt,
     startCombatFromMap,
   } = useCampaign();
@@ -249,6 +321,7 @@ export const StageCanvas: React.FC = () => {
     'aoe' | 'terrain' | 'secrets' | 'monsters-map' | null
   >(null);
   const [zoom, setZoom] = useState(1);
+  const [bossBarCollapsed, setBossBarCollapsed] = useState(false);
   const [cameraPan, setCameraPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanningWorld, setIsPanningWorld] = useState(false);
   const panDragRef = useRef<{
@@ -269,6 +342,14 @@ export const StageCanvas: React.FC = () => {
   const [dropHighlightCell, setDropHighlightCell] = useState<{ x: number; y: number } | null>(null);
   const [hoveredTokenId, setHoveredTokenId] = useState<string | null>(null);
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
+  const [selectedTokenIds, setSelectedTokenIds] = useState<string[]>([]);
+  const [marqueeBox, setMarqueeBox] = useState<{
+    startGx: number;
+    startGy: number;
+    endGx: number;
+    endGy: number;
+    mode: 'select' | 'terrain' | 'fog';
+  } | null>(null);
   const [draggingTemplateId, setDraggingTemplateId] = useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [showAoESaveForm, setShowAoESaveForm] = useState(false);
@@ -287,6 +368,11 @@ export const StageCanvas: React.FC = () => {
   const [spawnHidden, setSpawnHidden] = useState(false);
   const [secretMarkerKind, setSecretMarkerKind] = useState<GmMarkerKind | null>(null);
   const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
+  const [aoeAimPos, setAoeAimPos] = useState<{ x: number; y: number; angleDeg: number }>({
+    x: 5,
+    y: 5,
+    angleDeg: 0,
+  });
   const [treasureDraftItemId, setTreasureDraftItemId] = useState(
     campaign.compendium.items[0]?.id || ''
   );
@@ -304,16 +390,85 @@ export const StageCanvas: React.FC = () => {
 
   useEffect(() => {
     const onKeyDown = (ev: KeyboardEvent) => {
+      if ((ev.key === 'r' || ev.key === 'R') && pendingAttackChoice?.aoeShape) {
+        const activeTag = (document.activeElement?.tagName || '').toLowerCase();
+        if (activeTag !== 'input' && activeTag !== 'textarea' && activeTag !== 'select') {
+          ev.preventDefault();
+          setAoeAimPos((p) => ({ ...p, angleDeg: (p.angleDeg + 45) % 360 }));
+          return;
+        }
+      }
+      if ((ev.key === 'i' || ev.key === 'I') && (hoveredTokenId || selectedTokenId)) {
+        const activeTag = (document.activeElement?.tagName || '').toLowerCase();
+        if (activeTag !== 'input' && activeTag !== 'textarea' && activeTag !== 'select') {
+          ev.preventDefault();
+          openInspectEntity((hoveredTokenId || selectedTokenId)!);
+          return;
+        }
+      }
       if (ev.key === 'Escape') {
         if (pendingAttackChoice) setPendingAttackChoice(null);
         if (secretMarkerKind) setSecretMarkerKind(null);
         setSelectedTokenId(null);
+        setSelectedTokenIds([]);
         setSelectedMarkerId(null);
+        return;
+      }
+
+      if (ev.key === 'Delete' || ev.key === 'Backspace') {
+        const tag = (ev.target as HTMLElement | null)?.tagName;
+        const isEditable =
+          tag === 'INPUT' ||
+          tag === 'TEXTAREA' ||
+          tag === 'SELECT' ||
+          Boolean((ev.target as HTMLElement | null)?.isContentEditable);
+        if (isEditable || role !== 'gm' || !activeMap) return;
+
+        const idsToDelete =
+          selectedTokenIds.length > 0
+            ? selectedTokenIds
+            : selectedTokenId
+              ? [selectedTokenId]
+              : [];
+        if (idsToDelete.length === 0) return;
+
+        ev.preventDefault();
+        const idSet = new Set(idsToDelete);
+        updateCampaign((prev) => ({
+          ...prev,
+          maps: prev.maps.map((m) =>
+            m.id === activeMap.id
+              ? { ...m, tokens: m.tokens.filter((t) => !idSet.has(t.id)) }
+              : m
+          ),
+          combat: {
+            ...prev.combat,
+            combatants: prev.combat.combatants.filter(
+              (cb) => !cb.tokenId || !idSet.has(cb.tokenId)
+            ),
+          },
+        }));
+        setSelectedTokenId(null);
+        setSelectedTokenIds([]);
+        if (targetTokenId && idSet.has(targetTokenId)) {
+          setTargetTokenId(null);
+        }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [pendingAttackChoice, setPendingAttackChoice, secretMarkerKind]);
+  }, [
+    pendingAttackChoice,
+    setPendingAttackChoice,
+    secretMarkerKind,
+    role,
+    activeMap,
+    selectedTokenIds,
+    selectedTokenId,
+    updateCampaign,
+    targetTokenId,
+    setTargetTokenId,
+  ]);
 
   useEffect(() => {
     const now = Date.now();
@@ -496,8 +651,14 @@ export const StageCanvas: React.FC = () => {
       }));
     }
 
-    // Automatic Trap Trigger when a token steps onto an untriggered trap marker!
+    // Automatic Trap Trigger & Dynamic Light Fog Reveal when a token moves!
     const movedAny = finalTok.x !== origin.x || finalTok.y !== origin.y;
+    if (movedAny && activeMap.fogEnabled && getTokenLightRadiusMeters(finalTok) > 0) {
+      updateActiveMap((m) => ({
+        ...m,
+        revealedCells: revealFogCellsAroundToken(m, finalTok, sqMeters),
+      }));
+    }
     if (movedAny && !origin.shiftFree) {
       const steppedTrap = (activeMap.gmMarkers || []).find(
         (gm) =>
@@ -507,6 +668,16 @@ export const StageCanvas: React.FC = () => {
       );
       if (steppedTrap) {
         triggerTrapOnToken(steppedTrap.id, finalTok);
+      }
+
+      // Secret Passage Notification when a token steps onto a secret passage marker!
+      const steppedPassage = (activeMap.gmMarkers || []).find(
+        (gm) =>
+          gm.kind === 'secret' &&
+          doSquaresOverlap(finalTok.x, finalTok.y, finalTok.size || 1, gm.x, gm.y, 1)
+      );
+      if (steppedPassage) {
+        triggerSecretPassage(steppedPassage.id, finalTok);
       }
     }
 
@@ -550,8 +721,36 @@ export const StageCanvas: React.FC = () => {
       },
     }));
 
-    // Check D&D Opportunity Attacks: left 1-square adjacency of an active hostile enemy with Reaction available
-    if (!cb.disengaged) {
+    // Check D&D Opportunity Attacks: left 1-square adjacency of ALL active hostile enemies with Reaction available
+    // Also skip if moving token/character has a condition with Natural Disengage (preventsOpportunityAttacks)!
+    const movingChar =
+      finalTok.type === 'character' && finalTok.referenceId
+        ? campaign.characters.find((c) => c.id === finalTok.referenceId)
+        : undefined;
+    const movingCondIds = new Set<string>([
+      ...(finalTok.activeConditionIds || []),
+      ...(movingChar?.activeConditionIds || []),
+    ]);
+    const hasNaturalDisengageCondition = Array.from(movingCondIds).some((cid) => {
+      const def = campaign.compendium.conditions.find((c) => c.id === cid);
+      if (def?.preventsOpportunityAttacks !== undefined) {
+        return Boolean(def.preventsOpportunityAttacks);
+      }
+      return cid === 'cond-invisivel' || /velocidade|haste/i.test(def?.name || cid);
+    });
+
+    if (!cb.disengaged && !hasNaturalDisengageCondition) {
+      const queuedPrompts: Array<{
+        id: string;
+        reactorTokenId: string;
+        reactorName: string;
+        reactorColor: string;
+        reactorType: 'character' | 'monster';
+        reactorReferenceId?: string;
+        targetTokenId: string;
+        targetName: string;
+        attacks: PendingAttackChoice[];
+      }> = [];
       for (const other of activeMap.tokens) {
         if (other.id === finalTok.id || other.hp <= 0 || other.isHidden) continue;
         const isHostile =
@@ -578,8 +777,8 @@ export const StageCanvas: React.FC = () => {
         if (wasAdj && nowDist > 1) {
           const meleeAttacks = buildMeleeOpportunityAttacks(other);
           if (meleeAttacks.length > 0) {
-            triggerOpportunityPrompt({
-              id: `opp-${Date.now()}`,
+            queuedPrompts.push({
+              id: `opp-${Date.now()}-${other.id}`,
               reactorTokenId: other.id,
               reactorName: other.name,
               reactorColor: other.color,
@@ -589,9 +788,76 @@ export const StageCanvas: React.FC = () => {
               targetName: finalTok.name,
               attacks: meleeAttacks,
             });
-            break;
           }
         }
+      }
+      if (queuedPrompts.length === 1) {
+        triggerOpportunityPrompt(queuedPrompts[0]);
+      } else if (queuedPrompts.length > 1) {
+        enqueueOpportunityPrompts(queuedPrompts);
+      }
+    }
+
+    // Elemental Surface Check when token lands on a new cell (Fire, Ice, Acid, Water)
+    const landedSurface = activeMap.elementalSurfaces?.[`${finalTok.x},${finalTok.y}`];
+    if (landedSurface && (finalTok.x !== origin.x || finalTok.y !== origin.y) && finalTok.hp > 0) {
+      const entityKind =
+        finalTok.type === 'character' ? 'hero' : finalTok.type === 'npc' ? 'npc' : 'monster';
+      if (landedSurface === 'fire' || landedSurface === 'acid') {
+        const dmg = Math.floor(Math.random() * 4) + 1;
+        const dmgType = landedSurface === 'fire' ? 'Fogo' : 'Ácido';
+        applyDamage(finalTok.id, dmg, false, undefined, dmgType);
+        pushCombatLog({
+          category: 'damage',
+          actorName: finalTok.name,
+          actorKind: entityKind,
+          actorColor: finalTok.color,
+          summary: `pisou em superfície de ${dmgType} e sofreu -${dmg} de dano!`,
+        });
+      } else if (landedSurface === 'ice') {
+        const d20 = Math.floor(Math.random() * 20) + 1;
+        const passed = d20 >= 12;
+        if (!passed) {
+          updateCampaign((prev) => ({
+            ...prev,
+            characters: prev.characters.map((c) =>
+              finalTok.type === 'character' &&
+              finalTok.referenceId === c.id &&
+              !c.activeConditionIds.includes('cond-caido')
+                ? { ...c, activeConditionIds: [...c.activeConditionIds, 'cond-caido'] }
+                : c
+            ),
+            maps: prev.maps.map((m) =>
+              m.id !== activeMap.id
+                ? m
+                : {
+                    ...m,
+                    tokens: m.tokens.map((t) =>
+                      t.id === finalTok.id && !(t.activeConditionIds || []).includes('cond-caido')
+                        ? { ...t, activeConditionIds: [...(t.activeConditionIds || []), 'cond-caido'] }
+                        : t
+                    ),
+                  }
+            ),
+          }));
+        }
+        pushCombatLog({
+          category: 'condition',
+          actorName: finalTok.name,
+          actorKind: entityKind,
+          actorColor: finalTok.color,
+          summary: passed
+            ? `manteve o equilíbrio no Gelo (Reflexos ${d20} vs CD 12)`
+            : `escorregou no Gelo (Reflexos ${d20} vs CD 12) e ficou Caído!`,
+        });
+      } else if (landedSurface === 'water') {
+        pushCombatLog({
+          category: 'system',
+          actorName: finalTok.name,
+          actorKind: entityKind,
+          actorColor: finalTok.color,
+          summary: 'entrou em Água (Molhado — vulnerável a Raio/Gelo)',
+        });
       }
     }
   };
@@ -632,7 +898,15 @@ export const StageCanvas: React.FC = () => {
       if (secretMarkerKind) setSecretMarkerKind(null);
       return;
     }
-    const { gx, gy, xPct, yPct } = getCellFromEvent(e);
+    const { gx, gy, rawX, rawY, xPct, yPct } = getCellFromEvent(e);
+
+    // Interactive AoE Ability Placement: click anywhere on map to cast geometric shape!
+    if (e.button === 0 && pendingAttackChoice?.aoeShape) {
+      const snappedX = Math.max(0, Math.min(activeMap.gridWidth, Math.round(rawX * 2) / 2));
+      const snappedY = Math.max(0, Math.min(activeMap.gridHeight, Math.round(rawY * 2) / 2));
+      castAoEAbility(pendingAttackChoice, snappedX, snappedY, aoeAimPos.angleDeg);
+      return;
+    }
 
     if (role === 'gm' && secretMarkerKind) {
       const defaultTitles: Record<GmMarkerKind, string> = {
@@ -683,38 +957,32 @@ export const StageCanvas: React.FC = () => {
     }
 
     if (role === 'gm' && (tool === 'fog-reveal' || tool === 'fog-hide')) {
-      const key = `${gx},${gy}`;
-      updateActiveMap((m) => {
-        const set = new Set(m.revealedCells);
-        if (tool === 'fog-reveal') set.add(key);
-        else set.delete(key);
-        return { ...m, revealedCells: Array.from(set) };
-      });
+      setMarqueeBox({ startGx: gx, startGy: gy, endGx: gx, endGy: gy, mode: 'fog' });
+      return;
     }
 
-    if (role === 'gm' && tool.startsWith('terrain-')) {
-      const key = `${gx},${gy}`;
-      updateActiveMap((m) => {
-        const nextTerrain: Record<string, TerrainCellKind> = { ...(m.terrainCells || {}) };
-        if (tool === 'terrain-erase') {
-          delete nextTerrain[key];
-        } else {
-          const kind: TerrainCellKind =
-            tool === 'terrain-wall'
-              ? 'wall'
-              : tool === 'terrain-cover'
-                ? 'cover'
-                : 'difficult';
-          nextTerrain[key] = kind;
-        }
-        return { ...m, terrainCells: nextTerrain };
-      });
+    if (role === 'gm' && (tool.startsWith('terrain-') || tool.startsWith('surface-'))) {
+      setMarqueeBox({ startGx: gx, startGy: gy, endGx: gx, endGy: gy, mode: 'terrain' });
+      return;
+    }
+
+    if (tool === 'select' && role === 'gm' && e.button === 0 && !spacePressedRef.current) {
+      setMarqueeBox({ startGx: gx, startGy: gy, endGx: gx, endGy: gy, mode: 'select' });
+      return;
     }
   };
 
   const handleGridMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeMap) return;
     const { gx, gy, rawX, rawY, xPct, yPct } = getCellFromEvent(e);
+
+    if (pendingAttackChoice?.aoeShape) {
+      const snappedX = Math.max(0, Math.min(activeMap.gridWidth, Math.round(rawX * 2) / 2));
+      const snappedY = Math.max(0, Math.min(activeMap.gridHeight, Math.round(rawY * 2) / 2));
+      setAoeAimPos((p) =>
+        p.x === snappedX && p.y === snappedY ? p : { ...p, x: snappedX, y: snappedY }
+      );
+    }
 
     // Live Colored Pointer ("Bolinha") when Pointer tool is active OR Alt key held
     if (tool === 'pointer' || e.altKey) {
@@ -750,31 +1018,48 @@ export const StageCanvas: React.FC = () => {
       const setMoved = (x: number, y: number) => {
         movedCoord = { x, y };
       };
-      updateActiveMap((m) => ({
-        ...m,
-        tokens: m.tokens.map((t) => {
-          if (t.id !== draggingTokenId) return t;
-          let targetX = Math.max(0, Math.min(activeMap.gridWidth - t.size, gx));
-          let targetY = Math.max(0, Math.min(activeMap.gridHeight - t.size, gy));
-          if (campaign.combat.active && dragOrigin && !dragOrigin.shiftFree) {
-            const cb = findTokenCombatant(t);
-            const remMeters = cb ? cb.remainingMoveMeters ?? cb.speedMeters ?? 9 : 9;
-            const maxSq = Math.max(0, Math.floor(remMeters / sqMeters));
-            targetX = Math.max(dragOrigin.x - maxSq, Math.min(dragOrigin.x + maxSq, targetX));
-            targetY = Math.max(dragOrigin.y - maxSq, Math.min(dragOrigin.y + maxSq, targetY));
-            targetX = Math.max(0, Math.min(activeMap.gridWidth - t.size, targetX));
-            targetY = Math.max(0, Math.min(activeMap.gridHeight - t.size, targetY));
-          }
-          const freePos = resolveDragTargetCell(m, t, targetX, targetY, role === 'gm');
+      const isGroupDrag =
+        role === 'gm' && selectedTokenIds.length > 1 && selectedTokenIds.includes(draggingTokenId);
+      updateActiveMap((m) => {
+        const leadTok = m.tokens.find((t) => t.id === draggingTokenId);
+        if (!leadTok) return m;
+        let targetX = Math.max(0, Math.min(activeMap.gridWidth - leadTok.size, gx));
+        let targetY = Math.max(0, Math.min(activeMap.gridHeight - leadTok.size, gy));
+        if (!isGroupDrag && campaign.combat.active && dragOrigin && !dragOrigin.shiftFree) {
+          const cb = findTokenCombatant(leadTok);
+          const remMeters = cb ? cb.remainingMoveMeters ?? cb.speedMeters ?? 9 : 9;
+          const maxSq = Math.max(0, Math.floor(remMeters / sqMeters));
+          targetX = Math.max(dragOrigin.x - maxSq, Math.min(dragOrigin.x + maxSq, targetX));
+          targetY = Math.max(dragOrigin.y - maxSq, Math.min(dragOrigin.y + maxSq, targetY));
+          targetX = Math.max(0, Math.min(activeMap.gridWidth - leadTok.size, targetX));
+          targetY = Math.max(0, Math.min(activeMap.gridHeight - leadTok.size, targetY));
+        }
+        if (!isGroupDrag) {
+          const freePos = resolveDragTargetCell(m, leadTok, targetX, targetY, role === 'gm');
           targetX = freePos.x;
           targetY = freePos.y;
-          if (t.x !== targetX || t.y !== targetY) {
-            didDragTokenRef.current = true;
-            setMoved(targetX, targetY);
-          }
-          return { ...t, x: targetX, y: targetY };
-        }),
-      }));
+        }
+        const dx = targetX - leadTok.x;
+        const dy = targetY - leadTok.y;
+        if (dx === 0 && dy === 0) return m;
+        didDragTokenRef.current = true;
+        setMoved(targetX, targetY);
+
+        return {
+          ...m,
+          tokens: m.tokens.map((t) => {
+            if (isGroupDrag && selectedTokenIds.includes(t.id)) {
+              return {
+                ...t,
+                x: Math.max(0, Math.min(activeMap.gridWidth - t.size, t.x + dx)),
+                y: Math.max(0, Math.min(activeMap.gridHeight - t.size, t.y + dy)),
+              };
+            }
+            if (t.id !== draggingTokenId) return t;
+            return { ...t, x: targetX, y: targetY };
+          }),
+        };
+      });
       if (movedCoord !== null) {
         const pt: { x: number; y: number } = movedCoord;
         setDragPath((prev) => {
@@ -786,45 +1071,103 @@ export const StageCanvas: React.FC = () => {
       return;
     }
 
+    if (marqueeBox && e.buttons === 1) {
+      if (marqueeBox.endGx !== gx || marqueeBox.endGy !== gy) {
+        setMarqueeBox((prev) => (prev ? { ...prev, endGx: gx, endGy: gy } : null));
+      }
+      return;
+    }
+
     if (tool === 'ruler' && rulerStart && e.buttons === 1) {
       setRulerEnd({ x: gx, y: gy });
       return;
     }
+  };
 
-    if (role === 'gm' && e.buttons === 1 && (tool === 'fog-reveal' || tool === 'fog-hide')) {
-      const key = `${gx},${gy}`;
+  const applyMarqueeSelection = () => {
+    if (!marqueeBox || !activeMap) return;
+    const minX = Math.min(marqueeBox.startGx, marqueeBox.endGx);
+    const maxX = Math.max(marqueeBox.startGx, marqueeBox.endGx);
+    const minY = Math.min(marqueeBox.startGy, marqueeBox.endGy);
+    const maxY = Math.max(marqueeBox.startGy, marqueeBox.endGy);
+
+    if (marqueeBox.mode === 'fog') {
       updateActiveMap((m) => {
         const set = new Set(m.revealedCells);
-        if (tool === 'fog-reveal') set.add(key);
-        else set.delete(key);
+        for (let y = minY; y <= maxY; y++) {
+          for (let x = minX; x <= maxX; x++) {
+            const key = `${x},${y}`;
+            if (tool === 'fog-reveal') set.add(key);
+            else set.delete(key);
+          }
+        }
         return { ...m, revealedCells: Array.from(set) };
       });
-      return;
-    }
-
-    if (role === 'gm' && e.buttons === 1 && tool.startsWith('terrain-')) {
-      const key = `${gx},${gy}`;
-      const desiredKind: TerrainCellKind | null =
-        tool === 'terrain-erase'
-          ? null
-          : tool === 'terrain-wall'
-            ? 'wall'
-            : tool === 'terrain-cover'
-              ? 'cover'
-              : 'difficult';
-      const currentVal = activeMap.terrainCells?.[key] || null;
-      if (currentVal !== desiredKind) {
+    } else if (marqueeBox.mode === 'terrain') {
+      if (tool.startsWith('surface-')) {
+        const surfKind = tool.replace('surface-', '') as ElementalSurfaceKind;
+        updateActiveMap((m) => {
+          const nextSurf: Record<string, ElementalSurfaceKind> = { ...(m.elementalSurfaces || {}) };
+          for (let y = minY; y <= maxY; y++) {
+            for (let x = minX; x <= maxX; x++) {
+              nextSurf[`${x},${y}`] = surfKind;
+            }
+          }
+          return { ...m, elementalSurfaces: nextSurf };
+        });
+      } else {
+        const desiredKind: TerrainCellKind | null =
+          tool === 'terrain-erase'
+            ? null
+            : tool === 'terrain-wall'
+              ? 'wall'
+              : tool === 'terrain-cover'
+                ? 'cover'
+                : 'difficult';
         updateActiveMap((m) => {
           const nextTerrain: Record<string, TerrainCellKind> = { ...(m.terrainCells || {}) };
-          if (!desiredKind) delete nextTerrain[key];
-          else nextTerrain[key] = desiredKind;
-          return { ...m, terrainCells: nextTerrain };
+          const nextSurf: Record<string, ElementalSurfaceKind> = { ...(m.elementalSurfaces || {}) };
+          for (let y = minY; y <= maxY; y++) {
+            for (let x = minX; x <= maxX; x++) {
+              const key = `${x},${y}`;
+              if (!desiredKind) {
+                delete nextTerrain[key];
+                delete nextSurf[key];
+              } else {
+                nextTerrain[key] = desiredKind;
+              }
+            }
+          }
+          return { ...m, terrainCells: nextTerrain, elementalSurfaces: nextSurf };
         });
       }
+    } else if (marqueeBox.mode === 'select') {
+      const isDrag = minX !== maxX || minY !== maxY;
+      if (isDrag) {
+        const inside = activeMap.tokens
+          .filter((t) => {
+            const tRight = t.x + (t.size || 1) - 1;
+            const tBottom = t.y + (t.size || 1) - 1;
+            return t.x <= maxX && tRight >= minX && t.y <= maxY && tBottom >= minY;
+          })
+          .map((t) => t.id);
+        setSelectedTokenIds(inside);
+        if (inside.length === 1) {
+          setSelectedTokenId(inside[0]);
+        } else {
+          setSelectedTokenId(null);
+        }
+      } else {
+        setSelectedTokenIds([]);
+      }
     }
+    setMarqueeBox(null);
   };
 
   const handleGridMouseUp = () => {
+    if (marqueeBox) {
+      applyMarqueeSelection();
+    }
     finalizeTokenDrag();
     setDraggingTemplateId(null);
   };
@@ -1138,8 +1481,8 @@ export const StageCanvas: React.FC = () => {
     setSelectedTemplateId(tmpl.id);
   };
 
-  const createNewMap = () => {
-    const name = window.prompt('Nome do novo Mapa ou Cena:', 'Nova Masmorra');
+  const createNewMap = async () => {
+    const name = await openTextPrompt('Nome do novo Mapa ou Cena:', 'Nova Masmorra');
     if (!name) return;
     const newMap: TacticalMap = {
       id: `map-${Date.now()}`,
@@ -1642,8 +1985,28 @@ export const StageCanvas: React.FC = () => {
                     },
                     {
                       id: 'terrain-erase' as const,
-                      label: 'Apagar Terreno',
-                      title: 'Apagar Parede/Cobertura/Terreno Difícil',
+                      label: 'Apagar Terreno / Superf.',
+                      title: 'Apagar Parede/Cobertura/Terreno Difícil e Superfícies Elementais',
+                    },
+                    {
+                      id: 'surface-fire' as const,
+                      label: '🔥 Fogo',
+                      title: 'Pintar Superfície de Fogo (1d4 ao pisar)',
+                    },
+                    {
+                      id: 'surface-ice' as const,
+                      label: '❄️ Gelo',
+                      title: 'Pintar Superfície de Gelo (Reflexos CD 12 ou Caído)',
+                    },
+                    {
+                      id: 'surface-acid' as const,
+                      label: '🧪 Ácido',
+                      title: 'Pintar Superfície de Ácido (1d4 ao pisar)',
+                    },
+                    {
+                      id: 'surface-water' as const,
+                      label: '💧 Água',
+                      title: 'Pintar Superfície de Água (Molhado)',
                     },
                   ] as const
                 ).map((tb) => {
@@ -2062,21 +2425,296 @@ export const StageCanvas: React.FC = () => {
         </div>
       )}
 
-      {/* MAIN VIEWPORT: Pan the World by dragging outside the map, Middle-Click, or Space+Drag */}
+      {/* EPIC BOSS HEALTH BAR (Auto-shown when a Boss token is active on this map) */}
+      {(() => {
+        const activeBossTok = activeMap.tokens.find(
+          (t) => t.isBoss && (!t.isHidden || role === 'gm')
+        );
+        if (!activeBossTok) return null;
+        const bossMonDef = activeBossTok.referenceId
+          ? campaign.compendium.monsters.find((m) => m.id === activeBossTok.referenceId)
+          : undefined;
+        const bossHideAc =
+          activeBossTok.hideAcFromPlayers !== undefined
+            ? activeBossTok.hideAcFromPlayers
+            : bossMonDef?.hideAcFromPlayers !== undefined
+              ? bossMonDef.hideAcFromPlayers
+              : !campaign.settings.showEnemyAcToPlayers;
+        const phase = activeBossTok.bossPhase || 1;
+        const phase2Pct = activeBossTok.bossPhase2HpPct ?? 50;
+        const legActMax = activeBossTok.legendaryActionsMax ?? 0;
+        const legActRem = activeBossTok.legendaryActionsRemaining ?? legActMax;
+        const legResMax = activeBossTok.legendaryResistancesMax ?? 0;
+        const legResRem = activeBossTok.legendaryResistancesRemaining ?? legResMax;
+        const wound = getMonsterWoundStatus(activeBossTok.hp, activeBossTok.maxHp);
+
+        return (
+          <div className="shrink-0 w-full px-3 py-1.5 border-b flex items-center justify-center bg-[#090a10]/90 z-20" style={{ borderColor: 'rgba(220,38,38,0.35)' }}>
+            <div className="w-[min(680px,96%)] rpg-glass-panel rounded-lg px-3.5 py-2 border border-red-500/55 shadow-lg space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Crown className="w-4 h-4 text-amber-400 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-chronicle font-black text-sm text-amber-100 tracking-wide truncate">
+                        {activeBossTok.name}
+                      </span>
+                      <span
+                        className={`text-[9px] font-display font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                          phase >= 2
+                            ? 'bg-red-950/90 border-red-400/70 text-red-200'
+                            : 'bg-amber-950/80 border-amber-500/50 text-amber-200'
+                        }`}
+                      >
+                        {phase >= 2
+                          ? `Fase ${phase}${activeBossTok.bossPhase2Title ? ` • ${activeBossTok.bossPhase2Title}` : ''}`
+                          : 'Fase 1'}
+                      </span>
+                    </div>
+                    {!bossBarCollapsed && activeBossTok.bossTitle && (
+                      <div className="text-[10px] font-lore italic text-amber-200/75 truncate">
+                        {activeBossTok.bossTitle}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="text-right font-mono-dice text-xs">
+                    {role === 'gm' || !bossHideAc ? (
+                      <span className="font-bold text-red-300">
+                        PV {activeBossTok.hp}/{activeBossTok.maxHp}
+                      </span>
+                    ) : (
+                      <span className={`font-display font-bold ${wound.colorClass}`}>
+                        {wound.label}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setBossBarCollapsed((v) => !v)}
+                    className="rpg-card p-1 rounded cursor-pointer hover:border-amber-400/60"
+                    title={bossBarCollapsed ? 'Expandir barra do Boss' : 'Recolher barra do Boss'}
+                  >
+                    {bossBarCollapsed ? (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {!bossBarCollapsed && (
+                <>
+              {/* Boss HP Bar with Phase 2 threshold tick */}
+              <div className="relative">
+                <SculptedHealthBar
+                  hp={activeBossTok.hp}
+                  maxHp={activeBossTok.maxHp}
+                  heightClass="h-3"
+                />
+                {phase2Pct > 0 && phase2Pct < 100 && (
+                  <div
+                    className="absolute top-0 bottom-0 w-[2px] bg-amber-300/90 pointer-events-none"
+                    style={{ left: `${phase2Pct}%` }}
+                    title={`Limiar da Fase 2 (${phase2Pct}% PV)`}
+                  />
+                )}
+              </div>
+
+              {/* Legendary Actions & Legendary Resistances Strip */}
+              {(legActMax > 0 || legResMax > 0) && (
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-[10px]">
+                  {legActMax > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-display font-bold uppercase tracking-wider text-amber-300/90">
+                        Ações Lendárias:
+                      </span>
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: legActMax }).map((_, i) => (
+                          <button
+                            key={i}
+                            type="button"
+                            disabled={role !== 'gm'}
+                            onClick={() => {
+                              const nextRem = i + 1 === legActRem ? i : i + 1;
+                              updateActiveMap((m) => ({
+                                ...m,
+                                tokens: m.tokens.map((t) =>
+                                  t.id === activeBossTok.id
+                                    ? { ...t, legendaryActionsRemaining: nextRem }
+                                    : t
+                                ),
+                              }));
+                            }}
+                            title={role === 'gm' ? 'Clique para gastar ou recarregar Ação Lendária' : 'Ação Lendária'}
+                            className={`w-3.5 h-3.5 rounded-xs border transition ${
+                              role === 'gm' ? 'cursor-pointer' : 'cursor-default'
+                            } ${
+                              i < legActRem
+                                ? 'bg-amber-400 border-amber-200 shadow-[0_0_6px_rgba(251,191,36,0.7)]'
+                                : 'bg-black/50 border-amber-500/30'
+                            }`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {legResMax > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-display font-bold uppercase tracking-wider text-sky-300/90">
+                        Resist. Lendária:
+                      </span>
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: legResMax }).map((_, i) => (
+                          <button
+                            key={i}
+                            type="button"
+                            disabled={role !== 'gm'}
+                            onClick={() => {
+                              const nextRem = i + 1 === legResRem ? i : i + 1;
+                              updateActiveMap((m) => ({
+                                ...m,
+                                tokens: m.tokens.map((t) =>
+                                  t.id === activeBossTok.id
+                                    ? { ...t, legendaryResistancesRemaining: nextRem }
+                                    : t
+                                ),
+                              }));
+                            }}
+                            title={role === 'gm' ? 'Clique para gastar ou recarregar Resistência Lendária' : 'Resistência Lendária'}
+                            className={`w-3.5 h-3.5 rounded-full border transition ${
+                              role === 'gm' ? 'cursor-pointer' : 'cursor-default'
+                            } ${
+                              i < legResRem
+                                ? 'bg-sky-400 border-sky-200 shadow-[0_0_6px_rgba(56,189,248,0.7)]'
+                                : 'bg-black/50 border-sky-500/30'
+                            }`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* GM MULTI-SELECT FLOATING ACTION BAR */}
+      {role === 'gm' && selectedTokenIds.length > 1 && (
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-30 rpg-glass-panel rounded-lg px-3 py-2 border border-amber-400/60 shadow-2xl flex flex-wrap items-center gap-1.5 text-xs animate-ui-enter">
+          <span className="font-display font-bold text-amber-200 mr-1">
+            {selectedTokenIds.length} selecionados
+          </span>
+          <button
+            type="button"
+            onClick={() =>
+              updateActiveMap((m) => ({
+                ...m,
+                tokens: m.tokens.map((t) =>
+                  selectedTokenIds.includes(t.id) ? { ...t, isHidden: true } : t
+                ),
+              }))
+            }
+            className="rpg-card px-2 py-1 rounded text-[11px] cursor-pointer hover:border-amber-400/60"
+          >
+            Ocultar
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              updateActiveMap((m) => ({
+                ...m,
+                tokens: m.tokens.map((t) =>
+                  selectedTokenIds.includes(t.id) ? { ...t, isHidden: false } : t
+                ),
+              }))
+            }
+            className="rpg-card px-2 py-1 rounded text-[11px] cursor-pointer hover:border-amber-400/60"
+          >
+            Revelar
+          </button>
+          <button
+            type="button"
+            onClick={() => selectedTokenIds.forEach((id) => applyDamage(id, 5, false))}
+            className="px-2 py-1 rounded bg-red-900/70 hover:bg-red-800 text-white text-[11px] cursor-pointer"
+          >
+            -5 PV
+          </button>
+          <button
+            type="button"
+            onClick={() => selectedTokenIds.forEach((id) => applyDamage(id, 5, true))}
+            className="px-2 py-1 rounded bg-emerald-900/70 hover:bg-emerald-800 text-white text-[11px] cursor-pointer"
+          >
+            +5 PV
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const idSet = new Set(selectedTokenIds);
+              updateCampaign((prev) => ({
+                ...prev,
+                maps: prev.maps.map((m) =>
+                  m.id === activeMap.id
+                    ? { ...m, tokens: m.tokens.filter((t) => !idSet.has(t.id)) }
+                    : m
+                ),
+                combat: {
+                  ...prev.combat,
+                  combatants: prev.combat.combatants.filter(
+                    (cb) => !cb.tokenId || !idSet.has(cb.tokenId)
+                  ),
+                },
+              }));
+              setSelectedTokenIds([]);
+            }}
+            className="px-2 py-1 rounded bg-red-950/90 border border-red-500/50 text-red-200 hover:bg-red-900 text-[11px] font-bold cursor-pointer"
+          >
+            Remover Todos
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedTokenIds([])}
+            className="rpg-card px-2 py-1 rounded text-[11px] cursor-pointer"
+            title="Limpar seleção múltipla"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* MAIN VIEWPORT: Pan outside map / Middle-Click, Zoom on Mouse Wheel, Click outside deselects everything */}
       <div
+        onWheel={(e) => {
+          const targetEl = e.target as HTMLElement | null;
+          if (targetEl?.closest('.overflow-y-auto')) return;
+          e.preventDefault();
+          const delta = e.deltaY < 0 ? 0.1 : -0.1;
+          setZoom((z) => Math.max(0.25, Math.min(2, Math.round((z + delta) * 100) / 100)));
+        }}
         onMouseDown={(e) => {
-          // Clicking outside the map also clears selected token/hero in the bottom dock
+          // Clicking outside the map deselects ALL selections, tools, drawers, and active targeting
           if (e.button === 0 && e.target === e.currentTarget) {
             setSelectedTokenId(null);
+            setSelectedTokenIds([]);
             setSelectedTemplateId(null);
             setSelectedMarkerId(null);
-            if (!pendingAttackChoice) setTargetTokenId(null);
+            setTargetTokenId(null);
+            setGmDrawerTab(null);
+            setSecretMarkerKind(null);
+            if (pendingAttackChoice) setPendingAttackChoice(null);
+            setTool('select');
           }
-          // Pan world when clicking outside the map grid, or middle-click anywhere, or holding Space
+          // Pan world when clicking outside the map grid or middle-click anywhere
           const isMiddle = e.button === 1;
           const isOutsideMap = e.button === 0 && e.target === e.currentTarget;
-          const isSpaceDrag = e.button === 0 && spacePressedRef.current;
-          if (isMiddle || isOutsideMap || isSpaceDrag) {
+          if (isMiddle || isOutsideMap) {
             beginWorldPan(e);
           }
         }}
@@ -2089,7 +2727,6 @@ export const StageCanvas: React.FC = () => {
           isPanningWorld ? 'cursor-grabbing' : 'cursor-grab'
         }`}
         style={{ backgroundColor: 'var(--canvas-bg)' }}
-        title="Segure o mouse fora do mapa (ou botão do meio / Espaço) para mover a câmera • Duplo clique fora para centralizar"
       >
           {/* Sculpted Brass & Obsidian Tabletop Rim (Coordinate numbers removed for clean full-map framing) */}
           <div
@@ -2122,7 +2759,9 @@ export const StageCanvas: React.FC = () => {
                   if (pendingAttackChoice) setPendingAttackChoice(null);
                   if (secretMarkerKind) setSecretMarkerKind(null);
                 }}
-                className="relative shadow-2xl select-none shrink-0 rounded border-2"
+                className={`relative shadow-2xl select-none shrink-0 rounded border-2 ${
+                  screenShakeActive ? 'animate-map-screen-shake' : ''
+                }`}
                 style={{
                   width: totalW,
                   height: totalH,
@@ -2158,9 +2797,13 @@ export const StageCanvas: React.FC = () => {
                     }}
                   />
 
-                  {/* Weather Layer (clipped cleanly to map bounds) */}
-                  {weatherClass && (
-                    <div className={`absolute inset-0 pointer-events-none z-25 ${weatherClass}`} />
+                  {/* Weather Layer (AAA HTML5 Canvas 2D for Rain, Embers, Snow, and Mist) */}
+                  {activeMap.weather !== 'none' && (
+                    <MapWeatherCanvas
+                      weather={activeMap.weather}
+                      width={totalW}
+                      height={totalH}
+                    />
                   )}
                 </div>
 
@@ -2176,6 +2819,58 @@ export const StageCanvas: React.FC = () => {
                     }}
                   />
                 )}
+
+                {/* Elemental Surfaces (BG3-style Fire, Ice, Acid, Water tiles) */}
+                {activeMap.elementalSurfaces &&
+                  Object.entries(activeMap.elementalSurfaces).map(([key, surf]) => {
+                    const [sx, sy] = key.split(',').map(Number);
+                    if (isNaN(sx) || isNaN(sy)) return null;
+                    const cfg =
+                      surf === 'fire'
+                        ? {
+                            bg: 'rgba(249, 115, 22, 0.34)',
+                            border: 'rgba(251, 146, 60, 0.7)',
+                            icon: '🔥',
+                            label: 'Fogo (1d4 ao pisar)',
+                          }
+                        : surf === 'ice'
+                          ? {
+                              bg: 'rgba(56, 189, 248, 0.28)',
+                              border: 'rgba(125, 211, 252, 0.7)',
+                              icon: '❄️',
+                              label: 'Gelo (Reflexos CD 12 ou Caído)',
+                            }
+                          : surf === 'acid'
+                            ? {
+                                bg: 'rgba(34, 197, 94, 0.30)',
+                                border: 'rgba(74, 222, 128, 0.7)',
+                                icon: '🧪',
+                                label: 'Ácido (1d4 ao pisar)',
+                              }
+                            : {
+                                bg: 'rgba(37, 99, 235, 0.28)',
+                                border: 'rgba(96, 165, 250, 0.65)',
+                                icon: '💧',
+                                label: 'Água (Molhado)',
+                              };
+                    return (
+                      <div
+                        key={`surf-${key}`}
+                        className="absolute pointer-events-none z-5 flex items-center justify-center rounded-xs"
+                        style={{
+                          left: sx * cellPx,
+                          top: sy * cellPx,
+                          width: cellPx,
+                          height: cellPx,
+                          backgroundColor: cfg.bg,
+                          border: `1px solid ${cfg.border}`,
+                        }}
+                        title={cfg.label}
+                      >
+                        <span className="text-xs opacity-80 select-none">{cfg.icon}</span>
+                      </div>
+                    );
+                  })}
 
                 {/* Tactical Terrain Cells: Walls, Cover (+2/+5 CA), Difficult Terrain (2x) */}
                 {activeMap.terrainCells &&
@@ -2242,7 +2937,7 @@ export const StageCanvas: React.FC = () => {
                     );
                   })}
 
-                {/* Choreographed Movement Path Trail SVG while dragging */}
+                {/* Choreographed Movement Path Trail SVG + Live Meter Pill (Xm / Ym) while dragging */}
                 {draggingTokenId && dragOrigin && dragPath.length > 0 && (() => {
                   const dragTok = activeMap.tokens.find((t) => t.id === draggingTokenId);
                   if (!dragTok) return null;
@@ -2252,34 +2947,64 @@ export const StageCanvas: React.FC = () => {
                     ...dragPath.map((p) => ({ x: p.x * cellPx + half, y: p.y * cellPx + half })),
                   ];
                   const pointsAttr = pts.map((p) => `${p.x},${p.y}`).join(' ');
+                  const lastPt = pts[pts.length - 1];
+                  const cb = findTokenCombatant(dragTok);
+                  const maxMove = cb
+                    ? cb.remainingMoveMeters ?? cb.speedMeters ?? 9
+                    : (() => {
+                        if (dragTok.type === 'character' && dragTok.referenceId) {
+                          const ch = campaign.characters.find((c) => c.id === dragTok.referenceId);
+                          if (ch) return computeCharacterStats(ch, campaign).speed;
+                        }
+                        if (dragTok.type === 'monster' && dragTok.referenceId) {
+                          const mon = campaign.compendium.monsters.find((m) => m.id === dragTok.referenceId);
+                          if (mon) return mon.speed || 9;
+                        }
+                        return 9;
+                      })();
+                  const movedMeters = Math.round(dragPath.length * sqMeters * 10) / 10;
+                  const overBudget = movedMeters > maxMove + 0.05;
+                  const strokeCol = overBudget ? '#ef4444' : '#fbbf24';
                   return (
-                    <svg
-                      className="absolute inset-0 pointer-events-none z-20"
-                      width={totalW}
-                      height={totalH}
-                    >
-                      <polyline
-                        points={pointsAttr}
-                        fill="none"
-                        stroke="#fbbf24"
-                        strokeWidth="2.5"
-                        strokeDasharray="6 5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        opacity="0.85"
-                      />
-                      {pts.map((p, idx) => (
-                        <circle
-                          key={idx}
-                          cx={p.x}
-                          cy={p.y}
-                          r={idx === 0 || idx === pts.length - 1 ? 5 : 3}
-                          fill={idx === 0 ? '#34d399' : '#fbbf24'}
-                          stroke="#06070c"
-                          strokeWidth="1.5"
+                    <>
+                      <svg
+                        className="absolute inset-0 pointer-events-none z-20"
+                        width={totalW}
+                        height={totalH}
+                      >
+                        <polyline
+                          points={pointsAttr}
+                          fill="none"
+                          stroke={strokeCol}
+                          strokeWidth="2.5"
+                          strokeDasharray="6 5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          opacity="0.9"
                         />
-                      ))}
-                    </svg>
+                        {pts.map((p, idx) => (
+                          <circle
+                            key={idx}
+                            cx={p.x}
+                            cy={p.y}
+                            r={idx === 0 || idx === pts.length - 1 ? 5 : 3}
+                            fill={idx === 0 ? '#34d399' : strokeCol}
+                            stroke="#06070c"
+                            strokeWidth="1.5"
+                          />
+                        ))}
+                      </svg>
+                      <div
+                        className={`absolute pointer-events-none z-35 px-2 py-0.5 rounded-full text-[11px] font-mono-dice font-bold border shadow-xl whitespace-nowrap -translate-x-1/2 ${
+                          overBudget
+                            ? 'bg-red-950/95 border-red-400 text-red-100'
+                            : 'bg-black/90 border-amber-400/80 text-amber-200'
+                        }`}
+                        style={{ left: lastPt.x, top: Math.max(4, lastPt.y - half - 26) }}
+                      >
+                        {movedMeters}m / {maxMove}m
+                      </div>
+                    </>
                   );
                 })()}
 
@@ -2506,6 +3231,95 @@ export const StageCanvas: React.FC = () => {
                     height: (maxY - minY) * cellPx,
                   }}
                 />
+              );
+            })()}
+
+            {/* Live Interactive Geometric AoE Preview when casting an AoE Ability */}
+            {pendingAttackChoice?.aoeShape && (() => {
+              const shape = pendingAttackChoice.aoeShape;
+              const sizeMeters = pendingAttackChoice.aoeSizeMeters || 6;
+              // Diameter for sphere, full side for cube, full length for cone/line
+              const totalSq = Math.max(1, sizeMeters / sqMeters);
+              const radiusSq = shape === 'sphere' ? totalSq / 2 : totalSq;
+              const rPx = radiusSq * cellPx;
+              const cx = aoeAimPos.x * cellPx;
+              const cy = aoeAimPos.y * cellPx;
+              const col =
+                pendingAttackChoice.aoeColor ||
+                (pendingAttackChoice.damageType?.toLowerCase().includes('fogo')
+                  ? '#f97316'
+                  : pendingAttackChoice.damageType?.toLowerCase().includes('gelo') ||
+                      pendingAttackChoice.damageType?.toLowerCase().includes('frio')
+                    ? '#38bdf8'
+                    : '#a855f7');
+              return (
+                <div className="absolute inset-0 pointer-events-none z-35">
+                  {shape === 'sphere' && (
+                    <div
+                      className="absolute rounded-full border-2 border-dashed animate-pulse"
+                      style={{
+                        left: cx - rPx,
+                        top: cy - rPx,
+                        width: rPx * 2,
+                        height: rPx * 2,
+                        borderColor: col,
+                        backgroundColor: `${col}1f`,
+                        boxShadow: `0 0 18px ${col}44`,
+                      }}
+                    />
+                  )}
+                  {shape === 'cube' && (
+                    <div
+                      className="absolute rounded border-2 border-dashed"
+                      style={{
+                        left: cx - rPx / 2,
+                        top: cy - rPx / 2,
+                        width: rPx,
+                        height: rPx,
+                        borderColor: col,
+                        backgroundColor: `${col}1f`,
+                      }}
+                    />
+                  )}
+                  {(shape === 'cone' || shape === 'line') && (
+                    <svg
+                      className="absolute inset-0 overflow-visible"
+                      width={totalW}
+                      height={totalH}
+                    >
+                      <g transform={`translate(${cx}, ${cy}) rotate(${aoeAimPos.angleDeg})`}>
+                        {shape === 'cone' ? (
+                          <path
+                            d={`M 0 0 L ${rPx} ${-rPx * 0.52} A ${rPx} ${rPx} 0 0 1 ${rPx} ${rPx * 0.52} Z`}
+                            fill={`${col}24`}
+                            stroke={col}
+                            strokeWidth={2}
+                            strokeDasharray="6 4"
+                          />
+                        ) : (
+                          <rect
+                            x={0}
+                            y={-cellPx * 0.5}
+                            width={rPx}
+                            height={cellPx}
+                            rx={4}
+                            fill={`${col}24`}
+                            stroke={col}
+                            strokeWidth={2}
+                            strokeDasharray="6 4"
+                          />
+                        )}
+                      </g>
+                    </svg>
+                  )}
+                  <div
+                    className="absolute px-2 py-0.5 rounded bg-black/85 border text-[10px] font-display font-bold text-amber-200 whitespace-nowrap shadow-xl"
+                    style={{ left: cx + 10, top: Math.max(4, cy - 26), borderColor: col }}
+                  >
+                    {pendingAttackChoice.actionTitle} ({sizeMeters}m) • Clique para conjurar
+                    {shape === 'cone' || shape === 'line' ? ' • [R] Girar' : ''}
+                  </div>
+                </div>
               );
             })()}
 
@@ -2920,6 +3734,114 @@ export const StageCanvas: React.FC = () => {
               );
             })}
 
+            {/* Dynamic Token Light Auras (Torch / Lantern / Darkvision) */}
+            <div className="absolute inset-0 pointer-events-none z-8 overflow-hidden">
+              {activeMap.tokens.map((tok) => {
+                if (tok.isHidden && role !== 'gm') return null;
+                const radiusM = getTokenLightRadiusMeters(tok);
+                if (radiusM <= 0) return null;
+                const radiusPx = (radiusM / Math.max(0.5, sqMeters)) * cellPx;
+                const cx = (tok.x + (tok.size || 1) / 2) * cellPx;
+                const cy = (tok.y + (tok.size || 1) / 2) * cellPx;
+                const isTorch = tok.lightSource === 'torch';
+                const isDarkvision = tok.lightSource === 'darkvision';
+                const grad = isDarkvision
+                  ? 'radial-gradient(circle, rgba(129,140,248,0.16) 0%, rgba(99,102,241,0.08) 55%, transparent 78%)'
+                  : isTorch
+                    ? 'radial-gradient(circle, rgba(251,146,60,0.28) 0%, rgba(245,158,11,0.14) 50%, rgba(217,119,6,0.04) 74%, transparent 100%)'
+                    : 'radial-gradient(circle, rgba(253,224,71,0.24) 0%, rgba(250,204,21,0.12) 55%, transparent 82%)';
+                return (
+                  <div
+                    key={`light-${tok.id}`}
+                    className="absolute rounded-full pointer-events-none"
+                    style={{
+                      left: cx - radiusPx,
+                      top: cy - radiusPx,
+                      width: radiusPx * 2,
+                      height: radiusPx * 2,
+                      background: grad,
+                      mixBlendMode: 'screen',
+                    }}
+                  />
+                );
+              })}
+            </div>
+
+            {/* Visual Concentration Arcane Tethers (Caster -> Concentrating Spell Targets) */}
+            {(() => {
+              const tethers: Array<{
+                key: string;
+                x1: number;
+                y1: number;
+                x2: number;
+                y2: number;
+                label: string;
+                color: string;
+              }> = [];
+              activeMap.tokens.forEach((casterTok) => {
+                if (casterTok.type !== 'character' || !casterTok.referenceId) return;
+                if (casterTok.isHidden && role !== 'gm') return;
+                const casterChar = campaign.characters.find((c) => c.id === casterTok.referenceId);
+                if (!casterChar?.concentratingSpell || !casterChar.activeTrackedEffects?.length) return;
+                const x1 = (casterTok.x + (casterTok.size || 1) / 2) * cellPx;
+                const y1 = (casterTok.y + (casterTok.size || 1) / 2) * cellPx;
+                const color = casterChar.playerColor || '#e8c266';
+                casterChar.activeTrackedEffects
+                  .filter((e) => e.isConcentration)
+                  .forEach((eff) => {
+                    eff.targetTokenIds.forEach((tid) => {
+                      if (tid === casterTok.id) return;
+                      const targetTok = activeMap.tokens.find((t) => t.id === tid);
+                      if (!targetTok || (targetTok.isHidden && role !== 'gm')) return;
+                      const x2 = (targetTok.x + (targetTok.size || 1) / 2) * cellPx;
+                      const y2 = (targetTok.y + (targetTok.size || 1) / 2) * cellPx;
+                      tethers.push({
+                        key: `${casterTok.id}-${tid}-${eff.abilityKey}`,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        label: eff.abilityName,
+                        color,
+                      });
+                    });
+                  });
+              });
+              if (tethers.length === 0) return null;
+              return (
+                <svg
+                  className="absolute inset-0 pointer-events-none z-9"
+                  width={activeMap.gridWidth * cellPx}
+                  height={activeMap.gridHeight * cellPx}
+                >
+                  {tethers.map((t) => {
+                    const mx = (t.x1 + t.x2) / 2;
+                    const my = (t.y1 + t.y2) / 2 - 18;
+                    return (
+                      <g key={t.key}>
+                        <path
+                          d={`M ${t.x1} ${t.y1} Q ${mx} ${my} ${t.x2} ${t.y2}`}
+                          fill="none"
+                          stroke={t.color}
+                          strokeWidth={3.5}
+                          strokeOpacity={0.22}
+                        />
+                        <path
+                          d={`M ${t.x1} ${t.y1} Q ${mx} ${my} ${t.x2} ${t.y2}`}
+                          fill="none"
+                          stroke="#fde68a"
+                          strokeWidth={1.6}
+                          strokeDasharray="6 5"
+                          strokeOpacity={0.82}
+                        />
+                        <circle cx={t.x2} cy={t.y2} r={4} fill="#fde68a" fillOpacity={0.85} />
+                      </g>
+                    );
+                  })}
+                </svg>
+              );
+            })()}
+
             {/* Tokens with Token Stamp (#7), Turn Aura, Click Menu, Slash VFX & Floating Damage */}
             {activeMap.tokens.map((tok) => {
               if (tok.isHidden && role !== 'gm') return null;
@@ -3037,16 +3959,6 @@ export const StageCanvas: React.FC = () => {
                 Boolean(pendingAttackChoice && pendingAtkToken && pendingAtkToken.id !== tok.id) &&
                 pendingDist > pendingMaxMeters + 0.05;
 
-              const isSelfPendingTarget = Boolean(
-                pendingAttackChoice &&
-                  pendingAttackChoice.damageType !== 'Cura' &&
-                  ((pendingAttackChoice.attackerTokenId &&
-                    pendingAttackChoice.attackerTokenId === tok.id) ||
-                    (pendingAttackChoice.attackerCharacterId &&
-                      tok.type === 'character' &&
-                      tok.referenceId === pendingAttackChoice.attackerCharacterId))
-              );
-
               const removeTokenFromMapAndCombat = () => {
                 updateCampaign((prev) => ({
                   ...prev,
@@ -3069,6 +3981,8 @@ export const StageCanvas: React.FC = () => {
               return (
                 <div
                   key={tok.id}
+                  draggable={false}
+                  onDragStart={(e) => e.preventDefault()}
                   onMouseEnter={() => setHoveredTokenId(tok.id)}
                   onMouseLeave={() =>
                     setHoveredTokenId((curr) => (curr === tok.id ? null : curr))
@@ -3080,6 +3994,15 @@ export const StageCanvas: React.FC = () => {
                       return;
                     }
                     if (pendingAttackChoice) {
+                      if (pendingAttackChoice.aoeShape) {
+                        castAoEAbility(
+                          pendingAttackChoice,
+                          tok.x + (tok.size || 1) / 2,
+                          tok.y + (tok.size || 1) / 2,
+                          aoeAimPos.angleDeg
+                        );
+                        return;
+                      }
                       startCombatDuel(pendingAttackChoice, tok);
                       return;
                     }
@@ -3147,15 +4070,25 @@ export const StageCanvas: React.FC = () => {
                       !didDragTokenRef.current &&
                       !pendingAttackChoice
                     ) {
-                      setTargetTokenId(tok.id);
-                      if (
-                        tok.type === 'character' &&
-                        tok.referenceId &&
-                        (role === 'gm' || tok.referenceId === myCharacter?.id)
-                      ) {
-                        setActiveCharacterId(tok.referenceId);
+                      if (role === 'gm' && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+                        setSelectedTokenIds((prev) =>
+                          prev.includes(tok.id)
+                            ? prev.filter((id) => id !== tok.id)
+                            : [...prev, tok.id]
+                        );
+                        setSelectedTokenId(null);
+                      } else {
+                        setSelectedTokenIds([tok.id]);
+                        setTargetTokenId(tok.id);
+                        if (
+                          tok.type === 'character' &&
+                          tok.referenceId &&
+                          (role === 'gm' || tok.referenceId === myCharacter?.id)
+                        ) {
+                          setActiveCharacterId(tok.referenceId);
+                        }
+                        setSelectedTokenId(isMenuOpen ? null : tok.id);
                       }
-                      setSelectedTokenId(isMenuOpen ? null : tok.id);
                     }
                     finalizeTokenDrag();
                   }}
@@ -3184,7 +4117,7 @@ export const StageCanvas: React.FC = () => {
                   }`}
                   className={`absolute flex flex-col items-center justify-center ${
                     pendingAttackChoice
-                      ? isOutOfPendingRange || isSelfPendingTarget
+                      ? isOutOfPendingRange
                         ? 'cursor-not-allowed opacity-60'
                         : 'cursor-crosshair hover:scale-108'
                       : role === 'gm' ||
@@ -3193,7 +4126,13 @@ export const StageCanvas: React.FC = () => {
                             tok.referenceId === myCharacter.id)
                         ? 'cursor-grab active:cursor-grabbing'
                         : 'cursor-pointer'
-                  } ${tok.isHidden ? 'opacity-60 ring-1 ring-amber-400/50 rounded-full' : ''} ${hasHitSlash ? 'animate-crit-shake' : ''}`}
+                  } ${tok.isHidden ? 'opacity-60 ring-1 ring-amber-400/50 rounded-full' : ''} ${
+                    isTarget
+                      ? 'ring-[3px] ring-sky-400 ring-offset-2 ring-offset-black/80 rounded-full shadow-[0_0_24px_rgba(56,189,248,0.85)]'
+                      : selectedTokenIds.length > 1 && selectedTokenIds.includes(tok.id)
+                        ? 'ring-2 ring-amber-400 ring-offset-2 ring-offset-black/70 rounded-full'
+                        : ''
+                  } ${hasHitSlash ? 'animate-crit-shake' : ''}`}
                   style={{
                     left: tok.x * cellPx,
                     top: tok.y * cellPx,
@@ -3268,7 +4207,7 @@ export const StageCanvas: React.FC = () => {
                   {/* Token Stamp Miniature Coin */}
                   <div className="relative flex items-center justify-center">
                     <TokenPortrait
-                      name={tok.name}
+                      name={linkedChar?.name || tok.name}
                       imageUrl={portraitImg}
                       playerColor={tokenColor}
                       frameStyle={frameStyle}
@@ -3339,8 +4278,30 @@ export const StageCanvas: React.FC = () => {
                         OCULTO
                       </span>
                     )}
-                    <span>{tok.name}</span>
+                    <span>{linkedChar?.name || tok.name}</span>
                   </div>
+
+                  {/* Concentration Crest on Token Top-Left Rim */}
+                  {(linkedChar?.concentratingSpell ||
+                    campaign.combat.combatants.find((cb) => cb.tokenId === tok.id)
+                      ?.concentratingSpell) && (
+                    <div
+                      className="absolute -top-1.5 -left-1.5 w-5 h-5 rounded-md flex items-center justify-center text-[10px] pointer-events-none z-20 shadow-[0_2px_8px_rgba(0,0,0,0.9)]"
+                      style={{
+                        background:
+                          'linear-gradient(180deg, #e8c266 0%, #a87b22 100%)',
+                        border: '1px solid #fef08a',
+                        color: '#140e04',
+                      }}
+                      title={`Concentrando em: ${
+                        linkedChar?.concentratingSpell ||
+                        campaign.combat.combatants.find((cb) => cb.tokenId === tok.id)
+                          ?.concentratingSpell
+                      }`}
+                    >
+                      ✨
+                    </div>
+                  )}
 
                   {/* Floating Combat Damage/Heal Numbers */}
                   {tokenVfx.map((v) => (
@@ -3385,14 +4346,25 @@ export const StageCanvas: React.FC = () => {
                     >
                       <div className="flex items-center justify-between border-b pb-1.5" style={{ borderColor: 'var(--border-subtle)' }}>
                         <div>
-                          <div className="font-display font-bold text-sm">{tok.name}</div>
+                          <div className="font-display font-bold text-sm">
+                            {linkedChar?.name || tok.name}
+                          </div>
                           <div className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
                             CA{' '}
-                            {role !== 'gm' &&
-                            tok.type === 'monster' &&
-                            !campaign.settings.showEnemyAcToPlayers
-                              ? '??'
-                              : tok.defense}
+                            {(() => {
+                              const mDef = tok.referenceId
+                                ? campaign.compendium.monsters.find((m) => m.id === tok.referenceId)
+                                : undefined;
+                              const hideThisAc =
+                                tok.hideAcFromPlayers !== undefined
+                                  ? tok.hideAcFromPlayers
+                                  : mDef?.hideAcFromPlayers !== undefined
+                                    ? mDef.hideAcFromPlayers
+                                    : !campaign.settings.showEnemyAcToPlayers;
+                              return role !== 'gm' && tok.type === 'monster' && hideThisAc
+                                ? '??'
+                                : tok.defense;
+                            })()}
                             {role === 'gm' || tok.type === 'character' ? (
                               ` • PV ${tok.hp}/${tok.maxHp}`
                             ) : (
@@ -3412,6 +4384,59 @@ export const StageCanvas: React.FC = () => {
                           ✕
                         </button>
                       </div>
+
+                      {/* Light Source / Torch Controls (GM on any token, Player on own token) */}
+                      {(role === 'gm' ||
+                        (linkedChar && linkedChar.id === myCharacter?.id)) && (
+                        <div className="space-y-1 border-b pb-2" style={{ borderColor: 'var(--border-subtle)' }}>
+                          <div className="text-[10px] uppercase tracking-wider text-amber-300/90 font-display font-bold flex items-center justify-between">
+                            <span>Iluminação / Tocha</span>
+                            {getTokenLightRadiusMeters(tok) > 0 && (
+                              <span className="font-mono-dice text-[9px] text-amber-200">
+                                {getTokenLightRadiusMeters(tok)}m
+                              </span>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-4 gap-1">
+                            {TOKEN_LIGHT_PRESETS.map((preset) => {
+                              const activeLight = (tok.lightSource || 'none') === preset.id;
+                              return (
+                                <button
+                                  key={preset.id}
+                                  type="button"
+                                  onClick={() => {
+                                    updateActiveMap((m) => {
+                                      const nextTok: MapToken = {
+                                        ...tok,
+                                        lightSource: preset.id,
+                                        lightRadiusMeters: preset.radiusMeters || undefined,
+                                      };
+                                      return {
+                                        ...m,
+                                        tokens: m.tokens.map((t) =>
+                                          t.id === tok.id ? nextTok : t
+                                        ),
+                                        revealedCells:
+                                          preset.radiusMeters > 0 && m.fogEnabled
+                                            ? revealFogCellsAroundToken(m, nextTok, sqMeters)
+                                            : m.revealedCells,
+                                      };
+                                    });
+                                  }}
+                                  title={preset.label}
+                                  className={`px-1 py-1 rounded text-[10px] font-display font-bold border cursor-pointer transition text-center ${
+                                    activeLight
+                                      ? 'bg-amber-600/35 border-amber-400 text-amber-100'
+                                      : 'rpg-card hover:border-amber-400/60 opacity-85'
+                                  }`}
+                                >
+                                  {preset.short}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Own Character / GM Controlled Character Attacks (Click to aim on map) */}
                       {linkedChar &&
@@ -3606,6 +4631,20 @@ export const StageCanvas: React.FC = () => {
                         </div>
                       )}
 
+                      {/* BG3-Style Inspect Button (also triggered by pressing 'I' while hovering/selecting a token) */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedTokenId(null);
+                          openInspectEntity(tok.id);
+                        }}
+                        className="w-full rpg-card px-2.5 py-1 rounded-lg text-[11px] font-display font-semibold text-sky-200 hover:border-sky-400/70 flex items-center justify-center gap-1.5 cursor-pointer"
+                        title="Inspecionar criatura (Atalho: tecla I)"
+                      >
+                        <Eye className="w-3.5 h-3.5 text-sky-300" />
+                        <span>Inspecionar (I)</span>
+                      </button>
+
                       {/* Ally Help Action for Fallen Hero Token */}
                       {role === 'player' &&
                         linkedChar &&
@@ -3629,9 +4668,48 @@ export const StageCanvas: React.FC = () => {
                           </button>
                         )}
 
-                      {/* GM Controls: Next-Attack Adv/Disadv, Monster Attacks, Death Save Rescue, Quick HP, Hide, Delete */}
+                      {/* GM Controls: Free Token Resize (1x1 to 8x8), Next-Attack Adv/Disadv, Monster Attacks, Death Save Rescue, Quick HP, Hide, Delete */}
                       {role === 'gm' && (
                         <div className="space-y-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                          <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                            <span className="font-display font-bold uppercase tracking-wider text-amber-300/90">
+                              Tamanho: {tok.size}×{tok.size}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={tok.size <= 1}
+                                onClick={() =>
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    tokens: m.tokens.map((t) =>
+                                      t.id === tok.id ? { ...t, size: Math.max(1, t.size - 1) } : t
+                                    ),
+                                  }))
+                                }
+                                className="rpg-card px-2 py-0.5 rounded font-bold cursor-pointer disabled:opacity-35"
+                                title="Diminuir tamanho no grid"
+                              >
+                                -
+                              </button>
+                              <button
+                                type="button"
+                                disabled={tok.size >= 8}
+                                onClick={() =>
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    tokens: m.tokens.map((t) =>
+                                      t.id === tok.id ? { ...t, size: Math.min(8, t.size + 1) } : t
+                                    ),
+                                  }))
+                                }
+                                className="rpg-card px-2 py-0.5 rounded font-bold cursor-pointer disabled:opacity-35"
+                                title="Aumentar tamanho no grid (até 8×8)"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
                           {linkedChar && (
                             <div className="space-y-1">
                               <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/90">
@@ -3833,6 +4911,133 @@ export const StageCanvas: React.FC = () => {
                             </button>
                           </div>
 
+                          {/* GM Tactical Maneuvers for Monsters, NPCs & Heroes during Combat */}
+                          {campaign.combat.active && tok.hp > 0 && (
+                            <div className="space-y-1 border-t pt-2" style={{ borderColor: 'var(--border-subtle)' }}>
+                              <div className="text-[10px] uppercase tracking-wider text-amber-300/90 font-display font-bold">
+                                Manobras Táticas (Mestre):
+                              </div>
+                              <div className="grid grid-cols-3 gap-1">
+                                {(
+                                  [
+                                    { id: 'shove', label: 'Empurrar' },
+                                    { id: 'hide', label: 'Esconder' },
+                                    { id: 'jump', label: 'Saltar' },
+                                    { id: 'dash', label: 'Disparada' },
+                                    { id: 'disengage', label: 'Desengajar' },
+                                    { id: 'dodge', label: 'Esquivar' },
+                                    { id: 'help', label: 'Ajudar' },
+                                  ] as const
+                                ).map((m) => (
+                                  <button
+                                    key={m.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedTokenId(null);
+                                      performCombatManeuver(m.id, tok.id);
+                                    }}
+                                    className="rpg-card px-1.5 py-1 rounded text-[10px] font-display font-semibold hover:border-amber-400/70 cursor-pointer text-center"
+                                  >
+                                    {m.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Open Full Sheet for Monster / NPC */}
+                          {(tok.type === 'monster' || tok.type === 'npc') && tok.referenceId && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedTokenId(null);
+                                openEntitySheet({
+                                  kind: tok.type === 'monster' ? 'monster' : 'npc',
+                                  id: tok.referenceId!,
+                                });
+                              }}
+                              className="w-full rpg-card py-1.5 rounded text-[11px] font-display font-bold text-amber-200 hover:border-amber-400/70 cursor-pointer"
+                            >
+                              📜 Abrir Ficha Completa
+                            </button>
+                          )}
+
+                          {/* Per-Enemy Invisible CA & Boss Toggle (Monsters) */}
+                          {tok.type === 'monster' && (() => {
+                            const mDef = tok.referenceId
+                              ? campaign.compendium.monsters.find((m) => m.id === tok.referenceId)
+                              : undefined;
+                            const isAcHidden =
+                              tok.hideAcFromPlayers !== undefined
+                                ? tok.hideAcFromPlayers
+                                : mDef?.hideAcFromPlayers !== undefined
+                                  ? mDef.hideAcFromPlayers
+                                  : !campaign.settings.showEnemyAcToPlayers;
+                            return (
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    updateActiveMap((m) => ({
+                                      ...m,
+                                      tokens: m.tokens.map((t) =>
+                                        t.id === tok.id
+                                          ? { ...t, hideAcFromPlayers: !isAcHidden }
+                                          : t
+                                      ),
+                                    }))
+                                  }
+                                  className={`flex-1 py-1 rounded text-[10px] font-display font-bold border cursor-pointer ${
+                                    isAcHidden
+                                      ? 'bg-slate-900/80 border-amber-500/50 text-amber-200'
+                                      : 'bg-emerald-950/60 border-emerald-500/40 text-emerald-200'
+                                  }`}
+                                  title="Alternar se jogadores veem a CA deste inimigo específico"
+                                >
+                                  {isAcHidden ? 'CA: Oculta (??)' : 'CA: Visível'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    updateActiveMap((m) => ({
+                                      ...m,
+                                      tokens: m.tokens.map((t) =>
+                                        t.id === tok.id
+                                          ? {
+                                              ...t,
+                                              isBoss: !t.isBoss,
+                                              bossPhase: !t.isBoss ? 1 : undefined,
+                                              bossPhase2HpPct: t.bossPhase2HpPct ?? 50,
+                                              legendaryActionsMax: !t.isBoss
+                                                ? (t.legendaryActionsMax ?? 3)
+                                                : undefined,
+                                              legendaryActionsRemaining: !t.isBoss
+                                                ? (t.legendaryActionsMax ?? 3)
+                                                : undefined,
+                                              legendaryResistancesMax: !t.isBoss
+                                                ? (t.legendaryResistancesMax ?? 3)
+                                                : undefined,
+                                              legendaryResistancesRemaining: !t.isBoss
+                                                ? (t.legendaryResistancesMax ?? 3)
+                                                : undefined,
+                                            }
+                                          : t
+                                      ),
+                                    }))
+                                  }
+                                  className={`flex-1 py-1 rounded text-[10px] font-display font-bold border cursor-pointer ${
+                                    tok.isBoss
+                                      ? 'bg-red-950/90 border-amber-400/80 text-amber-200'
+                                      : 'rpg-card opacity-85 hover:opacity-100'
+                                  }`}
+                                  title="Ativar Barra de Chefe (Boss), Fases e Ações Lendárias"
+                                >
+                                  {tok.isBoss ? '👑 Chefe (Ativo)' : '👑 Tornar Chefe'}
+                                </button>
+                              </div>
+                            );
+                          })()}
+
                           <div className="flex items-center gap-1.5">
                             <button
                               onClick={() =>
@@ -3859,10 +5064,11 @@ export const StageCanvas: React.FC = () => {
 
                           {tok.type === 'character' && tok.referenceId && (
                             <button
-                              onClick={() => {
+                              onClick={async () => {
                                 if (
-                                  window.confirm(
-                                    `Excluir permanentemente o personagem "${tok.name}" de toda a campanha?`
+                                  await openConfirmDialog(
+                                    `Excluir permanentemente o personagem "${tok.name}" de toda a campanha?`,
+                                    'Excluir Personagem'
                                   )
                                 ) {
                                   deleteCharacter(tok.referenceId!);
@@ -4183,9 +5389,12 @@ export const StageCanvas: React.FC = () => {
                                 }}
                                 className="rpg-input w-full py-0.5 text-[10px]"
                               >
-                                <option value="reflexos">Reflexos</option>
-                                <option value="fortitude">Fortitude</option>
-                                <option value="vontade">Vontade</option>
+                                <option value="salv-forca">Vigor Físico (FOR)</option>
+                                <option value="reflexos">Reflexos (DES)</option>
+                                <option value="fortitude">Resiliência (CON)</option>
+                                <option value="salv-inteligencia">Lucidez (INT)</option>
+                                <option value="vontade">Vontade (SAB)</option>
+                                <option value="salv-carisma">Presença (CAR)</option>
                               </select>
                             </label>
                           </div>
@@ -4247,6 +5456,60 @@ export const StageCanvas: React.FC = () => {
                               Rearmar &amp; Ocultar Armadilha
                             </button>
                           )}
+                        </div>
+                      )}
+
+                      {/* Secret Passage Target Map Link & Instant Party Transfer */}
+                      {marker.kind === 'secret' && (
+                        <div className="space-y-1.5 p-2 rounded bg-purple-950/40 border border-purple-400/40 text-[10px]">
+                          <div className="font-display font-bold text-purple-200">
+                            Passagem Secreta — Destino
+                          </div>
+                          <label className="block">
+                            <span className="opacity-75 block mb-0.5">Mapa de Destino (Opcional)</span>
+                            <select
+                              value={marker.targetMapId || ''}
+                              onChange={(e) => {
+                                const val = e.target.value || undefined;
+                                updateActiveMap((m) => ({
+                                  ...m,
+                                  gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                    gm.id === marker.id ? { ...gm, targetMapId: val } : gm
+                                  ),
+                                }));
+                              }}
+                              className="rpg-input w-full py-1 text-[11px]"
+                            >
+                              <option value="">Apenas notificar (sem trocar mapa)</option>
+                              {campaign.maps
+                                .filter((mp) => mp.id !== activeMap.id)
+                                .map((mp) => (
+                                  <option key={mp.id} value={mp.id}>
+                                    Ir para: {mp.name}
+                                  </option>
+                                ))}
+                            </select>
+                          </label>
+                          <div className="flex gap-1.5 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => triggerSecretPassage(marker.id)}
+                              className="flex-1 rpg-card py-1 rounded font-display font-bold text-purple-200 cursor-pointer hover:border-purple-400/60"
+                            >
+                              Notificar
+                            </button>
+                            {marker.targetMapId && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  moveTokensToMap(activeMap.id, marker.targetMapId!, 'all-heroes')
+                                }
+                                className="flex-1 rpg-btn-primary py-1 rounded font-display font-bold cursor-pointer"
+                              >
+                                Levar Grupo →
+                              </button>
+                            )}
+                          </div>
                         </div>
                       )}
 
@@ -4393,6 +5656,14 @@ export const StageCanvas: React.FC = () => {
               );
             })}
 
+            {/* Animated Spell / Arrow Projectiles & Critical Impact Bursts */}
+            <ProjectileVfxCanvas
+              projectiles={projectileVfx.filter((p) => p.mapId === activeMap.id)}
+              cellPx={cellPx}
+              gridWidth={activeMap.gridWidth}
+              gridHeight={activeMap.gridHeight}
+            />
+
             {/* Fog of War Grid Cells */}
             {activeMap.fogEnabled && (
               <div className="absolute inset-0 pointer-events-none z-15">
@@ -4518,6 +5789,49 @@ export const StageCanvas: React.FC = () => {
                     </div>
                   ))}
                 </>
+              );
+            })()}
+
+            {/* Live Marquee Box Preview (Multi-Select Tokens OR Block Terrain/Fog Painting) */}
+            {marqueeBox && (() => {
+              const minX = Math.min(marqueeBox.startGx, marqueeBox.endGx);
+              const maxX = Math.max(marqueeBox.startGx, marqueeBox.endGx);
+              const minY = Math.min(marqueeBox.startGy, marqueeBox.endGy);
+              const maxY = Math.max(marqueeBox.startGy, marqueeBox.endGy);
+              const wCells = maxX - minX + 1;
+              const hCells = maxY - minY + 1;
+              const borderCol =
+                marqueeBox.mode === 'select'
+                  ? '#f59e0b'
+                  : marqueeBox.mode === 'fog'
+                    ? '#38bdf8'
+                    : tool === 'terrain-erase'
+                      ? '#ef4444'
+                      : '#a855f7';
+              const bgCol =
+                marqueeBox.mode === 'select'
+                  ? 'rgba(245, 158, 11, 0.16)'
+                  : marqueeBox.mode === 'fog'
+                    ? 'rgba(56, 189, 248, 0.18)'
+                    : tool === 'terrain-erase'
+                      ? 'rgba(239, 68, 68, 0.18)'
+                      : 'rgba(168, 85, 247, 0.22)';
+              return (
+                <div
+                  className="absolute pointer-events-none z-40 rounded-xs"
+                  style={{
+                    left: minX * cellPx,
+                    top: minY * cellPx,
+                    width: wCells * cellPx,
+                    height: hCells * cellPx,
+                    border: `2px dashed ${borderCol}`,
+                    backgroundColor: bgCol,
+                  }}
+                >
+                  <div className="absolute -top-5 left-0 px-1.5 py-0.5 rounded bg-black/90 border border-white/20 text-[10px] font-mono-dice font-bold text-amber-200 whitespace-nowrap">
+                    {wCells}×{hCells} ({wCells * hCells} qd)
+                  </div>
+                </div>
               );
             })()}
 

@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
+import { openAlertDialog } from './PromptDialog';
 import { computeCharacterStats } from '../shared/rulesEngine';
 import { GmNote, NpcEntry } from '../shared/types';
 import { FileUploadButton } from './FileUploadButton';
@@ -117,7 +118,7 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
       disposition: 'Neutro',
     };
     updateCampaign((prev) => ({ ...prev, npcs: [entry, ...prev.npcs] }));
-    window.alert(`${entry.name} salvo nos NPCs da campanha (oculto até você revelar)!`);
+    openAlertDialog(`${entry.name} salvo nos NPCs da campanha (oculto até você revelar)!`, 'NPC Salvo');
   };
 
   const generateTavern = () => {

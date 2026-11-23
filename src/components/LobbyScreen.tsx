@@ -28,6 +28,7 @@ import {
 } from '../shared/rulesEngine';
 import { FileUploadButton } from './FileUploadButton';
 import { OrnateDivider, OrnateFrame } from './OrnateFrame';
+import { openAlertDialog, openConfirmDialog } from './PromptDialog';
 import { TokenPortrait } from './TokenPortrait';
 
 interface TitleScene {
@@ -168,14 +169,14 @@ export const LobbyScreen: React.FC = () => {
         const parsed = JSON.parse(String(reader.result));
         const hero = parseHeroPayloadFromJson(parsed, campaign);
         if (!hero) {
-          window.alert('Arquivo de herói inválido. Selecione um .hero.json exportado pelo CHRONICLES.');
+          openAlertDialog('Arquivo de herói inválido. Selecione um .hero.json exportado pelo CHRONICLES.', 'Arquivo Inválido');
           return;
         }
         await saveCharacterToVault(hero);
         setHeroVaultToast(`${hero.name} salvo no Cofre de Heróis!`);
         window.setTimeout(() => setHeroVaultToast(null), 3000);
       } catch {
-        window.alert('Não foi possível ler este arquivo de personagem.');
+        openAlertDialog('Não foi possível ler este arquivo de personagem.', 'Erro de Leitura');
       }
     };
     reader.readAsText(file);
@@ -499,8 +500,8 @@ export const LobbyScreen: React.FC = () => {
                         <div className="flex items-center gap-1.5">
                           {savedCampaigns.length > 1 && (
                             <button
-                              onClick={() => {
-                                if (window.confirm(`Excluir a campanha "${camp.name}"?`)) {
+                              onClick={async () => {
+                                if (await openConfirmDialog(`Excluir a campanha "${camp.name}"?`, 'Excluir Campanha')) {
                                   deleteSavedCampaign(camp.id);
                                 }
                               }}
@@ -764,8 +765,8 @@ export const LobbyScreen: React.FC = () => {
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                if (window.confirm(`Remover "${ch.name}" do Cofre de Heróis?`)) {
+                              onClick={async () => {
+                                if (await openConfirmDialog(`Remover "${ch.name}" do Cofre de Heróis?`, 'Remover do Cofre')) {
                                   deleteSavedHero(entry.id);
                                 }
                               }}
@@ -806,6 +807,7 @@ export const LobbyScreen: React.FC = () => {
                 <label className="font-display font-bold block mb-1">1. Qual é o seu Nome? *</label>
                 <input
                   value={playerNameInput}
+                  maxLength={24}
                   onChange={(e) => setPlayerNameInput(e.target.value)}
                   placeholder="Ex: Lucas, Mariana..."
                   className="rpg-input w-full text-sm"

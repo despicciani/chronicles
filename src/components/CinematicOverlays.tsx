@@ -1,16 +1,21 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Crown,
   Dices,
+  Flame,
+  Moon,
   Music,
   ShieldAlert,
   Sparkles,
+  Sun,
+  Swords,
   X,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
+import { soundEngine } from '../utils/soundEngine';
 import {
   buildPreviewDiceForFormula,
   computeCharacterStats,
@@ -35,6 +40,11 @@ export const CinematicOverlays: React.FC = () => {
     activeReward,
     dismissReward,
     activeThemeBanner,
+    activeRestBanner,
+    dismissRestBanner,
+    activeMvpSummary,
+    dismissMvpSummary,
+    awardXp,
     mapBannerName,
     dismissMapBanner,
     announceBoss,
@@ -117,8 +127,267 @@ export const CinematicOverlays: React.FC = () => {
   const activeBoss = campaign.activeBoss;
   const [bossMinimized, setBossMinimized] = useState(false);
 
+  // Automatic "É O SEU TURNO!" Banner + Turn Herald SFX when combat turn changes
+  const [turnBanner, setTurnBanner] = useState<{
+    id: string;
+    isMyTurn: boolean;
+    name: string;
+    round: number;
+    color: string;
+  } | null>(null);
+  const lastTurnKeyRef = useRef<string>('');
+
+  useEffect(() => {
+    const combat = campaign.combat;
+    if (!combat.active || combat.combatants.length === 0) {
+      lastTurnKeyRef.current = '';
+      setTurnBanner(null);
+      return;
+    }
+    const activeCb = combat.combatants[combat.currentTurnIndex];
+    if (!activeCb) return;
+    const key = `${combat.round}-${combat.currentTurnIndex}-${activeCb.id}`;
+    if (key === lastTurnKeyRef.current) return;
+    lastTurnKeyRef.current = key;
+
+    const isMyTurn =
+      role === 'player' &&
+      Boolean(myCharacter && activeCb.referenceId && activeCb.referenceId === myCharacter.id);
+    if (isMyTurn) {
+      soundEngine.playSfxPreset('turn');
+    }
+    if (isMyTurn || role === 'gm') {
+      const id = `turn-${Date.now()}`;
+      setTurnBanner({
+        id,
+        isMyTurn,
+        name: activeCb.name,
+        round: combat.round,
+        color: isMyTurn ? '#e8c266' : activeCb.type === 'monster' ? '#dc2626' : '#d4aa48',
+      });
+      const timer = window.setTimeout(() => {
+        setTurnBanner((curr) => (curr?.id === id ? null : curr));
+      }, isMyTurn ? 3400 : 2200);
+      return () => window.clearTimeout(timer);
+    }
+  }, [campaign.combat, myCharacter, role]);
+
   return (
     <>
+      {/* 0A. "É O SEU TURNO!" / Turn Herald Banner */}
+      {turnBanner && (
+        <div
+          onClick={() => setTurnBanner(null)}
+          className="fixed top-20 left-1/2 -translate-x-1/2 z-45 pointer-events-auto cursor-pointer animate-modal-unfurl"
+        >
+          <OrnateFrame
+            accentColor={turnBanner.color}
+            cornerSize={14}
+            className="rpg-glass-panel rounded-lg px-6 py-2.5 flex items-center gap-3 shadow-[0_18px_48px_rgba(0,0,0,0.9)]"
+          >
+            <Swords className="w-5 h-5 shrink-0" style={{ color: turnBanner.color }} />
+            <div className="text-center leading-tight">
+              <div
+                className="font-chronicle font-black text-sm sm:text-base tracking-[0.18em] uppercase"
+                style={{ color: turnBanner.isMyTurn ? '#fde68a' : '#f3e5c0' }}
+              >
+                {turnBanner.isMyTurn ? 'É O SEU TURNO!' : `Turno de ${turnBanner.name}`}
+              </div>
+              <div className="text-[10px] font-display uppercase tracking-widest text-amber-300/75">
+                {turnBanner.isMyTurn
+                  ? `${turnBanner.name} • Rodada ${turnBanner.round} • Pressione Espaço p/ encerrar`
+                  : `Rodada ${turnBanner.round}`}
+              </div>
+            </div>
+            <Swords className="w-5 h-5 shrink-0 scale-x-[-1]" style={{ color: turnBanner.color }} />
+          </OrnateFrame>
+        </div>
+      )}
+
+      {/* 0B. PARTY REST CINEMATIC BANNER (Short / Long Rest) */}
+      {activeRestBanner && (
+        <div
+          onClick={dismissRestBanner}
+          className="fixed top-24 left-1/2 -translate-x-1/2 z-46 pointer-events-auto cursor-pointer animate-modal-unfurl"
+        >
+          <OrnateFrame
+            accentColor={activeRestBanner.kind === 'long' ? '#818cf8' : '#f59e0b'}
+            cornerSize={16}
+            className="rpg-glass-panel rounded-lg px-7 py-3.5 flex items-center gap-3.5 shadow-[0_22px_55px_rgba(0,0,0,0.92)] max-w-md"
+          >
+            {activeRestBanner.kind === 'long' ? (
+              <Moon className="w-6 h-6 text-indigo-300 shrink-0" />
+            ) : (
+              <div className="relative shrink-0">
+                <Flame className="w-6 h-6 text-amber-400" />
+                <Sun className="w-3 h-3 text-amber-200 absolute -top-1 -right-1" />
+              </div>
+            )}
+            <div className="leading-snug">
+              <div className="font-chronicle font-black text-sm tracking-[0.16em] uppercase text-amber-100">
+                {activeRestBanner.kind === 'long'
+                  ? 'Descanso Longo Concluído'
+                  : 'Descanso Curto Concluído'}
+              </div>
+              <div className="text-[11px] text-amber-200/80 mt-0.5">
+                {activeRestBanner.summary}
+              </div>
+            </div>
+          </OrnateFrame>
+        </div>
+      )}
+
+      {/* 0C. COMBAT VICTORY & MVP SUMMARY CARD */}
+      {activeMvpSummary && (
+        <div
+          onClick={dismissMvpSummary}
+          className="fixed inset-0 z-55 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 pointer-events-auto"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-lg w-full animate-modal-unfurl"
+          >
+            <OrnateFrame
+              accentColor="#e8c266"
+              cornerSize={18}
+              className="rpg-glass-panel rounded-xl p-5 space-y-4 shadow-[0_26px_75px_rgba(0,0,0,0.95)]"
+            >
+              <div className="flex items-start justify-between gap-3 border-b pb-3" style={{ borderColor: 'var(--border-subtle)' }}>
+                <div className="flex items-center gap-2.5">
+                  <Crown className="w-6 h-6 text-amber-400 shrink-0" />
+                  <div>
+                    <div className="font-chronicle font-black text-lg tracking-[0.16em] uppercase chronicle-gold-text">
+                      Combate Encerrado
+                    </div>
+                    <div className="text-[11px] text-amber-200/75 font-display">
+                      {activeMvpSummary.rounds}{' '}
+                      {activeMvpSummary.rounds === 1 ? 'rodada' : 'rodadas'} •{' '}
+                      {activeMvpSummary.enemiesDefeated}{' '}
+                      {activeMvpSummary.enemiesDefeated === 1
+                        ? 'inimigo derrotado'
+                        : 'inimigos derrotados'}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={dismissMvpSummary}
+                  className="rpg-card p-1.5 rounded-md hover:border-amber-400 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* MVP Highlights */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-center">
+                <div className="rpg-card rounded-lg p-2.5 border border-red-500/35">
+                  <div className="text-[9px] font-display uppercase tracking-wider text-red-300">
+                    ⚔️ Maior Dano
+                  </div>
+                  <div className="font-display font-bold text-xs text-amber-100 truncate mt-0.5">
+                    {activeMvpSummary.topDamageDealer?.name || '—'}
+                  </div>
+                  <div className="font-mono-dice font-black text-sm text-red-400">
+                    {activeMvpSummary.topDamageDealer
+                      ? `${activeMvpSummary.topDamageDealer.value} dano`
+                      : '0'}
+                  </div>
+                </div>
+                <div className="rpg-card rounded-lg p-2.5 border border-emerald-500/35">
+                  <div className="text-[9px] font-display uppercase tracking-wider text-emerald-300">
+                    💚 Maior Cura
+                  </div>
+                  <div className="font-display font-bold text-xs text-amber-100 truncate mt-0.5">
+                    {activeMvpSummary.topHealer?.name || '—'}
+                  </div>
+                  <div className="font-mono-dice font-black text-sm text-emerald-400">
+                    {activeMvpSummary.topHealer ? `+${activeMvpSummary.topHealer.value} PV` : '0'}
+                  </div>
+                </div>
+                <div className="rpg-card rounded-lg p-2.5 border border-amber-400/40">
+                  <div className="text-[9px] font-display uppercase tracking-wider text-amber-300">
+                    ✨ Críticos (Nat 20)
+                  </div>
+                  <div className="font-display font-bold text-xs text-amber-100 truncate mt-0.5">
+                    {activeMvpSummary.topCrits?.name || '—'}
+                  </div>
+                  <div className="font-mono-dice font-black text-sm text-amber-300">
+                    {activeMvpSummary.topCrits ? `${activeMvpSummary.topCrits.value}×` : '0'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Participant Scoreboard */}
+              {activeMvpSummary.participants.length > 0 && (
+                <div className="space-y-1 max-h-44 overflow-y-auto pr-1">
+                  <div className="text-[10px] font-display uppercase tracking-wider text-amber-300/80">
+                    Placar da Batalha
+                  </div>
+                  {activeMvpSummary.participants.map((p) => (
+                    <div
+                      key={p.name}
+                      className="rpg-card rounded-md px-3 py-1.5 flex items-center justify-between text-xs"
+                    >
+                      <span className="flex items-center gap-2 font-display font-bold truncate">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: p.color }}
+                        />
+                        <span className="truncate">{p.name}</span>
+                      </span>
+                      <span className="font-mono-dice text-[11px] flex items-center gap-3 shrink-0">
+                        <span className="text-red-300">{p.damage} dano</span>
+                        {p.healing > 0 && (
+                          <span className="text-emerald-300">+{p.healing} cura</span>
+                        )}
+                        {p.crits > 0 && <span className="text-amber-300">{p.crits} crit</span>}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Footer */}
+              <div className="flex items-center justify-between gap-2 pt-1">
+                {role === 'gm' ? (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        awardXp('all', 100);
+                        dismissMvpSummary();
+                      }}
+                      className="rpg-card px-2.5 py-1.5 rounded-md text-[11px] font-display font-bold text-amber-200 hover:border-amber-400 cursor-pointer"
+                    >
+                      +100 XP Grupo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        awardXp('all', 250);
+                        dismissMvpSummary();
+                      }}
+                      className="rpg-card px-2.5 py-1.5 rounded-md text-[11px] font-display font-bold text-amber-200 hover:border-amber-400 cursor-pointer"
+                    >
+                      +250 XP Grupo
+                    </button>
+                  </div>
+                ) : (
+                  <div />
+                )}
+                <button
+                  type="button"
+                  onClick={dismissMvpSummary}
+                  className="rpg-btn-primary px-4 py-1.5 rounded-md text-xs font-display font-bold cursor-pointer"
+                >
+                  Continuar Aventura
+                </button>
+              </div>
+            </OrnateFrame>
+          </div>
+        </div>
+      )}
+
       {/* 1. COMPACT GOTHIC BOSS BAR (Positioned bottom-right & Draggable!) */}
       {activeBoss && activeBoss.active && (
         <DraggablePanel

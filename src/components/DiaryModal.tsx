@@ -15,18 +15,27 @@ import { useCampaign } from '../context/CampaignContext';
 import { DAMAGE_TYPE_OPTIONS, findNearestFreeGridCell } from '../shared/rulesEngine';
 import { MonsterAttack, NpcEntry, Quest, SharedLootItem } from '../shared/types';
 import { FileUploadButton } from './FileUploadButton';
+import { openEntitySheet } from './EntitySheetModal';
+import { openTextPrompt } from './PromptDialog';
 import { TokenPortrait } from './TokenPortrait';
 
 interface DiaryModalProps {
   onClose: () => void;
+  mode?: 'diary' | 'npcs';
 }
 
-export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
+export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' }) => {
   const { campaign, role, updateCampaign } = useCampaign();
-  const [tab, setTab] = useState<'quests' | 'npcs' | 'treasury'>('quests');
+  const [tab, setTab] = useState<'quests' | 'npcs' | 'treasury'>(
+    mode === 'npcs' ? 'npcs' : 'quests'
+  );
+  const activeTab = mode === 'npcs' ? 'npcs' : tab === 'npcs' ? 'quests' : tab;
 
-  const addQuest = () => {
-    const title = window.prompt('Título da Missão / Objetivo:', 'Investigar a Torre Abandonada');
+  const addQuest = async () => {
+    const title = await openTextPrompt(
+      'Título da Missão / Objetivo:',
+      'Investigar a Torre Abandonada'
+    );
     if (!title) return;
     const q: Quest = {
       id: `quest-${Date.now()}`,
@@ -40,8 +49,8 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
     updateCampaign((p) => ({ ...p, quests: [q, ...p.quests] }));
   };
 
-  const addNpc = () => {
-    const name = window.prompt('Nome do NPC:', 'Novo Personagem');
+  const addNpc = async () => {
+    const name = await openTextPrompt('Nome do NPC:', 'Novo Personagem');
     if (!name) return;
     const npc: NpcEntry = {
       id: `npc-${Date.now()}`,
@@ -160,8 +169,11 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
     }));
   };
 
-  const addSharedLoot = () => {
-    const name = window.prompt('Nome do item / pista para o Baú do Grupo:', 'Pergaminho Selado');
+  const addSharedLoot = async () => {
+    const name = await openTextPrompt(
+      'Nome do item / pista para o Baú do Grupo:',
+      'Pergaminho Selado'
+    );
     if (!name) return;
     const item: SharedLootItem = {
       id: `loot-${Date.now()}`,
@@ -188,13 +200,19 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
           style={{ borderColor: 'var(--border-subtle)' }}
         >
           <div className="flex items-center gap-2">
-            <ScrollText className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
+            {mode === 'npcs' ? (
+              <Users className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
+            ) : (
+              <ScrollText className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
+            )}
             <div>
               <h2 className="font-display font-bold text-base leading-none">
-                Diário Compartilhado da Campanha
+                {mode === 'npcs' ? 'Criador & Diretório de NPCs' : 'Diário Compartilhado da Campanha'}
               </h2>
               <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                Missões ativas, galeria de NPCs conhecidos com notas do grupo e tesouro coletivo.
+                {mode === 'npcs'
+                  ? 'Crie aliados, mercadores e figurantes com foto, história e combate opcional (separado do Bestiário).'
+                  : 'Missões ativas e tesouro coletivo do grupo.'}
               </p>
             </div>
           </div>
@@ -204,39 +222,32 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
         </div>
 
         {/* Tabs */}
-        <div className="px-4 py-2 border-b flex items-center gap-2 shrink-0" style={{ borderColor: 'var(--border-subtle)' }}>
-          <button
-            onClick={() => setTab('quests')}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
-              tab === 'quests' ? 'rpg-btn-primary' : 'rpg-card'
-            }`}
-          >
-            <ScrollText className="w-4 h-4" />
-            <span>Mural de Missões ({campaign.quests.length})</span>
-          </button>
-          <button
-            onClick={() => setTab('npcs')}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
-              tab === 'npcs' ? 'rpg-btn-primary' : 'rpg-card'
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            <span>NPCs Conhecidos ({visibleNpcs.length})</span>
-          </button>
-          <button
-            onClick={() => setTab('treasury')}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
-              tab === 'treasury' ? 'rpg-btn-primary' : 'rpg-card'
-            }`}
-          >
-            <Coins className="w-4 h-4" />
-            <span>Tesouro do Grupo ({campaign.groupTreasury.gold} PO)</span>
-          </button>
-        </div>
+        {mode !== 'npcs' && (
+          <div className="px-4 py-2 border-b flex items-center gap-2 shrink-0" style={{ borderColor: 'var(--border-subtle)' }}>
+            <button
+              onClick={() => setTab('quests')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'quests' ? 'rpg-btn-primary' : 'rpg-card'
+              }`}
+            >
+              <ScrollText className="w-4 h-4" />
+              <span>Mural de Missões ({campaign.quests.length})</span>
+            </button>
+            <button
+              onClick={() => setTab('treasury')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'treasury' ? 'rpg-btn-primary' : 'rpg-card'
+              }`}
+            >
+              <Coins className="w-4 h-4" />
+              <span>Tesouro do Grupo ({campaign.groupTreasury.gold} PO)</span>
+            </button>
+          </div>
+        )}
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 min-h-0">
-          {tab === 'quests' && (
+          {activeTab === 'quests' && (
             <div className="space-y-3 text-xs">
               <div className="flex justify-end">
                 <button
@@ -326,7 +337,7 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
             </div>
           )}
 
-          {tab === 'npcs' && (
+          {activeTab === 'npcs' && (
             <div className="space-y-3 text-xs">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -395,8 +406,17 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
                           </div>
                         </div>
 
-                        {role === 'gm' && (
-                          <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => openEntitySheet({ kind: 'npc', id: npc.id })}
+                            className="rpg-card px-2 py-1 rounded text-[10px] font-display font-bold text-amber-200 hover:border-amber-400/60 cursor-pointer"
+                            title="Abrir Ficha Completa deste NPC"
+                          >
+                            📜 Ficha
+                          </button>
+                          {role === 'gm' && (
+                            <>
                             <button
                               onClick={() => placeNpcOnActiveMap(npc)}
                               className="rpg-btn-primary px-2 py-1 rounded text-[10px] font-display font-bold flex items-center gap-1 cursor-pointer"
@@ -435,8 +455,9 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
-                          </div>
-                        )}
+                            </>
+                          )}
+                        </div>
                       </div>
 
                       {role === 'gm' && (
@@ -574,26 +595,99 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
                                 </div>
 
                                 <div className="space-y-1.5">
-                                  <div className="flex items-center justify-between">
+                                  <div className="flex flex-wrap items-center justify-between gap-1.5">
                                     <span className="text-[10px] font-bold opacity-80">Ataques do NPC</span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const nextAtk: MonsterAttack = {
-                                          name: 'Adaga / Golpe',
-                                          attackBonus: 3,
-                                          damageFormula: '1d4 + 1',
-                                          damageType: 'Perfuração',
-                                          range: '1,5m',
-                                        };
-                                        updateNpc(npc.id, {
-                                          attacks: [...(npc.attacks || []), nextAtk],
-                                        });
-                                      }}
-                                      className="rpg-card px-2 py-0.5 rounded text-[10px] cursor-pointer hover:border-amber-400/60"
-                                    >
-                                      + Ataque
-                                    </button>
+                                    <div className="flex items-center gap-1">
+                                      <select
+                                        value=""
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          if (!val) return;
+                                          const [kind, refId] = val.split('::');
+                                          let nextAtk: MonsterAttack | null = null;
+                                          if (kind === 'item') {
+                                            const it = campaign.compendium.items.find((i) => i.id === refId);
+                                            if (it) {
+                                              nextAtk = {
+                                                name: it.name,
+                                                attackBonus: 4,
+                                                damageFormula: (it.damageFormula || '1d8').replace(/@\w+/g, '0').replace(/\+\s*0\b/g, '').trim() || '1d8',
+                                                damageType: it.damageType || 'Corte',
+                                                range: it.range || '1,5m',
+                                                sourceItemId: it.id,
+                                              };
+                                            }
+                                          } else if (kind === 'ability') {
+                                            const ab = campaign.compendium.abilities.find((a) => a.id === refId);
+                                            if (ab) {
+                                              const hasNoDamage = !ab.damageType;
+                                              const isHeal = ab.damageType?.toLowerCase() === 'cura';
+                                              nextAtk = {
+                                                name: ab.name,
+                                                attackBonus: hasNoDamage || isHeal ? 0 : 4,
+                                                damageFormula: hasNoDamage
+                                                  ? ''
+                                                  : (ab.damageFormula || '1d8').replace(/@\w+/g, '0').replace(/\+\s*0\b/g, '').trim() || '1d8',
+                                                damageType: ab.damageType || '',
+                                                range: ab.range || 'Pessoal',
+                                                sourceAbilityId: ab.id,
+                                                applyConditionId: ab.applyConditionId,
+                                                conditionDurationRounds: ab.conditionDurationRounds,
+                                              };
+                                            }
+                                          }
+                                          if (nextAtk) {
+                                            updateNpc(npc.id, {
+                                              combatEnabled: true,
+                                              attacks: [...(npc.attacks || []), nextAtk],
+                                            });
+                                          }
+                                        }}
+                                        className="rpg-input py-0.5 px-1.5 text-[10px] max-w-[160px]"
+                                        title="Importar arma ou habilidade criada no Compêndio"
+                                      >
+                                        <option value="">+ Do Compêndio...</option>
+                                        {campaign.compendium.items.filter((i) => i.type === 'Arma').length > 0 && (
+                                          <optgroup label="Armas">
+                                            {campaign.compendium.items
+                                              .filter((i) => i.type === 'Arma')
+                                              .map((it) => (
+                                                <option key={it.id} value={`item::${it.id}`}>
+                                                  ⚔ {it.name}
+                                                </option>
+                                              ))}
+                                          </optgroup>
+                                        )}
+                                        {campaign.compendium.abilities.length > 0 && (
+                                          <optgroup label="Habilidades / Magias">
+                                            {campaign.compendium.abilities.map((ab) => (
+                                              <option key={ab.id} value={`ability::${ab.id}`}>
+                                                ✨ {ab.name}
+                                              </option>
+                                            ))}
+                                          </optgroup>
+                                        )}
+                                      </select>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const nextAtk: MonsterAttack = {
+                                            name: 'Adaga / Golpe',
+                                            attackBonus: 3,
+                                            damageFormula: '1d4 + 1',
+                                            damageType: 'Perfuração',
+                                            range: '1,5m',
+                                          };
+                                          updateNpc(npc.id, {
+                                            combatEnabled: true,
+                                            attacks: [...(npc.attacks || []), nextAtk],
+                                          });
+                                        }}
+                                        className="rpg-card px-2 py-0.5 rounded text-[10px] cursor-pointer hover:border-amber-400/60"
+                                      >
+                                        + Ataque
+                                      </button>
+                                    </div>
                                   </div>
 
                                   {(npc.attacks || []).map((atk, aIdx) => (
@@ -709,7 +803,7 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose }) => {
             </div>
           )}
 
-          {tab === 'treasury' && (
+          {activeTab === 'treasury' && (
             <div className="space-y-4 text-xs">
               <div className="rpg-card rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   Bell,
@@ -37,10 +37,14 @@ import {
   evaluateFormula,
   findNearestFreeGridCell,
   formatFormulaForDisplay,
+  formatSigned,
+  getCharacterCustomResourceState,
 } from '../shared/rulesEngine';
 import { ActionEconomyCost, NpcEntry } from '../shared/types';
 import { DraggablePanel, DragGripBadge } from './DraggablePanel';
+import { openEntitySheet } from './EntitySheetModal';
 import { OrnateFrame, SculptedHealthBar } from './OrnateFrame';
+import { openConfirmDialog, openTextPrompt } from './PromptDialog';
 import { TokenPortrait } from './TokenPortrait';
 
 interface PlayerActionHUDProps {
@@ -63,6 +67,11 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     targetTokenId,
     setTargetTokenId,
     rollCharacterAction,
+    awardXp,
+    pushCombatLog,
+    toggleHeroInspiration,
+    spendHeroInspiration,
+    quickRollFormula,
     sendPlayerRequest,
     pendingRequests,
     resolvePlayerRequest,
@@ -74,10 +83,15 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     rollDeathSave,
     assistDeathSave,
     gmResolveDeathSave,
+    activeSecretPassage,
+    dismissSecretPassage,
+    moveTokensToMap,
+    resolveAssetUrl,
     sendRoll,
     triggerSlashVfx,
     tacticalAlert,
     opportunityPrompt,
+    opportunityQueueCount,
     triggerOpportunityPrompt,
     performCombatManeuver,
     startCombatDuel,
@@ -98,6 +112,11 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
   } = useCampaign();
 
   const [showRestMenu, setShowRestMenu] = useState(false);
+  const [showConcMenu, setShowConcMenu] = useState(false);
+  const [showPlayerActions, setShowPlayerActions] = useState(false);
+  const [showGmActions, setShowGmActions] = useState(false);
+  const [actionSearch, setActionSearch] = useState('');
+  const [playerSheetCollapsed, setPlayerSheetCollapsed] = useState(true);
   const [gmRosterCollapsed, setGmRosterCollapsed] = useState(true);
   const [gmRosterTab, setGmRosterTab] = useState<'heroes' | 'npcs' | 'monsters'>('heroes');
   const [expandedHeroId, setExpandedHeroId] = useState<string | null>(null);
@@ -121,14 +140,21 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     .filter((inv) => inv.equipped)
     .flatMap((inv) => {
       const def = campaign.compendium.items.find((i) => i.id === inv.itemId);
-      if (!def || !def.attackFormula) return [];
+      if (!def || def.type !== 'Arma' || !def.attackFormula) return [];
       return [def];
     });
-  const quickAbilities = hero?.customAbilities || [];
+  const quickAbilities = (hero?.customAbilities || []).filter((a) => a.actionType !== 'Passiva');
+  const passiveCustomAbilities = (hero?.customAbilities || []).filter(
+    (a) => a.actionType === 'Passiva',
+  );
   const compendiumAbilities = (hero?.knownAbilityIds || [])
     .map((id) => campaign.compendium.abilities.find((a) => a.id === id))
     .filter((a): a is NonNullable<typeof a> => Boolean(a))
     .filter((a) => a.actionType !== 'Passiva');
+  const passiveCompendiumAbilities = (hero?.knownAbilityIds || [])
+    .map((id) => campaign.compendium.abilities.find((a) => a.id === id))
+    .filter((a): a is NonNullable<typeof a> => Boolean(a))
+    .filter((a) => a.actionType === 'Passiva');
 
   const toEconomyCost = (actionType: string): ActionEconomyCost =>
     actionType === 'Bônus'
@@ -155,6 +181,114 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     if (cost === 'Reação') return heroCombatant.reactionAvailable === false;
     return false;
   };
+
+  // Tactical Keyboard Shortcuts: Esc (cancel targeting), 1-9 (hotbar slots), Space (end my combat turn)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (e.key === 'Escape' && pendingAttackChoice) {
+        e.preventDefault();
+        setPendingAttackChoice(null);
+        return;
+      }
+
+      if (role !== 'player' || !hero || hero.hp <= 0) return;
+
+      if (/^[1-9]$/.test(e.key)) {
+        const slotIndex = Number(e.key) - 1;
+        const hotbarTriggers: Array<() => void> = [
+          ...quickAttacks.map((atk) => () =>
+            rollCharacterAction({
+              characterId: hero.id,
+              title: atk.name,
+              attackFormula: atk.attackBonusFormula,
+              damageFormula: atk.damageFormula,
+              damageType: atk.damageType,
+              range: atk.range,
+              actionCost: 'Padrão',
+            })
+          ),
+          ...quickWeapons.map((wp) => () =>
+            rollCharacterAction({
+              characterId: hero.id,
+              title: wp.name,
+              attackFormula: wp.attackFormula,
+              damageFormula: wp.damageFormula,
+              damageType: wp.damageType,
+              range: wp.range,
+              actionCost: 'Padrão',
+            })
+          ),
+          ...quickAbilities.map((ab) => () =>
+            rollCharacterAction({
+              characterId: hero.id,
+              title: ab.name,
+              attackFormula: ab.attackFormula,
+              damageFormula: ab.damageFormula,
+              damageType: ab.damageType,
+              range: ab.range,
+              actionCost: toEconomyCost(ab.actionType),
+              costMp: ab.costMp,
+            })
+          ),
+          ...compendiumAbilities.map((ab) => () =>
+            rollCharacterAction({
+              characterId: hero.id,
+              title: ab.name,
+              attackFormula: ab.attackFormula,
+              damageFormula: ab.damageFormula,
+              damageType: ab.damageType,
+              range: ab.range,
+              actionCost: toEconomyCost(ab.actionType),
+              saveSkillId: ab.saveSkillId,
+              saveDcFormula: ab.saveDcFormula,
+              costMp: ab.costMp,
+              costResourceId: ab.costResourceId,
+              applyConditionId: ab.applyConditionId,
+              conditionDurationRounds: ab.conditionDurationRounds,
+              aoeShape: ab.aoeShape,
+              aoeSizeMeters: ab.aoeSizeMeters,
+              aoeColor: ab.aoeColor,
+              aoePersistent: ab.aoePersistent,
+            })
+          ),
+        ];
+        if (slotIndex < hotbarTriggers.length) {
+          e.preventDefault();
+          setShowPlayerActions(false);
+          hotbarTriggers[slotIndex]();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    activeTurnCombatant,
+    campaign.combat,
+    compendiumAbilities,
+    hero,
+    heroCombatant,
+    pendingAttackChoice,
+    quickAbilities,
+    quickAttacks,
+    quickWeapons,
+    role,
+    rollCharacterAction,
+    setPendingAttackChoice,
+    triggerOpportunityPrompt,
+    updateCampaign,
+  ]);
 
   const activeMap =
     campaign.maps.find((m) => m.id === campaign.activeMapId) || campaign.maps[0];
@@ -232,16 +366,18 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                   ),
                 }
           ),
-          combat: isMp
-            ? prev.combat
-            : {
-                ...prev.combat,
-                combatants: prev.combat.combatants.map((c) =>
-                  c.type === 'character' && c.referenceId === hero.id
-                    ? { ...c, hp: nextHp, maxHp: stats.maxHp }
-                    : c
-                ),
-              },
+          combat: {
+            ...prev.combat,
+            combatants: prev.combat.combatants.map((c) =>
+              c.type === 'character' && c.referenceId === hero.id
+                ? {
+                    ...c,
+                    ...(isMp ? {} : { hp: nextHp, maxHp: stats.maxHp }),
+                    ...(prev.combat.active ? { bonusActionAvailable: false } : {}),
+                  }
+                : c
+            ),
+          },
         }));
 
         const heroToken = activeMap?.tokens.find(
@@ -356,8 +492,8 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     setTargetTokenId(newId);
   };
 
-  const quickCreateNpc = () => {
-    const name = window.prompt('Nome do novo NPC:', 'Novo NPC');
+  const quickCreateNpc = async () => {
+    const name = await openTextPrompt('Nome do novo NPC:', 'Novo NPC');
     if (!name || !name.trim()) return;
     const npc: NpcEntry = {
       id: `npc-${Date.now()}`,
@@ -597,8 +733,13 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               <div className="flex items-center gap-2">
                 <Zap className="w-5 h-5 text-amber-400 shrink-0" />
                 <div className="text-xs">
-                  <div className="font-display font-bold text-amber-300 uppercase tracking-wider">
-                    Ataque de Oportunidade! (Reação)
+                  <div className="font-display font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                    <span>Ataque de Oportunidade! (Reação)</span>
+                    {opportunityQueueCount > 1 && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-[10px] text-amber-200">
+                        1 de {opportunityQueueCount}
+                      </span>
+                    )}
                   </div>
                   <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
                     <strong>{opportunityPrompt.targetName}</strong> saiu do alcance corpo a corpo de{' '}
@@ -835,6 +976,141 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
         </DraggablePanel>
       )}
 
+      {/* Secret Passage Notification Banner (with 1-Click Map Transfer for GM) */}
+      {activeSecretPassage && (role === 'gm' || activeSecretPassage.revealed) && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 max-w-lg w-[94vw] pointer-events-auto animate-ui-enter">
+          <OrnateFrame
+            accentColor="#c084fc"
+            cornerSize={14}
+            className="rpg-glass-panel rounded-lg p-4 space-y-3 shadow-2xl border border-purple-400/60"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-widest font-display font-bold text-purple-300">
+                  Passagem Secreta {activeSecretPassage.revealed ? 'Descoberta' : 'Acionada (Oculta)'}
+                </div>
+                <h4 className="font-display font-bold text-base text-amber-100 mt-0.5">
+                  {activeSecretPassage.markerTitle}
+                </h4>
+                <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
+                  {activeSecretPassage.tokenName
+                    ? `${activeSecretPassage.tokenName} encontrou esta passagem.`
+                    : 'Passagem secreta ativada no mapa.'}
+                  {activeSecretPassage.markerDescription ? ` ${activeSecretPassage.markerDescription}` : ''}
+                </p>
+                {activeSecretPassage.targetMapName && (
+                  <div className="text-[11px] text-purple-200 font-semibold mt-1">
+                    Destino vinculado: <span className="text-amber-300">{activeSecretPassage.targetMapName}</span>
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={dismissSecretPassage}
+                className="rpg-card p-1 rounded cursor-pointer"
+                title="Fechar aviso"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {role !== 'gm' &&
+              activeSecretPassage.revealed &&
+              activeSecretPassage.targetMapId && (
+                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const myTokId =
+                        activeSecretPassage.tokenId ||
+                        activeMap?.tokens.find(
+                          (t) =>
+                            t.type === 'character' &&
+                            myCharacter &&
+                            t.referenceId === myCharacter.id
+                        )?.id;
+                      if (myTokId) {
+                        moveTokensToMap(
+                          activeSecretPassage.sourceMapId,
+                          activeSecretPassage.targetMapId!,
+                          [myTokId]
+                        );
+                      } else {
+                        updateCampaign((prev) => ({
+                          ...prev,
+                          activeMapId: activeSecretPassage.targetMapId!,
+                        }));
+                        dismissSecretPassage();
+                      }
+                    }}
+                    className="rpg-btn-primary px-3.5 py-1.5 rounded text-xs font-display font-bold cursor-pointer"
+                  >
+                    Atravessar Passagem → {activeSecretPassage.targetMapName}
+                  </button>
+                </div>
+              )}
+
+            {role === 'gm' && (
+              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-white/10">
+                {!activeSecretPassage.revealed && (
+                  <button
+                    onClick={() => {
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        maps: prev.maps.map((m) =>
+                          m.id === activeSecretPassage.sourceMapId
+                            ? {
+                                ...m,
+                                gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                  gm.id === activeSecretPassage.markerId
+                                    ? { ...gm, revealed: true }
+                                    : gm
+                                ),
+                              }
+                            : m
+                        ),
+                      }));
+                    }}
+                    className="rpg-card px-3 py-1.5 rounded text-xs font-display font-bold text-purple-200 border border-purple-400/50 cursor-pointer"
+                  >
+                    Revelar Passagem
+                  </button>
+                )}
+
+                {activeSecretPassage.targetMapId && activeSecretPassage.tokenId && (
+                  <button
+                    onClick={() =>
+                      moveTokensToMap(
+                        activeSecretPassage.sourceMapId,
+                        activeSecretPassage.targetMapId!,
+                        [activeSecretPassage.tokenId!]
+                      )
+                    }
+                    className="rpg-btn-primary px-3 py-1.5 rounded text-xs font-display font-bold cursor-pointer"
+                  >
+                    Mover {activeSecretPassage.tokenName || 'Herói'} → {activeSecretPassage.targetMapName}
+                  </button>
+                )}
+
+                {activeSecretPassage.targetMapId && (
+                  <button
+                    onClick={() =>
+                      moveTokensToMap(
+                        activeSecretPassage.sourceMapId,
+                        activeSecretPassage.targetMapId!,
+                        'all-heroes'
+                      )
+                    }
+                    className="rpg-card px-3 py-1.5 rounded text-xs font-display font-bold text-amber-200 border border-amber-400/50 cursor-pointer"
+                  >
+                    Mover Grupo Inteiro → {activeSecretPassage.targetMapName}
+                  </button>
+                )}
+              </div>
+            )}
+          </OrnateFrame>
+        </div>
+      )}
+
       {/* Tactical Rule Alert (Range / Action Economy / Turn Guard) */}
       {tacticalAlert && (
         <div className="fixed bottom-32 left-1/2 -translate-x-1/2 z-45 pointer-events-none animate-ui-enter">
@@ -959,7 +1235,50 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                       Nenhum herói criado nesta campanha ainda.
                     </div>
                   ) : (
-                    campaign.characters.map((ch) => {
+                    <>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const raw = await openTextPrompt(
+                              'Dar XP para TODOS os heróis do grupo:',
+                              '250'
+                            );
+                            const val = Number(raw);
+                            if (raw && Number.isFinite(val) && val !== 0) {
+                              awardXp('all', val);
+                            }
+                          }}
+                          className="rpg-btn-primary px-2 py-1.5 rounded-md text-[10px] font-display font-bold flex items-center justify-center gap-1 cursor-pointer"
+                          title="Conceder XP para todos os heróis simultaneamente (com Level Up automático)"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          <span>+XP Grupo</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateCampaign((prev) => ({
+                              ...prev,
+                              activeLootChest: prev.activeLootChest?.open
+                                ? prev.activeLootChest
+                                : {
+                                    id: `chest-${Date.now()}`,
+                                    title: 'Baú de Tesouro',
+                                    gold: 100,
+                                    items: [],
+                                    open: true,
+                                  },
+                            }))
+                          }
+                          className="rpg-card px-2 py-1.5 rounded-md text-[10px] font-display font-bold text-amber-200 hover:border-amber-400 flex items-center justify-center gap-1 cursor-pointer"
+                          title="Abrir um Baú de Saque ao vivo na tela de todos os jogadores"
+                        >
+                          <Sparkles className="w-3 h-3 text-amber-400" />
+                          <span>Baú Saque</span>
+                        </button>
+                      </div>
+                      {campaign.characters.map((ch) => {
                       const chStats = computeCharacterStats(ch, campaign);
                       const chClass = campaign.compendium.classes.find((cl) => cl.id === ch.classId);
                       const chRace = campaign.compendium.races.find((rc) => rc.id === ch.raceId);
@@ -975,7 +1294,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         .filter((inv) => inv.equipped)
                         .flatMap((inv) => {
                           const def = campaign.compendium.items.find((i) => i.id === inv.itemId);
-                          return def && def.attackFormula ? [def] : [];
+                          return def && def.type === 'Arma' && def.attackFormula ? [def] : [];
                         });
 
                       const heroAbilities = (ch.knownAbilityIds || [])
@@ -1238,7 +1557,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                             )}
                           </div>
 
-                          {/* GM 1-Click Next-Attack Advantage / Disadvantage Override */}
+                          {/* GM 1-Click Next-Attack Advantage / Disadvantage Override + Individual XP */}
                           <div className="flex items-center gap-1 text-[9px]">
                             <button
                               onClick={() => setCharacterNextAttackOverride(ch.id, 'advantage')}
@@ -1249,7 +1568,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                               }`}
                               title="Conceder Vantagem no próximo ataque deste jogador"
                             >
-                              +Vant Próx.
+                              +Vant
                             </button>
                             <button
                               onClick={() => setCharacterNextAttackOverride(ch.id, 'disadvantage')}
@@ -1260,7 +1579,35 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                               }`}
                               title="Impor Desvantagem no próximo ataque deste jogador"
                             >
-                              +Desv Próx.
+                              +Desv
+                            </button>
+                            <button
+                              onClick={async () => {
+                                const raw = await openTextPrompt(`Dar XP para ${ch.name}:`, '100');
+                                const val = Number(raw);
+                                if (raw && Number.isFinite(val) && val !== 0) {
+                                  awardXp([ch.id], val);
+                                }
+                              }}
+                              className="px-1.5 py-0.5 rounded font-display font-bold border border-amber-400/50 bg-amber-950/60 text-amber-200 hover:bg-amber-800/80 cursor-pointer"
+                              title={`Conceder XP individual para ${ch.name} (Atual: ${ch.xp ?? 0} XP)`}
+                            >
+                              +XP
+                            </button>
+                            <button
+                              onClick={() => toggleHeroInspiration(ch.id)}
+                              className={`px-1.5 py-0.5 rounded font-display font-bold border cursor-pointer transition ${
+                                ch.hasInspiration
+                                  ? 'bg-amber-500/30 border-amber-300 text-amber-200 shadow-[0_0_8px_rgba(251,191,36,0.5)]'
+                                  : 'rpg-card text-amber-300/70 hover:border-amber-400'
+                              }`}
+                              title={
+                                ch.hasInspiration
+                                  ? `${ch.name} possui ★ Inspiração Heroica (clique para remover)`
+                                  : `Conceder ★ Inspiração Heroica para ${ch.name}`
+                              }
+                            >
+                              ★
                             </button>
                           </div>
 
@@ -1309,10 +1656,11 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                             )}
 
                             <button
-                              onClick={() => {
+                              onClick={async () => {
                                 if (
-                                  window.confirm(
-                                    `Excluir permanentemente o personagem "${ch.name}" desta campanha?`
+                                  await openConfirmDialog(
+                                    `Excluir permanentemente o personagem "${ch.name}" desta campanha?`,
+                                    'Excluir Personagem'
                                   )
                                 ) {
                                   deleteCharacter(ch.id);
@@ -1457,7 +1805,8 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                           )}
                         </div>
                       );
-                    })
+                    })}
+                    </>
                   )
                 ) : gmRosterTab === 'npcs' ? (
                   <div className="space-y-2">
@@ -1688,7 +2037,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
           <OrnateFrame
             accentColor="#d4aa48"
             cornerSize={16}
-            className="rpg-glass-panel rounded-lg px-3.5 py-2 flex items-center gap-3 max-w-[95vw] overflow-hidden shadow-[0_22px_60px_rgba(0,0,0,0.92)]"
+            className="rpg-glass-panel rounded-lg px-3.5 py-2 flex items-center gap-3 max-w-[95vw] overflow-visible shadow-[0_22px_60px_rgba(0,0,0,0.92)]"
           >
             {/* GM Badge & Selected Map Monster OR NPC OR Character Inspector */}
             {gmInspectedMonster && gmInspectedToken ? (
@@ -1763,65 +2112,112 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                   </div>
                 </div>
 
-                {/* 1-Click Monster Attacks right in the GM Dock */}
-                {gmInspectedMonster.attacks.length > 0 && (
-                  <div className="flex items-center gap-1.5 overflow-x-auto max-w-[440px]">
-                    {gmInspectedMonster.attacks.map((matk, idx) => {
-                      const isTokenDead = gmInspectedToken.hp <= 0;
-                      const isMonsterSkillSelected = Boolean(
-                        pendingAttackChoice &&
-                          pendingAttackChoice.attackerTokenId === gmInspectedToken.id &&
-                          pendingAttackChoice.actionTitle === matk.name,
+                {/* Collapsible "Ações" Tab for Monsters in GM Dock (with search!) */}
+                {(gmInspectedMonster.attacks.length > 0 || gmInspectedMonster.abilities.length > 0) && (
+                  <div className="relative shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setShowGmActions((v) => !v)}
+                      className={`px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer transition ${
+                        showGmActions ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
+                      }`}
+                    >
+                      <Swords className="w-3.5 h-3.5 text-red-400" />
+                      <span>Ações ({gmInspectedMonster.attacks.length + gmInspectedMonster.abilities.length})</span>
+                    </button>
+                    {showGmActions && (() => {
+                      const q = actionSearch.trim().toLowerCase();
+                      const filteredAtks = gmInspectedMonster.attacks.filter(
+                        (a) => !q || a.name.toLowerCase().includes(q)
+                      );
+                      const filteredAbs = gmInspectedMonster.abilities.filter(
+                        (ab) => !q || ab.toLowerCase().includes(q)
                       );
                       return (
-                        <button
-                          key={idx}
-                          disabled={isTokenDead}
-                          onClick={() => {
-                            if (isMonsterSkillSelected) {
-                              setPendingAttackChoice(null);
-                              return;
-                            }
-                            setPendingAttackChoice({
-                              attackerTokenId: gmInspectedToken.id,
-                              attackerName: gmInspectedToken.name,
-                              attackerColor: gmInspectedToken.color,
-                              attackerImageUrl: gmInspectedToken.imageUrl,
-                              attackerFrame: gmInspectedToken.frameStyle || 'crimson',
-                              diceSkin: 'blood',
-                              actionTitle: matk.name,
-                              attackFormula: `1d20 + ${matk.attackBonus}`,
-                              damageFormula: matk.damageFormula,
-                              damageType: matk.damageType,
-                              range: matk.range,
-                              actionCost: 'Padrão',
-                            });
-                          }}
-                          className={`rpg-card hover:border-red-400 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left transition disabled:opacity-35 disabled:cursor-not-allowed ${
-                            isMonsterSkillSelected ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
-                          }`}
-                          title={
-                            isTokenDead
-                              ? `${gmInspectedToken.name} está derrotado (0 PV)`
-                              : isMonsterSkillSelected
-                                ? `Clique para cancelar ${matk.name}`
-                                : `Atacar com ${matk.name} (${matk.range || '1,5m'})`
-                          }
-                        >
-                          <Swords className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                          <div className="leading-tight">
-                            <div className="text-[11px] font-display font-bold text-amber-100">
-                              {matk.name}
-                            </div>
-                            <div className="text-[9px] font-mono-dice text-amber-300/90">
-                              {isMonsterSkillSelected
-                                ? '✕ Cancelar'
-                                : `+${matk.attackBonus} • ${matk.damageFormula}`}
-                            </div>
+                        <div className="absolute bottom-14 left-0 w-[min(460px,90vw)] max-h-[50vh] overflow-y-auto rpg-glass-panel rounded-xl p-3 border border-amber-500/45 shadow-2xl space-y-2 z-50 animate-popover">
+                          <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-1.5">
+                            <span className="font-display font-bold text-xs text-amber-200 truncate">
+                              Ações de {gmInspectedToken.name}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setShowGmActions(false)}
+                              className="rpg-card p-1 rounded cursor-pointer"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
                           </div>
-                        </button>
+                          <input
+                            value={actionSearch}
+                            onChange={(e) => setActionSearch(e.target.value)}
+                            placeholder="Pesquisar ataque ou habilidade..."
+                            className="rpg-input w-full py-1 text-xs"
+                          />
+                          <div className="flex flex-wrap gap-1.5">
+                            {filteredAtks.map((matk, idx) => {
+                              const isTokenDead = gmInspectedToken.hp <= 0;
+                              const isMonsterSkillSelected = Boolean(
+                                pendingAttackChoice &&
+                                  pendingAttackChoice.attackerTokenId === gmInspectedToken.id &&
+                                  pendingAttackChoice.actionTitle === matk.name
+                              );
+                              return (
+                                <button
+                                  key={idx}
+                                  disabled={isTokenDead}
+                                  onClick={() => {
+                                    if (isMonsterSkillSelected) {
+                                      setPendingAttackChoice(null);
+                                      return;
+                                    }
+                                    setShowGmActions(false);
+                                    setPendingAttackChoice({
+                                      attackerTokenId: gmInspectedToken.id,
+                                      attackerName: gmInspectedToken.name,
+                                      attackerColor: gmInspectedToken.color,
+                                      attackerImageUrl: gmInspectedToken.imageUrl,
+                                      attackerFrame: gmInspectedToken.frameStyle || 'crimson',
+                                      diceSkin: 'blood',
+                                      actionTitle: matk.name,
+                                      attackFormula: `1d20 + ${matk.attackBonus}`,
+                                      damageFormula: matk.damageFormula,
+                                      damageType: matk.damageType,
+                                      range: matk.range,
+                                      actionCost: 'Padrão',
+                                    });
+                                  }}
+                                  className={`rpg-card hover:border-red-400 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 cursor-pointer text-left transition disabled:opacity-35 ${
+                                    isMonsterSkillSelected ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                                  }`}
+                                >
+                                  <Swords className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                                  <div className="leading-tight">
+                                    <div className="text-[11px] font-display font-bold text-amber-100">
+                                      {matk.name}
+                                    </div>
+                                    <div className="text-[9px] font-mono-dice text-amber-300/90">
+                                      +{matk.attackBonus} • {matk.damageFormula} ({matk.damageType})
+                                    </div>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {filteredAbs.length > 0 && (
+                            <div className="space-y-1 pt-1 border-t border-white/10">
+                              <div className="text-[9px] uppercase tracking-wider font-display text-amber-300/80">
+                                Habilidades &amp; Traços
+                              </div>
+                              {filteredAbs.map((ab, idx) => (
+                                <div key={idx} className="text-[11px] rpg-socket rounded px-2 py-1 text-slate-200">
+                                  {ab}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       );
-                    })}
+                    })()}
                   </div>
                 )}
               </div>
@@ -1831,7 +2227,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                   .filter((inv) => inv.equipped)
                   .flatMap((inv) => {
                     const def = campaign.compendium.items.find((i) => i.id === inv.itemId);
-                    return def && def.attackFormula ? [def] : [];
+                    return def && def.type === 'Arma' && def.attackFormula ? [def] : [];
                   });
                 const gmCharAbilities = (gmInspectedChar.knownAbilityIds || [])
                   .map((id) => campaign.compendium.abilities.find((a) => a.id === id))
@@ -1959,182 +2355,243 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                       </div>
                     </div>
 
-                    {/* Direct 1-Click Attacks & Abilities of the Selected Character in GM Dock */}
-                    <div className="flex items-center gap-1.5 overflow-x-auto min-w-0 flex-1 max-w-[420px] py-0.5">
-                      {(gmInspectedChar.customAttacks || []).map((atk) => {
-                        const isSel = Boolean(
-                          pendingAttackChoice &&
-                            pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
-                            pendingAttackChoice.actionTitle === atk.name
-                        );
-                        return (
+                    {/* Collapsible "⚔ Ações" Popup for Selected Hero in GM Dock (identical to Player Actions popup!) */}
+                    {(() => {
+                      const totalHeroActions =
+                        (gmInspectedChar.customAttacks?.length || 0) +
+                        gmCharWeapons.length +
+                        (gmInspectedChar.customAbilities?.length || 0) +
+                        gmCharAbilities.length;
+                      const q = actionSearch.trim().toLowerCase();
+                      return (
+                        <div className="relative shrink-0">
                           <button
-                            key={atk.id}
-                            disabled={isCharDead}
-                            onClick={() =>
-                              rollCharacterAction({
-                                characterId: gmInspectedChar.id,
-                                title: atk.name,
-                                attackFormula: atk.attackBonusFormula,
-                                damageFormula: atk.damageFormula,
-                                damageType: atk.damageType,
-                                range: atk.range,
-                                actionCost: 'Padrão',
-                              })
-                            }
-                            className={`rpg-card rpg-magic-card rarity-${atk.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
-                              isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                            type="button"
+                            onClick={() => setShowGmActions((v) => !v)}
+                            className={`px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer transition ${
+                              showGmActions ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
                             }`}
                           >
-                            <Swords className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                            <div className="leading-tight">
-                              <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
-                                {atk.name}
-                              </div>
-                              <div className="text-[9px] font-mono-dice opacity-75">
-                                {isSel
-                                  ? '✕ Cancelar'
-                                  : formatFormulaForDisplay(
-                                      atk.damageFormula,
-                                      gmInspectedCharStats,
-                                      gmInspectedChar
-                                    )}
-                              </div>
-                            </div>
+                            <Swords className="w-3.5 h-3.5 text-amber-300" />
+                            <span>Ações ({totalHeroActions})</span>
                           </button>
-                        );
-                      })}
 
-                      {gmCharWeapons.map((wp) => {
-                        const isSel = Boolean(
-                          pendingAttackChoice &&
-                            pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
-                            pendingAttackChoice.actionTitle === wp.name
-                        );
-                        return (
-                          <button
-                            key={wp.id}
-                            disabled={isCharDead}
-                            onClick={() =>
-                              rollCharacterAction({
-                                characterId: gmInspectedChar.id,
-                                title: wp.name,
-                                attackFormula: wp.attackFormula,
-                                damageFormula: wp.damageFormula,
-                                damageType: wp.damageType,
-                                range: wp.range,
-                                actionCost: 'Padrão',
-                              })
-                            }
-                            className={`rpg-card rpg-magic-card rarity-comum px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
-                              isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
-                            }`}
-                          >
-                            <Swords className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-                            <div className="leading-tight">
-                              <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
-                                {wp.name}
+                          {showGmActions && (
+                            <div className="absolute bottom-14 left-0 w-[min(520px,92vw)] max-h-[55vh] overflow-y-auto rpg-glass-panel rounded-xl p-3 border border-amber-500/45 shadow-2xl space-y-2 z-50 animate-popover">
+                              <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-1.5">
+                                <span className="font-display font-bold text-xs text-amber-200 truncate">
+                                  ⚔ Ações de {gmInspectedChar.name}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setShowGmActions(false)}
+                                  className="rpg-card p-1 rounded cursor-pointer"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
                               </div>
-                              <div className="text-[9px] font-mono-dice opacity-75">
-                                {isSel ? '✕ Cancelar' : wp.range || '1,5m'}
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
+                              <input
+                                value={actionSearch}
+                                onChange={(e) => setActionSearch(e.target.value)}
+                                placeholder="Pesquisar ataque, habilidade ou magia..."
+                                className="rpg-input w-full py-1 text-xs"
+                              />
+                              <div className="flex flex-wrap gap-1.5">
+                                {(gmInspectedChar.customAttacks || [])
+                                  .filter((atk) => !q || atk.name.toLowerCase().includes(q))
+                                  .map((atk) => {
+                                    const isSel = Boolean(
+                                      pendingAttackChoice &&
+                                        pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
+                                        pendingAttackChoice.actionTitle === atk.name
+                                    );
+                                    return (
+                                      <button
+                                        key={atk.id}
+                                        disabled={isCharDead}
+                                        onClick={() => {
+                                          setShowGmActions(false);
+                                          rollCharacterAction({
+                                            characterId: gmInspectedChar.id,
+                                            title: atk.name,
+                                            attackFormula: atk.attackBonusFormula,
+                                            damageFormula: atk.damageFormula,
+                                            damageType: atk.damageType,
+                                            range: atk.range,
+                                            actionCost: 'Padrão',
+                                          });
+                                        }}
+                                        className={`rpg-card rpg-magic-card rarity-${atk.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
+                                          isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                                        }`}
+                                      >
+                                        <Swords className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                                        <div className="leading-tight">
+                                          <div className="text-[11px] font-display font-bold max-w-[115px] truncate">
+                                            {atk.name}
+                                          </div>
+                                          <div className="text-[9px] font-mono-dice opacity-75">
+                                            {isSel
+                                              ? '✕ Cancelar'
+                                              : formatFormulaForDisplay(
+                                                  atk.damageFormula,
+                                                  gmInspectedCharStats,
+                                                  gmInspectedChar
+                                                )}
+                                          </div>
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
 
-                      {(gmInspectedChar.customAbilities || []).map((ab) => {
-                        const cost = toEconomyCost(ab.actionType);
-                        const isSel = Boolean(
-                          pendingAttackChoice &&
-                            pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
-                            pendingAttackChoice.actionTitle === ab.name
-                        );
-                        return (
-                          <button
-                            key={ab.id}
-                            disabled={isCharDead}
-                            onClick={() =>
-                              rollCharacterAction({
-                                characterId: gmInspectedChar.id,
-                                title: ab.name,
-                                attackFormula: ab.attackFormula,
-                                damageFormula: ab.damageFormula,
-                                damageType: ab.damageType,
-                                range: ab.range,
-                                actionCost: cost,
-                                costMp: ab.costMp,
-                              })
-                            }
-                            className={`rpg-card rpg-magic-card rarity-${ab.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
-                              isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
-                            }`}
-                          >
-                            <Flame className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                            <div className="leading-tight">
-                              <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
-                                {ab.name}
-                              </div>
-                              <div className="text-[9px] font-mono-dice text-amber-300">
-                                {isSel
-                                  ? '✕ Cancelar'
-                                  : ab.costMp > 0
-                                    ? `${ab.costMp} ${campaign.settings.resourceShort}`
-                                    : ab.actionType}
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
+                                {gmCharWeapons
+                                  .filter((wp) => !q || wp.name.toLowerCase().includes(q))
+                                  .map((wp) => {
+                                    const isSel = Boolean(
+                                      pendingAttackChoice &&
+                                        pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
+                                        pendingAttackChoice.actionTitle === wp.name
+                                    );
+                                    return (
+                                      <button
+                                        key={wp.id}
+                                        disabled={isCharDead}
+                                        onClick={() => {
+                                          setShowGmActions(false);
+                                          rollCharacterAction({
+                                            characterId: gmInspectedChar.id,
+                                            title: wp.name,
+                                            attackFormula: wp.attackFormula,
+                                            damageFormula: wp.damageFormula,
+                                            damageType: wp.damageType,
+                                            range: wp.range,
+                                            actionCost: 'Padrão',
+                                          });
+                                        }}
+                                        className={`rpg-card rpg-magic-card rarity-comum px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
+                                          isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                                        }`}
+                                      >
+                                        <Swords className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                                        <div className="leading-tight">
+                                          <div className="text-[11px] font-display font-bold max-w-[115px] truncate">
+                                            {wp.name}
+                                          </div>
+                                          <div className="text-[9px] font-mono-dice opacity-75">
+                                            {isSel ? '✕ Cancelar' : wp.range || '1,5m'}
+                                          </div>
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
 
-                      {gmCharAbilities.slice(0, 3).map((ab) => {
-                        const cost = toEconomyCost(ab.actionType);
-                        const isSel = Boolean(
-                          pendingAttackChoice &&
-                            pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
-                            pendingAttackChoice.actionTitle === ab.name
-                        );
-                        return (
-                          <button
-                            key={ab.id}
-                            disabled={isCharDead}
-                            onClick={() =>
-                              rollCharacterAction({
-                                characterId: gmInspectedChar.id,
-                                title: ab.name,
-                                attackFormula: ab.attackFormula,
-                                damageFormula: ab.damageFormula,
-                                damageType: ab.damageType,
-                                range: ab.range,
-                                actionCost: cost,
-                                saveSkillId: ab.saveSkillId,
-                                saveDcFormula: ab.saveDcFormula,
-                                costMp: ab.costMp,
-                                applyConditionId: ab.applyConditionId,
-                                conditionDurationRounds: ab.conditionDurationRounds,
-                              })
-                            }
-                            className={`rpg-card rpg-magic-card rarity-raro px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
-                              isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
-                            }`}
-                          >
-                            <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-                            <div className="leading-tight">
-                              <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
-                                {ab.name}
-                              </div>
-                              <div className="text-[9px] font-mono-dice text-amber-200/80">
-                                {isSel
-                                  ? '✕ Cancelar'
-                                  : ab.costMp > 0
-                                    ? `${ab.costMp} ${campaign.settings.resourceShort}`
-                                    : ab.actionType}
+                                {(gmInspectedChar.customAbilities || [])
+                                  .filter((ab) => !q || ab.name.toLowerCase().includes(q))
+                                  .map((ab) => {
+                                    const cost = toEconomyCost(ab.actionType);
+                                    const isSel = Boolean(
+                                      pendingAttackChoice &&
+                                        pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
+                                        pendingAttackChoice.actionTitle === ab.name
+                                    );
+                                    return (
+                                      <button
+                                        key={ab.id}
+                                        disabled={isCharDead || ab.actionType === 'Passiva'}
+                                        onClick={() => {
+                                          setShowGmActions(false);
+                                          rollCharacterAction({
+                                            characterId: gmInspectedChar.id,
+                                            title: ab.name,
+                                            attackFormula: ab.attackFormula,
+                                            damageFormula: ab.damageFormula,
+                                            damageType: ab.damageType,
+                                            range: ab.range,
+                                            actionCost: cost,
+                                            costMp: ab.costMp,
+                                          });
+                                        }}
+                                        className={`rpg-card rpg-magic-card rarity-${ab.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
+                                          isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                                        }`}
+                                      >
+                                        <Flame className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                        <div className="leading-tight">
+                                          <div className="text-[11px] font-display font-bold max-w-[115px] truncate">
+                                            {ab.name}
+                                          </div>
+                                          <div className="text-[9px] font-mono-dice text-amber-300">
+                                            {isSel
+                                              ? '✕ Cancelar'
+                                              : ab.costMp > 0
+                                                ? `${ab.costMp} ${campaign.settings.resourceShort}`
+                                                : ab.actionType}
+                                          </div>
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+
+                                {gmCharAbilities
+                                  .filter((ab) => !q || ab.name.toLowerCase().includes(q))
+                                  .map((ab) => {
+                                    const cost = toEconomyCost(ab.actionType);
+                                    const isSel = Boolean(
+                                      pendingAttackChoice &&
+                                        pendingAttackChoice.attackerCharacterId === gmInspectedChar.id &&
+                                        pendingAttackChoice.actionTitle === ab.name
+                                    );
+                                    return (
+                                      <button
+                                        key={ab.id}
+                                        disabled={isCharDead}
+                                        onClick={() => {
+                                          setShowGmActions(false);
+                                          rollCharacterAction({
+                                            characterId: gmInspectedChar.id,
+                                            title: ab.name,
+                                            attackFormula: ab.attackFormula,
+                                            damageFormula: ab.damageFormula,
+                                            damageType: ab.damageType,
+                                            range: ab.range,
+                                            actionCost: cost,
+                                            saveSkillId: ab.saveSkillId,
+                                            saveDcFormula: ab.saveDcFormula,
+                                            costMp: ab.costMp,
+                                            applyConditionId: ab.applyConditionId,
+                                            conditionDurationRounds: ab.conditionDurationRounds,
+                                            aoeShape: ab.aoeShape,
+                                            aoeSizeMeters: ab.aoeSizeMeters,
+                                            aoeColor: ab.aoeColor,
+                                            aoePersistent: ab.aoePersistent,
+                                          });
+                                        }}
+                                        className={`rpg-card rpg-magic-card rarity-raro px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 ${
+                                          isSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                                        }`}
+                                      >
+                                        <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                                        <div className="leading-tight">
+                                          <div className="text-[11px] font-display font-bold max-w-[115px] truncate">
+                                            {ab.name}
+                                          </div>
+                                          <div className="text-[9px] font-mono-dice text-amber-200/80">
+                                            {isSel
+                                              ? '✕ Cancelar'
+                                              : ab.costMp > 0
+                                                ? `${ab.costMp} ${campaign.settings.resourceShort}`
+                                                : ab.actionType}
+                                          </div>
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
                               </div>
                             </div>
-                          </button>
-                        );
-                      })}
-                    </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })()
@@ -2182,82 +2639,179 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     </div>
                   )}
                 </div>
-                {gmInspectedNpc.combatEnabled && gmInspectedNpc.attacks && gmInspectedNpc.attacks.length > 0 && (
-                  <div className="flex items-center gap-1.5 overflow-x-auto min-w-0 flex-1 max-w-[320px] py-0.5">
-                    {gmInspectedNpc.attacks.map((natk, idx) => (
+                {/* Collapsible "Ações" Tab for NPCs in GM Dock */}
+                {gmInspectedNpc.combatEnabled &&
+                  ((gmInspectedNpc.attacks?.length || 0) > 0 ||
+                    (gmInspectedNpc.abilities?.length || 0) > 0) && (
+                    <div className="relative shrink-0">
                       <button
-                        key={idx}
-                        disabled={gmInspectedToken.hp <= 0}
-                        onClick={() =>
-                          setPendingAttackChoice({
-                            attackerTokenId: gmInspectedToken.id,
-                            attackerName: gmInspectedToken.name,
-                            attackerColor: gmInspectedToken.color,
-                            attackerImageUrl: gmInspectedToken.imageUrl,
-                            attackerFrame: gmInspectedToken.frameStyle || 'gold',
-                            diceSkin: 'gold',
-                            actionTitle: natk.name,
-                            attackFormula: `1d20 + ${natk.attackBonus}`,
-                            damageFormula: natk.damageFormula,
-                            damageType: natk.damageType,
-                            range: natk.range,
-                            actionCost: 'Padrão',
-                          })
-                        }
-                        className="rpg-card hover:border-amber-400 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-35"
+                        type="button"
+                        onClick={() => setShowGmActions((v) => !v)}
+                        className={`px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer transition ${
+                          showGmActions ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
+                        }`}
                       >
-                        <Swords className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-                        <div className="leading-tight">
-                          <div className="text-[11px] font-display font-bold text-amber-100">
-                            {natk.name}
-                          </div>
-                          <div className="text-[9px] font-mono-dice text-amber-300/90">
-                            +{natk.attackBonus} • {natk.damageFormula}
-                          </div>
-                        </div>
+                        <Swords className="w-3.5 h-3.5 text-amber-300" />
+                        <span>
+                          Ações ({(gmInspectedNpc.attacks?.length || 0) + (gmInspectedNpc.abilities?.length || 0)})
+                        </span>
                       </button>
-                    ))}
-                  </div>
-                )}
+                      {showGmActions && (() => {
+                        const q = actionSearch.trim().toLowerCase();
+                        const filteredAtks = (gmInspectedNpc.attacks || []).filter(
+                          (a) => !q || a.name.toLowerCase().includes(q)
+                        );
+                        const filteredAbs = (gmInspectedNpc.abilities || []).filter(
+                          (ab) => !q || ab.toLowerCase().includes(q)
+                        );
+                        return (
+                          <div className="absolute bottom-14 left-0 w-[min(440px,90vw)] max-h-[50vh] overflow-y-auto rpg-glass-panel rounded-xl p-3 border border-amber-500/45 shadow-2xl space-y-2 z-50 animate-popover">
+                            <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-1.5">
+                              <span className="font-display font-bold text-xs text-amber-200 truncate">
+                                Ações de {gmInspectedToken.name}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setShowGmActions(false)}
+                                className="rpg-card p-1 rounded cursor-pointer"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                            <input
+                              value={actionSearch}
+                              onChange={(e) => setActionSearch(e.target.value)}
+                              placeholder="Pesquisar ataque ou habilidade..."
+                              className="rpg-input w-full py-1 text-xs"
+                            />
+                            <div className="flex flex-wrap gap-1.5">
+                              {filteredAtks.map((natk, idx) => (
+                                <button
+                                  key={idx}
+                                  disabled={gmInspectedToken.hp <= 0}
+                                  onClick={() => {
+                                    setShowGmActions(false);
+                                    const isCondOnly = Boolean(!natk.damageType && natk.applyConditionId);
+                                    const isSelfRng = Boolean(
+                                      natk.range && natk.range.trim().toLowerCase().includes('pessoal')
+                                    );
+                                    if (isCondOnly && isSelfRng && natk.applyConditionId) {
+                                      const condId = natk.applyConditionId;
+                                      const condDef = campaign.compendium.conditions.find((c) => c.id === condId);
+                                      updateCampaign((prev) => ({
+                                        ...prev,
+                                        maps: prev.maps.map((m) =>
+                                          m.id !== prev.activeMapId
+                                            ? m
+                                            : {
+                                                ...m,
+                                                tokens: m.tokens.map((t) =>
+                                                  t.id === gmInspectedToken.id &&
+                                                  !(t.activeConditionIds || []).includes(condId)
+                                                    ? {
+                                                        ...t,
+                                                        activeConditionIds: [
+                                                          ...(t.activeConditionIds || []),
+                                                          condId,
+                                                        ],
+                                                      }
+                                                    : t
+                                                ),
+                                              }
+                                        ),
+                                      }));
+                                      pushCombatLog({
+                                        category: 'condition',
+                                        actorName: gmInspectedToken.name,
+                                        actorKind: 'npc',
+                                        actorColor: gmInspectedToken.color,
+                                        summary: `ativou ${natk.name} (${condDef?.icon || ''} ${condDef?.name || 'Condição'}) em si mesmo`,
+                                      });
+                                      return;
+                                    }
+                                    setPendingAttackChoice({
+                                      attackerTokenId: gmInspectedToken.id,
+                                      attackerName: gmInspectedToken.name,
+                                      attackerColor: gmInspectedToken.color,
+                                      attackerImageUrl: gmInspectedToken.imageUrl,
+                                      attackerFrame: gmInspectedToken.frameStyle || 'gold',
+                                      diceSkin: 'gold',
+                                      actionTitle: natk.name,
+                                      attackFormula: isCondOnly ? undefined : `1d20 + ${natk.attackBonus}`,
+                                      damageFormula: isCondOnly ? undefined : natk.damageFormula,
+                                      damageType: natk.damageType,
+                                      range: natk.range,
+                                      actionCost: 'Padrão',
+                                      applyConditionId: natk.applyConditionId,
+                                      conditionDurationRounds: natk.conditionDurationRounds,
+                                    });
+                                  }}
+                                  className="rpg-card hover:border-amber-400 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 cursor-pointer text-left disabled:opacity-35"
+                                >
+                                  <Swords className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                                  <div className="leading-tight">
+                                    <div className="text-[11px] font-display font-bold text-amber-100">
+                                      {natk.name}
+                                    </div>
+                                    <div className="text-[9px] font-mono-dice text-amber-300/90">
+                                      +{natk.attackBonus} • {natk.damageFormula}
+                                    </div>
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
+                            {filteredAbs.length > 0 && (
+                              <div className="space-y-1 pt-1 border-t border-white/10">
+                                {filteredAbs.map((ab, idx) => (
+                                  <div key={idx} className="text-[11px] rpg-socket rounded px-2 py-1 text-slate-200">
+                                    {ab}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
               </div>
             ) : null}
 
-            {/* Right: Dice Mode + Open Sheets + Dice Tray + Drag Grip */}
+            {/* Right: Open Sheets + Dice Tray + Drag Grip (1d20 lives in Dados / Chat) */}
             <div className="flex items-center gap-1.5 shrink-0">
               <DragGripBadge />
-              <button
-                onClick={() =>
-                  setAdvantageMode(
-                    advantageMode === 'normal'
-                      ? 'advantage'
-                      : advantageMode === 'advantage'
-                      ? 'disadvantage'
-                      : 'normal'
-                  )
-                }
-                className={`px-2.5 py-1.5 rounded-md text-[11px] font-display font-bold cursor-pointer transition ${
-                  advantageMode === 'advantage'
-                    ? 'bg-emerald-700 text-white border border-emerald-400'
-                    : advantageMode === 'disadvantage'
-                    ? 'bg-red-800 text-white border border-red-400'
-                    : 'rpg-card'
-                }`}
-                title="Alternar modo de rolagem: Normal / Vantagem (2d20) / Desvantagem (2d20)"
-              >
-                {advantageMode === 'normal'
-                  ? '1d20'
-                  : advantageMode === 'advantage'
-                  ? '2d20 Vant.'
-                  : '2d20 Desv.'}
-              </button>
 
-              {campaign.characters.length > 0 && (
+              {(gmInspectedMonster || gmInspectedNpc || gmInspectedChar || campaign.characters.length > 0) && (
                 <button
-                  onClick={onOpenSheet}
+                  onClick={() => {
+                    if (gmInspectedMonster) {
+                      openEntitySheet({ kind: 'monster', id: gmInspectedMonster.id });
+                      return;
+                    }
+                    if (gmInspectedNpc) {
+                      openEntitySheet({ kind: 'npc', id: gmInspectedNpc.id });
+                      return;
+                    }
+                    if (gmInspectedChar) {
+                      setActiveCharacterId(gmInspectedChar.id);
+                    }
+                    onOpenSheet();
+                  }}
                   className="rpg-card px-2.5 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer hover:border-amber-400/60"
+                  title={
+                    gmInspectedMonster
+                      ? `Abrir Ficha Completa de ${gmInspectedMonster.name}`
+                      : gmInspectedNpc
+                        ? `Abrir Ficha Completa de ${gmInspectedNpc.name}`
+                        : gmInspectedChar
+                          ? `Abrir Ficha de ${gmInspectedChar.name}`
+                          : 'Abrir Fichas dos Jogadores'
+                  }
                 >
                   <BookOpen className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
-                  <span className="hidden md:inline">Fichas</span>
+                  <span className="hidden md:inline">
+                    {gmInspectedMonster || gmInspectedNpc || gmInspectedChar ? 'Ficha' : 'Fichas'}
+                  </span>
                 </button>
               )}
 
@@ -2488,8 +3042,69 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     Surto de Ação
                   </button>
                 )}
+                <button
+                  onClick={() => performCombatManeuver('shove')}
+                  disabled={
+                    hero.hp <= 0 ||
+                    heroCombatant.bonusActionAvailable === false ||
+                    activeTurnCombatant?.id !== heroCombatant.id
+                  }
+                  className="rpg-card px-2 py-0.5 rounded hover:border-amber-400 cursor-pointer disabled:opacity-35"
+                  title="Ação Bônus: Teste de Atletismo para empurrar inimigo adjacente 1,5m para trás"
+                >
+                  Empurrar
+                </button>
+                <button
+                  onClick={() => performCombatManeuver('hide')}
+                  disabled={
+                    hero.hp <= 0 ||
+                    heroCombatant.bonusActionAvailable === false ||
+                    activeTurnCombatant?.id !== heroCombatant.id
+                  }
+                  className="rpg-card px-2 py-0.5 rounded hover:border-amber-400 cursor-pointer disabled:opacity-35"
+                  title="Ação Bônus: Rola Furtividade e aplica Oculto/Invisível"
+                >
+                  Esconder
+                </button>
+                <button
+                  onClick={() => performCombatManeuver('help')}
+                  disabled={
+                    hero.hp <= 0 ||
+                    heroCombatant.actionAvailable === false ||
+                    activeTurnCombatant?.id !== heroCombatant.id
+                  }
+                  className="rpg-card px-2 py-0.5 rounded hover:border-amber-400 cursor-pointer disabled:opacity-35"
+                  title="Ação Padrão: Concede Vantagem no próximo ataque de um aliado adjacente"
+                >
+                  Ajudar
+                </button>
+                <button
+                  onClick={() => performCombatManeuver('jump')}
+                  disabled={
+                    hero.hp <= 0 ||
+                    heroCombatant.bonusActionAvailable === false ||
+                    activeTurnCombatant?.id !== heroCombatant.id
+                  }
+                  className="rpg-card px-2 py-0.5 rounded hover:border-amber-400 cursor-pointer disabled:opacity-35"
+                  title="Ação Bônus: Salta +3m sobre obstáculos ou superfícies"
+                >
+                  Saltar
+                </button>
               </div>
             </div>
+          )}
+
+          {/* Classic D&D 5e Heroic Inspiration Medallion (1 star) */}
+          {hero.hasInspiration && (
+            <button
+              type="button"
+              onClick={() => spendHeroInspiration(hero.id)}
+              className="rpg-glass-panel rounded-full px-3.5 py-1 text-[11px] font-display font-bold flex items-center gap-1.5 border border-amber-400 text-amber-200 bg-amber-950/85 shadow-[0_0_18px_rgba(251,191,36,0.45)] hover:brightness-115 cursor-pointer transition"
+              title="Clique para gastar sua Inspiração Heroica e ganhar Vantagem na próxima rolagem!"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+              <span>★ Inspiração Heroica Disponível — Clique para usar (+Vantagem)</span>
+            </button>
           )}
 
           {/* GM Next-Attack Advantage/Disadvantage Banner for Player */}
@@ -2610,9 +3225,9 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               </div>
             </div>
 
-            {/* Center: 1-Click Beveled Action Slots */}
+            {/* Center: Collapsible "Ações" Tab Button + Popup Tray above dock */}
             <div
-              className="hidden sm:flex items-center gap-1.5 pl-2 border-l max-w-[420px] md:max-w-[520px] overflow-x-auto py-0.5"
+              className="relative flex items-center gap-1.5 pl-2 border-l shrink-0"
               style={{ borderColor: 'var(--border-subtle)' }}
             >
               {hero.hp <= 0 && (
@@ -2622,11 +3237,62 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                   title="Seu personagem está caído com 0 PV! Abra a Ficha para Testes contra a Morte"
                 >
                   <Skull className="w-3.5 h-3.5 text-red-400" />
-                  <span>Caído (0 PV) — Abrir Ficha</span>
+                  <span>Caído (0 PV)</span>
                 </button>
               )}
 
-              {quickAttacks.map((atk) => {
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRestMenu(false);
+                  setShowConcMenu(false);
+                  setShowPlayerActions((v) => !v);
+                }}
+                className={`px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer transition ${
+                  showPlayerActions || pendingAttackChoice
+                    ? 'rpg-btn-primary shadow-md'
+                    : 'rpg-card hover:border-amber-400/60'
+                }`}
+                title="Abrir/Fechar aba de Ataques, Armas, Habilidades e Consumíveis"
+              >
+                <Swords className="w-3.5 h-3.5" />
+                <span>Ações</span>
+                <span className="text-[10px] font-mono-dice px-1.5 py-0.2 rounded bg-black/35">
+                  {quickAttacks.length +
+                    quickWeapons.length +
+                    quickAbilities.length +
+                    compendiumAbilities.length +
+                    quickConsumables.length}
+                </span>
+              </button>
+
+              {showPlayerActions && (
+                <div className="absolute bottom-14 left-0 w-[min(560px,90vw)] max-h-[52vh] overflow-y-auto rpg-glass-panel rounded-xl p-3 border border-amber-500/45 shadow-2xl space-y-2 z-50 animate-popover">
+                  <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+                    <span className="font-display font-bold text-xs uppercase tracking-wider text-amber-200 flex items-center gap-1.5">
+                      <Swords className="w-3.5 h-3.5 text-amber-400" />
+                      Ações de {hero.name}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowPlayerActions(false)}
+                      className="rpg-card p-1 rounded cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <input
+                    value={actionSearch}
+                    onChange={(e) => setActionSearch(e.target.value)}
+                    placeholder="Pesquisar ataque, habilidade ou consumível..."
+                    className="rpg-input w-full py-1 text-xs"
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+
+              {quickAttacks
+                .filter((atk) => !actionSearch.trim() || atk.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map((atk, idx) => {
+                const hotkeyNum = idx + 1;
                 const spent = isActionSlotSpent('Padrão');
                 const isDead = hero.hp <= 0;
                 const isSelected = Boolean(
@@ -2649,7 +3315,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         actionCost: 'Padrão',
                       })
                     }
-                    className={`rpg-card rpg-magic-card rarity-${atk.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 disabled:cursor-not-allowed ${
+                    className={`relative rpg-card rpg-magic-card rarity-${atk.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 disabled:cursor-not-allowed ${
                       isSelected ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
                     }`}
                     title={
@@ -2657,10 +3323,24 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         ? 'Você está caído (0 PV) e não pode atacar'
                         : isSelected
                           ? `Clique novamente para cancelar ${atk.name}`
-                          : `Atacar: ${formatFormulaForDisplay(atk.attackBonusFormula, stats, hero)} | Dano: ${formatFormulaForDisplay(atk.damageFormula, stats, hero)} | Alcance: ${atk.range}`
+                          : `[${hotkeyNum <= 9 ? hotkeyNum : '—'}] Atacar: ${formatFormulaForDisplay(atk.attackBonusFormula, stats, hero)} | Dano: ${formatFormulaForDisplay(atk.damageFormula, stats, hero)} | Alcance: ${atk.range}`
                     }
                   >
-                    <Swords className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                    {hotkeyNum <= 9 && (
+                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-[#0c0e15] border border-amber-500/50 text-[8px] font-mono-dice font-bold text-amber-300 leading-tight">
+                        {hotkeyNum}
+                      </span>
+                    )}
+                    {atk.imageUrl ? (
+                      <img
+                        src={resolveAssetUrl(atk.imageUrl)}
+                        alt={atk.name}
+                        draggable={false}
+                        className="w-6 h-6 rounded object-cover border border-amber-400/50 shrink-0 pointer-events-none"
+                      />
+                    ) : (
+                      <Swords className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                    )}
                     <div className="leading-tight">
                       <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
                         {atk.name}
@@ -2675,7 +3355,10 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 );
               })}
 
-              {quickWeapons.map((wp) => {
+              {quickWeapons
+                .filter((wp) => !actionSearch.trim() || wp.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map((wp, idx) => {
+                const hotkeyNum = quickAttacks.length + idx + 1;
                 const spent = isActionSlotSpent('Padrão');
                 const isDead = hero.hp <= 0;
                 const isSelected = Boolean(
@@ -2698,7 +3381,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         actionCost: 'Padrão',
                       })
                     }
-                    className={`rpg-card rpg-magic-card rarity-comum px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 disabled:cursor-not-allowed ${
+                    className={`relative rpg-card rpg-magic-card rarity-comum px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 disabled:cursor-not-allowed ${
                       isSelected ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
                     }`}
                     title={
@@ -2706,9 +3389,14 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         ? 'Você está caído (0 PV) e não pode atacar'
                         : isSelected
                           ? `Clique novamente para cancelar ${wp.name}`
-                          : `${wp.name} | Alcance: ${wp.range || 'Corpo a Corpo (1,5m)'}`
+                          : `${hotkeyNum <= 9 ? `[${hotkeyNum}] ` : ''}${wp.name} | Alcance: ${wp.range || 'Corpo a Corpo (1,5m)'}`
                     }
                   >
+                    {hotkeyNum <= 9 && (
+                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-[#0c0e15] border border-amber-500/50 text-[8px] font-mono-dice font-bold text-amber-300 leading-tight">
+                        {hotkeyNum}
+                      </span>
+                    )}
                     <Swords className="w-3.5 h-3.5 text-amber-300 shrink-0" />
                     <div className="leading-tight">
                       <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
@@ -2722,7 +3410,10 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 );
               })}
 
-              {quickAbilities.map((ab) => {
+              {quickAbilities
+                .filter((ab) => !actionSearch.trim() || ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map((ab, idx) => {
+                const hotkeyNum = quickAttacks.length + quickWeapons.length + idx + 1;
                 const cost = toEconomyCost(ab.actionType);
                 const spent = isActionSlotSpent(cost);
                 const isDead = hero.hp <= 0;
@@ -2747,7 +3438,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         costMp: ab.costMp,
                       })
                     }
-                    className={`rpg-card rpg-magic-card rarity-${ab.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 disabled:cursor-not-allowed ${
+                    className={`relative rpg-card rpg-magic-card rarity-${ab.rarity} px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 disabled:cursor-not-allowed ${
                       isSelected ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
                     }`}
                     title={
@@ -2755,9 +3446,14 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         ? 'Você está caído (0 PV) e não pode usar habilidades'
                         : isSelected
                           ? `Clique novamente para cancelar ${ab.name}`
-                          : `${ab.actionType} • ${ab.description}`
+                          : `${hotkeyNum <= 9 ? `[${hotkeyNum}] ` : ''}${ab.actionType} • ${ab.description}`
                     }
                   >
+                    {hotkeyNum <= 9 && (
+                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-[#0c0e15] border border-amber-500/50 text-[8px] font-mono-dice font-bold text-amber-300 leading-tight">
+                        {hotkeyNum}
+                      </span>
+                    )}
                     <Flame className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                     <div className="leading-tight">
                       <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
@@ -2775,10 +3471,22 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 );
               })}
 
-              {compendiumAbilities.slice(0, 3).map((ab) => {
+              {compendiumAbilities
+                .filter((ab) => !actionSearch.trim() || ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map((ab, idx) => {
+                const hotkeyNum =
+                  quickAttacks.length + quickWeapons.length + quickAbilities.length + idx + 1;
                 const cost = toEconomyCost(ab.actionType);
                 const spent = isActionSlotSpent(cost);
                 const isDead = hero.hp <= 0;
+                const maxUses = ab.maxUsesPerRest && ab.maxUsesPerRest > 0 ? ab.maxUsesPerRest : null;
+                const remUses =
+                  maxUses !== null
+                    ? typeof hero.abilityUsesRemaining?.[ab.id] === 'number'
+                      ? Math.max(0, hero.abilityUsesRemaining[ab.id])
+                      : maxUses
+                    : null;
+                const outOfUses = remUses !== null && remUses <= 0;
                 const isSelected = Boolean(
                   pendingAttackChoice &&
                     pendingAttackChoice.attackerCharacterId === hero.id &&
@@ -2787,8 +3495,9 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 return (
                   <button
                     key={ab.id}
-                    disabled={(spent && !isSelected) || isDead}
-                    onClick={() =>
+                    disabled={(spent && !isSelected) || isDead || (outOfUses && !isSelected)}
+                    onClick={() => {
+                      setShowPlayerActions(false);
                       rollCharacterAction({
                         characterId: hero.id,
                         title: ab.name,
@@ -2800,48 +3509,85 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         saveSkillId: ab.saveSkillId,
                         saveDcFormula: ab.saveDcFormula,
                         costMp: ab.costMp,
+                        costResourceId: ab.costResourceId,
                         applyConditionId: ab.applyConditionId,
                         conditionDurationRounds: ab.conditionDurationRounds,
-                      })
-                    }
-                    className={`rpg-card rpg-magic-card rarity-raro px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 disabled:cursor-not-allowed ${
+                        aoeShape: ab.aoeShape,
+                        aoeSizeMeters: ab.aoeSizeMeters,
+                        aoeColor: ab.aoeColor,
+                        aoePersistent: ab.aoePersistent,
+                      });
+                    }}
+                    className={`relative rpg-card rpg-magic-card rarity-raro px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left disabled:opacity-40 disabled:cursor-not-allowed ${
                       isSelected ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
                     }`}
                     title={
                       isDead
                         ? 'Você está caído (0 PV) e não pode usar habilidades'
-                        : isSelected
-                          ? `Clique novamente para cancelar ${ab.name}`
-                          : `${ab.actionType} • ${ab.range} • ${ab.description}`
+                        : outOfUses
+                          ? `Sem usos restantes (0/${maxUses}) — recarregue no Descanso ${ab.restType === 'curto' ? 'Curto' : 'Longo'}`
+                          : isSelected
+                            ? `Clique novamente para cancelar ${ab.name}`
+                            : `${hotkeyNum <= 9 ? `[${hotkeyNum}] ` : ''}${ab.actionType} • ${ab.range} • ${ab.description}`
                     }
                   >
+                    {hotkeyNum <= 9 && (
+                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-[#0c0e15] border border-amber-500/50 text-[8px] font-mono-dice font-bold text-amber-300 leading-tight">
+                        {hotkeyNum}
+                      </span>
+                    )}
                     <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
                     <div className="leading-tight">
                       <div className="text-[11px] font-display font-bold max-w-[100px] truncate">
                         {ab.name}
                       </div>
-                      <div className="text-[9px] font-mono-dice text-amber-200/80">
-                        {isSelected
-                          ? '✕ Cancelar'
-                          : ab.costMp > 0
-                            ? `${ab.costMp} ${campaign.settings.resourceShort}`
-                            : ab.actionType}
+                      <div className="text-[9px] font-mono-dice text-amber-200/80 flex items-center gap-1">
+                        <span>
+                          {isSelected
+                            ? '✕ Cancelar'
+                            : ab.costMp > 0
+                              ? `${ab.costMp} ${
+                                  ab.costResourceId === 'hp'
+                                    ? 'PV'
+                                    : ab.costResourceId && ab.costResourceId !== 'mp'
+                                      ? campaign.compendium.customResources?.find(
+                                          (r) => r.id === ab.costResourceId
+                                        )?.shortName || campaign.settings.resourceShort
+                                      : campaign.settings.resourceShort
+                                }`
+                              : ab.actionType}
+                        </span>
+                        {maxUses !== null && remUses !== null && (
+                          <span
+                            className={`px-1 rounded border text-[8px] font-bold ${
+                              remUses > 0
+                                ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
+                                : 'border-red-500/50 bg-red-950/60 text-red-300'
+                            }`}
+                          >
+                            {maxUses <= 4
+                              ? '●'.repeat(remUses) + '○'.repeat(Math.max(0, maxUses - remUses))
+                              : `${remUses}/${maxUses}`}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </button>
                 );
               })}
 
-              {quickConsumables.map(({ entry, def }) => (
+              {quickConsumables
+                .filter(({ def }) => !actionSearch.trim() || def.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map(({ entry, def }) => (
                 <button
                   key={entry.id}
-                  disabled={isActionSlotSpent('Padrão') || hero.hp <= 0}
+                  disabled={isActionSlotSpent('Bônus') || hero.hp <= 0}
                   onClick={() => handleUseConsumable(entry.id, def.id)}
                   className="rpg-card rpg-magic-card rarity-comum px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left border-emerald-400/40 disabled:opacity-40 disabled:cursor-not-allowed"
                   title={
                     hero.hp <= 0
                       ? 'Você está caído (0 PV) e não pode usar consumíveis'
-                      : def.description
+                      : `Ação Bônus • ${def.description}`
                   }
                 >
                   <FlaskConical className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
@@ -2850,58 +3596,75 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                       {def.name}
                     </div>
                     <div className="text-[9px] font-mono-dice text-emerald-300">
-                      x{entry.quantity}
+                      Bônus • x{entry.quantity}
                     </div>
                   </div>
                 </button>
               ))}
 
+              {[
+                ...passiveCustomAbilities.map((ab) => ({
+                  id: ab.id,
+                  name: ab.name,
+                  description: ab.description,
+                })),
+                ...passiveCompendiumAbilities.map((ab) => ({
+                  id: ab.id,
+                  name: ab.name,
+                  description: ab.description,
+                })),
+              ]
+                .filter(
+                  (ab) =>
+                    !actionSearch.trim() ||
+                    ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase()),
+                )
+                .map((ab) => (
+                  <div
+                    key={`passive-${ab.id}`}
+                    className="rpg-card px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 text-left border-violet-400/35 bg-violet-500/10"
+                    title={`Passiva • ${ab.description}`}
+                  >
+                    <Shield className="w-3.5 h-3.5 text-violet-300 shrink-0" />
+                    <div className="leading-tight">
+                      <div className="text-[11px] font-display font-bold max-w-[100px] truncate text-violet-100">
+                        {ab.name}
+                      </div>
+                      <div className="text-[9px] font-mono-dice text-violet-300">
+                        Passiva
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
               {quickAttacks.length === 0 &&
                 quickWeapons.length === 0 &&
                 quickAbilities.length === 0 &&
                 compendiumAbilities.length === 0 &&
+                passiveCustomAbilities.length === 0 &&
+                passiveCompendiumAbilities.length === 0 &&
                 quickConsumables.length === 0 && (
                   <span className="text-[11px] font-lore italic px-2 opacity-65 whitespace-nowrap">
                     O Mestre forjará seus ataques aqui
                   </span>
                 )}
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* Right: Advantage Quick Switch + Request Rest + Open Sheet + Dice Tray */}
+            {/* Right: Request Rest + Concentration Selector + Open Sheet + Dice Tray (Salvar & 1d20 removed) */}
             <div
               className="flex items-center gap-1.5 pl-2 border-l shrink-0"
               style={{ borderColor: 'var(--border-subtle)' }}
             >
-              <button
-                onClick={() =>
-                  setAdvantageMode(
-                    advantageMode === 'normal'
-                      ? 'advantage'
-                      : advantageMode === 'advantage'
-                      ? 'disadvantage'
-                      : 'normal'
-                  )
-                }
-                className={`px-2.5 py-1.5 rounded-md text-[11px] font-display font-bold cursor-pointer transition ${
-                  advantageMode === 'advantage'
-                    ? 'bg-emerald-700 text-white border border-emerald-400'
-                    : advantageMode === 'disadvantage'
-                    ? 'bg-red-800 text-white border border-red-400'
-                    : 'rpg-card'
-                }`}
-                title="Clique para alternar: Normal / Vantagem (2d20) / Desvantagem (2d20)"
-              >
-                {advantageMode === 'normal'
-                  ? '1d20'
-                  : advantageMode === 'advantage'
-                  ? '2d20 Vant.'
-                  : '2d20 Desv.'}
-              </button>
-
               <div className="relative">
                 <button
                   disabled={hero.hp <= 0}
-                  onClick={() => setShowRestMenu((v) => !v)}
+                  onClick={() => {
+                    setShowConcMenu(false);
+                    setShowRestMenu((v) => !v);
+                  }}
                   className="rpg-card px-2.5 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer hover:border-amber-400/60 disabled:opacity-40 disabled:cursor-not-allowed"
                   title={
                     hero.hp <= 0
@@ -2952,55 +3715,70 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 )}
               </div>
 
-              <button
-                onClick={() => {
-                  if (hero.concentratingSpell) {
-                    setCharacterConcentration(hero.id, null);
-                  } else {
-                    const spell = window.prompt(
-                      'Qual magia você está mantendo em Concentração?',
-                      'Bênção'
-                    );
-                    if (spell && spell.trim()) {
-                      setCharacterConcentration(hero.id, spell.trim());
+              {/* Structured Concentration Selector (pick from character's spells/abilities — no free typing!) */}
+              <div className="relative">
+                <button
+                  onClick={() => {
+                    if (hero.concentratingSpell) {
+                      setCharacterConcentration(hero.id, null);
+                      setShowConcMenu(false);
+                    } else {
+                      setShowRestMenu(false);
+                      setShowConcMenu((v) => !v);
                     }
+                  }}
+                  className={`px-2 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer transition border ${
+                    hero.concentratingSpell
+                      ? 'bg-purple-950/90 border-purple-400/80 text-purple-200'
+                      : 'rpg-card hover:border-purple-400/60'
+                  }`}
+                  title={
+                    hero.concentratingSpell
+                      ? `Concentrando em: ${hero.concentratingSpell} (Clique para encerrar)`
+                      : 'Selecionar magia/habilidade para manter em Concentração'
                   }
-                }}
-                className={`px-2 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer transition border ${
-                  hero.concentratingSpell
-                    ? 'bg-purple-950/90 border-purple-400/80 text-purple-200'
-                    : 'rpg-card hover:border-purple-400/60'
-                }`}
-                title={
-                  hero.concentratingSpell
-                    ? `Concentrando em: ${hero.concentratingSpell} (Clique para encerrar)`
-                    : 'Ativar Concentração em uma magia (dispara teste de CON automático ao sofrer dano)'
-                }
-              >
-                <Sparkles className="w-3.5 h-3.5 text-purple-300 shrink-0" />
-                <span className="hidden xl:inline max-w-[95px] truncate">
-                  {hero.concentratingSpell ? `Conc: ${hero.concentratingSpell}` : 'Concentrar'}
-                </span>
-              </button>
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-purple-300 shrink-0" />
+                  <span className="hidden xl:inline max-w-[95px] truncate">
+                    {hero.concentratingSpell ? `Conc: ${hero.concentratingSpell}` : 'Concentrar'}
+                  </span>
+                </button>
 
-              <button
-                onClick={() => saveCharacterToVault(hero)}
-                className={`px-2.5 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer transition border ${
-                  lastSavedHeroFeedback?.id === (hero.vaultId || hero.id)
-                    ? 'bg-emerald-950/85 border-emerald-400/70 text-emerald-200'
-                    : 'rpg-card hover:border-amber-400/60'
-                }`}
-                title="Salvar e sincronizar seu herói (Desktop + Online)"
-              >
-                {lastSavedHeroFeedback?.id === (hero.vaultId || hero.id) ? (
-                  <Check className="w-3.5 h-3.5 text-emerald-300" />
-                ) : (
-                  <Save className="w-3.5 h-3.5 text-amber-300" />
-                )}
-                <span className="hidden lg:inline">
-                  {lastSavedHeroFeedback?.id === (hero.vaultId || hero.id) ? 'Salvo ✓' : 'Salvar'}
-                </span>
-              </button>
+                {showConcMenu && !hero.concentratingSpell && (() => {
+                  const concOptions = Array.from(
+                    new Set([
+                      ...compendiumAbilities.map((a) => a.name),
+                      ...quickAbilities.map((a) => a.name),
+                    ])
+                  );
+                  return (
+                    <div className="absolute bottom-12 right-0 w-56 max-h-60 overflow-y-auto rpg-glass-panel rounded-lg p-2 space-y-1 shadow-2xl text-xs">
+                      <div className="text-[10px] font-display uppercase tracking-wider opacity-70 px-1.5 pb-1">
+                        Escolher Magia / Habilidade
+                      </div>
+                      {concOptions.length === 0 ? (
+                        <div className="text-[11px] opacity-70 px-1.5 py-2">
+                          Nenhuma magia/habilidade cadastrada na ficha.
+                        </div>
+                      ) : (
+                        concOptions.map((spellName) => (
+                          <button
+                            key={spellName}
+                            type="button"
+                            onClick={() => {
+                              setCharacterConcentration(hero.id, spellName);
+                              setShowConcMenu(false);
+                            }}
+                            className="w-full text-left px-2.5 py-1.5 rounded-md rpg-card hover:border-purple-400/70 truncate cursor-pointer"
+                          >
+                            {spellName}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
 
               <button
                 onClick={onOpenSheet}
@@ -3028,6 +3806,469 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               <DragGripBadge />
             </div>
           </OrnateFrame>
+        </DraggablePanel>
+      )}
+
+      {/* =========================================================
+          PLAYER DRAGGABLE COLLAPSIBLE LEFT MINI-SHEET ("Minha Ficha")
+         ========================================================= */}
+      {role === 'player' && hero && stats && (
+        <DraggablePanel
+          storageKey="player-mini-sheet"
+          className="fixed top-20 left-3 z-30 pointer-events-auto flex flex-col items-start"
+        >
+          {playerSheetCollapsed ? (
+            <div className="rpg-glass-panel rounded-lg px-2 py-1.5 border border-amber-500/45 shadow-xl flex items-center gap-1.5">
+              <DragGripBadge />
+              <button
+                type="button"
+                onClick={() => setPlayerSheetCollapsed(false)}
+                className="flex items-center gap-2 cursor-pointer"
+                title="Expandir resumo rápido da sua ficha"
+              >
+                <TokenPortrait
+                  name={hero.name}
+                  imageUrl={hero.portraitUrl}
+                  playerColor={hero.playerColor || '#38bdf8'}
+                  frameStyle={hero.tokenFrameStyle || 'gold'}
+                  sizePx={26}
+                  isDead={hero.hp <= 0}
+                />
+                <div className="text-left leading-tight">
+                  <div className="font-display font-bold text-[11px] text-amber-100 max-w-[110px] truncate">
+                    {hero.name}
+                  </div>
+                  <div className="text-[9px] font-mono-dice text-amber-300/85">
+                    Nv {hero.level} • PV {hero.hp}/{stats.maxHp}
+                    {(hero.unspentAttributePoints || 0) > 0 && (
+                      <span className="ml-1 text-emerald-300 font-bold">
+                        +{hero.unspentAttributePoints}pt
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <ChevronRight className="w-3.5 h-3.5 text-amber-400" />
+              </button>
+            </div>
+          ) : (
+            <div className="w-64 max-h-[74vh] overflow-y-auto rpg-glass-panel rounded-xl p-3 border border-amber-500/45 shadow-2xl space-y-2.5 text-xs animate-ui-enter">
+              <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <DragGripBadge />
+                  <TokenPortrait
+                    name={hero.name}
+                    imageUrl={hero.portraitUrl}
+                    playerColor={hero.playerColor || '#38bdf8'}
+                    frameStyle={hero.tokenFrameStyle || 'gold'}
+                    sizePx={34}
+                    isDead={hero.hp <= 0}
+                  />
+                  <div className="min-w-0">
+                    <div className="font-display font-bold text-xs text-amber-100 truncate">
+                      {hero.name}
+                    </div>
+                    <div className="text-[10px] text-amber-300/80 truncate">
+                      Nv {hero.level} •{' '}
+                      {campaign.compendium.classes.find((c) => c.id === hero.classId)?.name || 'Herói'}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPlayerSheetCollapsed(true)}
+                  className="rpg-card p-1 rounded cursor-pointer shrink-0"
+                  title="Recolher ficha rápida"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {(hero.unspentAttributePoints || 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={onOpenSheet}
+                  className="w-full py-1.5 px-2 rounded bg-amber-500/20 border border-amber-400/70 text-amber-200 text-[10px] font-display font-bold cursor-pointer hover:bg-amber-500/30 text-center"
+                >
+                  ✨ +{hero.unspentAttributePoints} Ponto(s) de Atributo — Distribuir na Ficha
+                </button>
+              )}
+
+              {/* Compact Vitals */}
+              <div className="grid grid-cols-3 gap-1.5 text-center font-mono-dice text-[10px]">
+                <div className="rpg-socket rounded p-1.5">
+                  <div className="opacity-70 text-[9px]">PV</div>
+                  <div className="font-bold text-red-300">
+                    {hero.hp}/{stats.maxHp}
+                  </div>
+                </div>
+                <div className="rpg-socket rounded p-1.5">
+                  <div className="opacity-70 text-[9px]">{campaign.settings.resourceShort}</div>
+                  <div className="font-bold text-sky-300">
+                    {hero.mp}/{stats.maxMp}
+                  </div>
+                </div>
+                <div className="rpg-socket rounded p-1.5">
+                  <div className="opacity-70 text-[9px]">CA</div>
+                  <div className="font-bold text-amber-300">{stats.defense}</div>
+                </div>
+              </div>
+
+              {/* Custom Campaign Resource Bars in Player Mini-Sheet */}
+              {(campaign.compendium.customResources || []).length > 0 && (
+                <div className="space-y-1">
+                  {(campaign.compendium.customResources || []).map((res) => {
+                    const st = getCharacterCustomResourceState(hero, res);
+                    const pct = Math.max(0, Math.min(100, (st.current / Math.max(1, st.max)) * 100));
+                    return (
+                      <div key={res.id} className="rpg-socket rounded px-2 py-1 space-y-0.5 text-[10px]">
+                        <div className="flex items-center justify-between">
+                          <span className="font-display font-bold" style={{ color: res.color }}>
+                            {res.shortName}
+                          </span>
+                          <span className="font-mono-dice font-bold">
+                            {st.current}/{st.max}
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 rounded-full bg-black/70 overflow-hidden">
+                          <div
+                            className="h-full transition-all"
+                            style={{ width: `${pct}%`, backgroundColor: res.color }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* 6 Attributes (1-Click Roll) */}
+              <div className="space-y-1">
+                <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/85">
+                  Atributos (Clique para rolar)
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {campaign.compendium.attributes.map((attr) => {
+                    const comp = stats.attributes[attr.id] || { value: 10, mod: 0 };
+                    return (
+                      <button
+                        key={attr.id}
+                        type="button"
+                        onClick={() =>
+                          quickRollFormula(`Teste de ${attr.name}`, `1d20 + ${comp.mod}`, hero.name)
+                        }
+                        className="rpg-card rounded p-1 text-center hover:border-amber-400/70 cursor-pointer transition"
+                      >
+                        <div className="text-[9px] font-display opacity-75">{attr.shortName}</div>
+                        <div className="font-mono-dice font-bold text-xs text-amber-200">
+                          {formatSigned(comp.mod)}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Trained Skills (1-Click Roll) */}
+              {hero.trainedSkillIds.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/85">
+                    Perícias Treinadas
+                  </div>
+                  <div className="space-y-1 max-h-28 overflow-y-auto pr-0.5">
+                    {hero.trainedSkillIds.map((skId) => {
+                      const sk = campaign.compendium.skills.find((s) => s.id === skId);
+                      const comp = stats.skills[skId];
+                      if (!sk || !comp) return null;
+                      return (
+                        <button
+                          key={skId}
+                          type="button"
+                          onClick={() =>
+                            quickRollFormula(`Perícia: ${sk.name}`, `1d20 + ${comp.total}`, hero.name)
+                          }
+                          className="w-full rpg-card px-2 py-1 rounded flex items-center justify-between text-[10px] hover:border-amber-400/60 cursor-pointer"
+                        >
+                          <span className="truncate">{sk.name}</span>
+                          <span className="font-mono-dice font-bold text-amber-300">
+                            {formatSigned(comp.total)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Active Conditions & Concentration in Mini-Sheet */}
+              <div className="space-y-1">
+                <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/85">
+                  Condições &amp; Concentração
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {hero.concentratingSpell && (
+                    <span className="px-1.5 py-0.5 rounded bg-purple-950/80 border border-purple-400/60 text-purple-200 text-[9px] font-bold">
+                      ✨ Conc: {hero.concentratingSpell}
+                    </span>
+                  )}
+                  {(hero.activeConditionIds || []).map((cid) => {
+                    const cond = campaign.compendium.conditions.find((c) => c.id === cid);
+                    if (!cond) return null;
+                    return (
+                      <span
+                        key={cid}
+                        className="px-1.5 py-0.5 rounded bg-black/50 border text-[9px] font-semibold"
+                        style={{ borderColor: cond.color, color: cond.color }}
+                      >
+                        {cond.icon} {cond.name}
+                      </span>
+                    );
+                  })}
+                  {!hero.concentratingSpell && (hero.activeConditionIds || []).length === 0 && (
+                    <span className="text-[10px] opacity-60 italic">Nenhuma condição ativa</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Damage Resistances / Immunities / Vulnerabilities in Mini-Sheet */}
+              <div className="space-y-1">
+                <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/85">
+                  Resistências &amp; Afinidades
+                </div>
+                <div className="flex flex-wrap gap-1 text-[9px]">
+                  {(hero.damageResistances || []).map((dt) => (
+                    <span
+                      key={`res-${dt}`}
+                      className="px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-400/50 text-sky-200"
+                    >
+                      ½ {dt}
+                    </span>
+                  ))}
+                  {(hero.damageImmunities || []).map((dt) => (
+                    <span
+                      key={`imm-${dt}`}
+                      className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-400/50 text-emerald-200"
+                    >
+                      0 {dt}
+                    </span>
+                  ))}
+                  {(hero.damageVulnerabilities || []).map((dt) => (
+                    <span
+                      key={`vul-${dt}`}
+                      className="px-1.5 py-0.5 rounded bg-red-950/80 border border-red-400/50 text-red-200"
+                    >
+                      2× {dt}
+                    </span>
+                  ))}
+                  {(hero.damageResistances || []).length === 0 &&
+                    (hero.damageImmunities || []).length === 0 &&
+                    (hero.damageVulnerabilities || []).length === 0 && (
+                      <span className="text-[10px] opacity-60 italic">Sem resistências especiais</span>
+                    )}
+                </div>
+              </div>
+
+              {/* Cargas & Munição (● ● ○) in Player Mini-Sheet */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/85">
+                    Cargas &amp; Munição
+                  </span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const label = await openTextPrompt('Nome da carga ou munição (ex: Fúria, Flechas):', 'Flechas');
+                      if (!label) return;
+                      const maxRaw = await openTextPrompt(`Máximo de cargas para "${label}":`, '5');
+                      const maxVal = Math.max(1, Math.min(99, Number(maxRaw) || 5));
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        characters: prev.characters.map((c) =>
+                          c.id !== hero.id
+                            ? c
+                            : {
+                                ...c,
+                                resourceTrackers: [
+                                  ...(c.resourceTrackers || []),
+                                  {
+                                    id: `res-${Date.now()}`,
+                                    name: label.trim(),
+                                    current: maxVal,
+                                    max: maxVal,
+                                    resetOn: 'long',
+                                  },
+                                ],
+                              }
+                        ),
+                      }));
+                    }}
+                    className="text-[9px] px-1.5 py-0.5 rounded rpg-card hover:border-amber-400 cursor-pointer text-amber-200"
+                    title="Adicionar rastreador de cargas ou munição"
+                  >
+                    + Carga
+                  </button>
+                </div>
+                {(hero.resourceTrackers || []).length === 0 ? (
+                  <div className="text-[10px] opacity-55 italic">
+                    Clique em + Carga para controlar Fúria, Flechas, etc.
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {(hero.resourceTrackers || []).map((tr) => (
+                      <div
+                        key={tr.id}
+                        className="rpg-socket rounded px-2 py-1 flex items-center justify-between gap-1.5 text-[10px]"
+                      >
+                        <span className="font-display font-semibold truncate">{tr.name}</span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {tr.max <= 8 ? (
+                            <div className="flex items-center gap-0.5">
+                              {Array.from({ length: tr.max }).map((_, i) => {
+                                const filled = i < tr.current;
+                                return (
+                                  <button
+                                    key={i}
+                                    type="button"
+                                    onClick={() => {
+                                      const nextCur = filled && i + 1 === tr.current ? i : i + 1;
+                                      updateCampaign((prev) => ({
+                                        ...prev,
+                                        characters: prev.characters.map((c) =>
+                                          c.id !== hero.id
+                                            ? c
+                                            : {
+                                                ...c,
+                                                resourceTrackers: (c.resourceTrackers || []).map((x) =>
+                                                  x.id === tr.id ? { ...x, current: nextCur } : x
+                                                ),
+                                              }
+                                        ),
+                                      }));
+                                    }}
+                                    className={`w-2.5 h-2.5 rounded-full border cursor-pointer transition ${
+                                      filled
+                                        ? 'bg-amber-400 border-amber-200 shadow-[0_0_5px_rgba(251,191,36,0.7)]'
+                                        : 'bg-black/60 border-white/25'
+                                    }`}
+                                    title={`${tr.name}: ${tr.current}/${tr.max}`}
+                                  />
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1 font-mono-dice">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateCampaign((prev) => ({
+                                    ...prev,
+                                    characters: prev.characters.map((c) =>
+                                      c.id !== hero.id
+                                        ? c
+                                        : {
+                                            ...c,
+                                            resourceTrackers: (c.resourceTrackers || []).map((x) =>
+                                              x.id === tr.id
+                                                ? { ...x, current: Math.max(0, x.current - 1) }
+                                                : x
+                                            ),
+                                          }
+                                    ),
+                                  }))
+                                }
+                                className="px-1 rounded bg-black/60 hover:bg-black cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <span className="text-amber-300 font-bold">
+                                {tr.current}/{tr.max}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateCampaign((prev) => ({
+                                    ...prev,
+                                    characters: prev.characters.map((c) =>
+                                      c.id !== hero.id
+                                        ? c
+                                        : {
+                                            ...c,
+                                            resourceTrackers: (c.resourceTrackers || []).map((x) =>
+                                              x.id === tr.id
+                                                ? { ...x, current: Math.min(x.max, x.current + 1) }
+                                                : x
+                                            ),
+                                          }
+                                    ),
+                                  }))
+                                }
+                                className="px-1 rounded bg-black/60 hover:bg-black cursor-pointer"
+                              >
+                                +
+                              </button>
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateCampaign((prev) => ({
+                                ...prev,
+                                characters: prev.characters.map((c) =>
+                                  c.id !== hero.id
+                                    ? c
+                                    : {
+                                        ...c,
+                                        resourceTrackers: (c.resourceTrackers || []).filter(
+                                          (x) => x.id !== tr.id
+                                        ),
+                                      }
+                                ),
+                              }))
+                            }
+                            className="text-red-400/70 hover:text-red-300 cursor-pointer"
+                            title="Remover rastreador"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Quick Personal Notes in Player Mini-Sheet */}
+              <div className="space-y-1">
+                <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/85">
+                  Notas Rápidas
+                </div>
+                <textarea
+                  rows={2}
+                  value={hero.notes || ''}
+                  onChange={(e) =>
+                    updateCampaign((prev) => ({
+                      ...prev,
+                      characters: prev.characters.map((c) =>
+                        c.id === hero.id ? { ...c, notes: e.target.value } : c
+                      ),
+                    }))
+                  }
+                  placeholder="Anotações de pistas, NPCs, objetivos..."
+                  className="rpg-input w-full text-[10px] py-1 px-2 resize-none"
+                />
+              </div>
+
+              <div className="flex items-center justify-between pt-1 border-t border-white/10 text-[10px]">
+                <span className="font-mono-dice text-amber-300">Ouro: {hero.gold} PO</span>
+                <button
+                  type="button"
+                  onClick={onOpenSheet}
+                  className="rpg-btn-primary px-2.5 py-1 rounded text-[10px] font-display font-bold cursor-pointer"
+                >
+                  Ficha Completa
+                </button>
+              </div>
+            </div>
+          )}
         </DraggablePanel>
       )}
     </>

@@ -27,6 +27,7 @@ import {
   Character,
   ChatMessageEntry,
   CombatDuelState,
+  CombatLogEntry,
   ConnectedPlayerInfo,
   HandoutPayload,
   InitiativeCeremonyState,
@@ -60,6 +61,9 @@ let activeSavePrompt: TacticalSavePrompt | null = null;
 let pendingRequests: PlayerRequest[] = [];
 const activePointers = new Map<string, MapPointerState>();
 const connectedPlayers = new Map<string, ConnectedPlayerInfo>();
+const gmHostSocketIds = new Set<string>();
+let gmRoomOpen = false;
+let gmDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 function getLocalNetworkAddresses(): Array<{
   name: string;
@@ -166,19 +170,15 @@ async function upsertSavedCharacter(
 
 async function syncVaultLinkedCharactersToDisk(camp: CampaignState): Promise<boolean> {
   await fs.mkdir(CHARACTERS_DIR, { recursive: true });
-  const existingFiles = new Set((await fs.readdir(CHARACTERS_DIR)).filter((f) => f.endsWith('.json')));
   let changed = false;
 
   for (const ch of camp.characters || []) {
-    const safeVault = (ch.vaultId || ch.id).replace(/[^a-zA-Z0-9_-]/g, '_');
-    const hasVaultFile = existingFiles.has(`${safeVault}.json`);
-    if (ch.vaultId || hasVaultFile) {
-      await upsertSavedCharacter(ch, {
-        originCampaignId: camp.id,
-        originCampaignName: camp.name,
-      });
-      changed = true;
-    }
+    if (!ch || !ch.id || !ch.name) continue;
+    await upsertSavedCharacter(ch, {
+      originCampaignId: camp.id,
+      originCampaignName: camp.name,
+    });
+    changed = true;
   }
   return changed;
 }
@@ -201,6 +201,39 @@ function normalizeCampaign(c: CampaignState): CampaignState {
         },
       ];
 
+  const existingSkills = (c.compendium?.skills || []).map((sk) =>
+    sk.id === 'fortitude' && sk.name === 'Fortitude'
+      ? { ...sk, name: 'Resiliência' }
+      : sk
+  );
+  const ensureSaves = [
+    {
+      id: 'salv-forca',
+      name: 'Vigor Físico',
+      defaultAttributeId: 'for',
+      isSavingThrow: true,
+      description: 'Resistir a empurrões, agarrões e força bruta.',
+    },
+    {
+      id: 'salv-inteligencia',
+      name: 'Lucidez',
+      defaultAttributeId: 'int',
+      isSavingThrow: true,
+      description: 'Resistir a ilusões, labirintos mentais e ataques psíquicos.',
+    },
+    {
+      id: 'salv-carisma',
+      name: 'Presença',
+      defaultAttributeId: 'car',
+      isSavingThrow: true,
+      description: 'Resistir a banimento, possessão e drenagem espiritual.',
+    },
+  ];
+  const nextSkills = [
+    ...existingSkills,
+    ...ensureSaves.filter((sv) => !existingSkills.some((sk) => sk.id === sv.id)),
+  ];
+
   const normalized: CampaignState = {
     ...c,
     coverUrl: c.coverUrl || '',
@@ -216,6 +249,7 @@ function normalizeCampaign(c: CampaignState): CampaignState {
     compendium: {
       ...c.compendium,
       conditions: nextConds,
+      skills: nextSkills,
     },
     customMusicTracks: Array.isArray(c.customMusicTracks) ? c.customMusicTracks : [],
     chatLog: Array.isArray(c.chatLog) ? c.chatLog : [],
@@ -804,6 +838,11 @@ app.get('/api/campaign', (_req, res) => {
   res.json(campaignState);
 });
 
+app.get('/api/room-status', (_req, res) => {
+  const hasGm = Array.from(connectedPlayers.values()).some((p) => p.role === 'gm');
+  res.json({ open: gmRoomOpen, hasGm });
+});
+
 app.post('/api/campaign/update', async (req, res) => {
   try {
     const next = req.body as CampaignState;
@@ -930,20 +969,50 @@ io.on('connection', (socket) => {
 
   socket.on(
     'presence:identify',
-    (info: Omit<ConnectedPlayerInfo, 'socketId'>) => {
+    (info: Omit<ConnectedPlayerInfo, 'socketId'> & { inLobby?: boolean }) => {
       if (!info || !info.playerId) return;
+      const isGmRole = info.role === 'gm';
       connectedPlayers.set(socket.id, {
         socketId: socket.id,
         playerId: info.playerId,
         playerName: info.playerName || 'Aventureiro',
         playerColor: info.playerColor || '#f59e0b',
-        role: info.role === 'gm' ? 'gm' : 'player',
+        role: isGmRole ? 'gm' : 'player',
         characterId: info.characterId,
         characterName: info.characterName,
       });
+      if (isGmRole && !info.inLobby) {
+        gmHostSocketIds.add(socket.id);
+        if (gmDisconnectTimer) {
+          clearTimeout(gmDisconnectTimer);
+          gmDisconnectTimer = null;
+        }
+        gmRoomOpen = true;
+      }
       io.emit('presence:list', Array.from(connectedPlayers.values()));
     }
   );
+
+  socket.on('room:gm-open', () => {
+    gmHostSocketIds.add(socket.id);
+    if (gmDisconnectTimer) {
+      clearTimeout(gmDisconnectTimer);
+      gmDisconnectTimer = null;
+    }
+    gmRoomOpen = true;
+  });
+
+  socket.on('room:gm-leave', () => {
+    gmHostSocketIds.delete(socket.id);
+    if (gmDisconnectTimer) {
+      clearTimeout(gmDisconnectTimer);
+      gmDisconnectTimer = null;
+    }
+    gmRoomOpen = false;
+    io.emit('room:closed', {
+      reason: 'O Mestre saiu da mesa — a sala foi encerrada automaticamente.',
+    });
+  });
 
   socket.on('campaign:patch', async (nextState: CampaignState) => {
     if (!nextState || !nextState.compendium) return;
@@ -970,8 +1039,18 @@ io.on('connection', (socket) => {
       isHeal?: boolean;
       rollId?: string;
       damageType?: string;
+      applyConditionId?: string;
+      conditionDurationRounds?: number;
     }) => {
-      const { targetTokenId, amount, isHeal, rollId, damageType } = payload;
+      const {
+        targetTokenId,
+        amount,
+        isHeal,
+        rollId,
+        damageType,
+        applyConditionId,
+        conditionDurationRounds,
+      } = payload;
 
       // Locate target token/character/monster to resolve Damage Resistances / Immunities / Vulnerabilities
       let foundToken = campaignState.maps
@@ -1005,7 +1084,20 @@ io.on('connection', (socket) => {
         affinityNote = res.modifierLabel;
       }
 
-      const delta = isHeal ? effectiveAmount : -effectiveAmount;
+      // D&D 5e Temporary HP absorption before real HP takes damage
+      let tempHpAbsorbed = 0;
+      let hpDamageAfterTemp = effectiveAmount;
+      if (!isHeal && effectiveAmount > 0 && targetChar && (targetChar.tempHp || 0) > 0) {
+        tempHpAbsorbed = Math.min(targetChar.tempHp || 0, effectiveAmount);
+        hpDamageAfterTemp = effectiveAmount - tempHpAbsorbed;
+        if (tempHpAbsorbed > 0) {
+          affinityNote = affinityNote
+            ? `${affinityNote} • -${tempHpAbsorbed} PV Temp`
+            : `Absorvido ${tempHpAbsorbed} PV Temp`;
+        }
+      }
+
+      const delta = isHeal ? effectiveAmount : -hpDamageAfterTemp;
 
       const updatedMaps = campaignState.maps.map((m) => ({
         ...m,
@@ -1014,7 +1106,23 @@ io.on('connection', (socket) => {
           matchedRefId = t.referenceId;
           targetName = t.name;
           const nextHp = Math.max(0, Math.min(t.maxHp, t.hp + delta));
-          return { ...t, hp: nextHp };
+          const phase2Pct = t.bossPhase2HpPct ?? 50;
+          const shouldEnterPhase2 =
+            Boolean(t.isBoss) &&
+            (t.bossPhase || 1) < 2 &&
+            t.maxHp > 0 &&
+            nextHp > 0 &&
+            (nextHp / t.maxHp) * 100 <= phase2Pct;
+          return {
+            ...t,
+            hp: nextHp,
+            ...(shouldEnterPhase2
+              ? {
+                  bossPhase: 2,
+                  legendaryActionsRemaining: t.legendaryActionsMax ?? t.legendaryActionsRemaining,
+                }
+              : {}),
+          };
         }),
       }));
 
@@ -1022,7 +1130,12 @@ io.on('connection', (socket) => {
         if (c.id !== matchedRefId && c.id !== targetTokenId) return c;
         targetName = c.name;
         const wasDown = c.hp <= 0;
-        const nextHp = Math.max(0, c.hp + delta);
+        const charMaxHp = Math.max(
+          1,
+          foundToken?.maxHp || c.maxHpOverride || computeCharacterStats(c, campaignState).maxHp
+        );
+        const nextTempHp = Math.max(0, (c.tempHp || 0) - tempHpAbsorbed);
+        const nextHp = Math.max(0, Math.min(charMaxHp, c.hp + delta));
         let nextDeathSaves = c.deathSaves || { successes: 0, failures: 0 };
 
         if (nextHp > 0) {
@@ -1038,8 +1151,12 @@ io.on('connection', (socket) => {
           };
         }
 
-        return { ...c, hp: nextHp, deathSaves: nextDeathSaves };
+        return { ...c, hp: nextHp, tempHp: nextTempHp, deathSaves: nextDeathSaves };
       });
+
+      const appliedCondDef = applyConditionId
+        ? campaignState.compendium.conditions.find((c) => c.id === applyConditionId)
+        : undefined;
 
       const updatedCombatants = campaignState.combat.combatants.map((cb) => {
         const matchesToken = cb.tokenId
@@ -1047,7 +1164,20 @@ io.on('connection', (socket) => {
           : Boolean(matchedRefId && cb.referenceId === matchedRefId);
         if (!matchesToken) return cb;
         const nextHp = Math.max(0, Math.min(cb.maxHp, cb.hp + delta));
-        return { ...cb, hp: nextHp };
+        const nextEffects =
+          applyConditionId && appliedCondDef
+            ? [
+                ...cb.effects.filter((ef) => ef.conditionId !== applyConditionId),
+                {
+                  id: `eff-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                  label: appliedCondDef.name,
+                  conditionId: applyConditionId,
+                  remainingRounds: conditionDurationRounds || 3,
+                  sourceName: 'Combate',
+                },
+              ]
+            : cb.effects;
+        return { ...cb, hp: nextHp, effects: nextEffects };
       });
 
       const updatedBoss =
@@ -1083,16 +1213,81 @@ io.on('connection', (socket) => {
             : `${targetName} sofreu ${effectiveAmount} de dano${damageType ? ` (${damageType})` : ''}.`,
       };
 
+      const prevHpForLog = targetChar ? targetChar.hp : foundToken?.hp ?? 0;
+      const nextHpForLog = Math.max(0, prevHpForLog + delta);
+      const actorKindForLog: 'hero' | 'monster' | 'npc' =
+        targetChar || foundToken?.type === 'character'
+          ? 'hero'
+          : foundToken?.type === 'npc'
+            ? 'npc'
+            : 'monster';
+      const nowIsoLog = new Date().toISOString();
+      const newBg3Logs = [
+        {
+          id: `clog-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: nowIsoLog,
+          category: (isHeal ? 'heal' : 'damage') as 'heal' | 'damage' | 'death' | 'revive',
+          actorName: targetName,
+          actorKind: actorKindForLog,
+          actorColor: targetChar?.playerColor || foundToken?.color,
+          summary: isHeal
+            ? `recuperou +${effectiveAmount} PV`
+            : `sofreu -${effectiveAmount} de dano${damageType ? ` (${damageType})` : ''}${affinityNote ? ` (${affinityNote})` : ''}`,
+        },
+      ];
+      if (!isHeal && prevHpForLog > 0 && nextHpForLog <= 0) {
+        newBg3Logs.push({
+          id: `clog-die-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          timestamp: nowIsoLog,
+          category: 'death',
+          actorName: targetName,
+          actorKind: actorKindForLog,
+          actorColor: targetChar?.playerColor || foundToken?.color,
+          summary: actorKindForLog === 'hero' ? 'caiu inconsciente (0 PV)!' : 'foi derrotado (0 PV)!',
+        });
+      } else if (isHeal && prevHpForLog <= 0 && nextHpForLog > 0) {
+        newBg3Logs.push({
+          id: `clog-rev-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          timestamp: nowIsoLog,
+          category: 'revive',
+          actorName: targetName,
+          actorKind: actorKindForLog,
+          actorColor: targetChar?.playerColor || foundToken?.color,
+          summary: `levantou / foi revivido (${nextHpForLog} PV)!`,
+        });
+      }
+
+      const finalMaps = applyConditionId
+        ? updatedMaps.map((m) => ({
+            ...m,
+            tokens: m.tokens.map((t) =>
+              t.id === targetTokenId && !(t.activeConditionIds || []).includes(applyConditionId)
+                ? { ...t, activeConditionIds: [...(t.activeConditionIds || []), applyConditionId] }
+                : t
+            ),
+          }))
+        : updatedMaps;
+
+      const finalChars = applyConditionId
+        ? updatedChars.map((c) =>
+            (c.id === matchedRefId || c.id === targetTokenId) &&
+            !c.activeConditionIds.includes(applyConditionId)
+              ? { ...c, activeConditionIds: [...c.activeConditionIds, applyConditionId] }
+              : c
+          )
+        : updatedChars;
+
       campaignState = {
         ...campaignState,
-        maps: updatedMaps,
-        characters: updatedChars,
+        maps: finalMaps,
+        characters: finalChars,
         activeBoss: updatedBoss,
         combat: {
           ...campaignState.combat,
           combatants: updatedCombatants,
         },
         rollLog: [sysLog, ...updatedRollLog].slice(0, 120),
+        combatLog: [...(campaignState.combatLog || []).slice(-(120 - newBg3Logs.length)), ...newBg3Logs],
       };
 
       await persistState();
@@ -1121,18 +1316,102 @@ io.on('connection', (socket) => {
           (updatedTargetCb ? updatedTargetCb.hp > 0 : true);
         if (concSpell) {
           if (!stillAlive) {
-            // Unconscious / 0 PV automatically breaks concentration
+            // Unconscious / 0 PV automatically breaks concentration AND cleans up all tracked concentration conditions from targets!
+            const trackedConcEffects = (updatedTargetChar?.activeTrackedEffects || []).filter(
+              (e) => e.isConcentration
+            );
+            const condRemByChar = new Map<string, Set<string>>();
+            const condRemByTok = new Map<string, Set<string>>();
+            trackedConcEffects.forEach((ef) => {
+              if (!ef.conditionId) return;
+              ef.targetCharacterIds.forEach((cid) => {
+                if (!condRemByChar.has(cid)) condRemByChar.set(cid, new Set());
+                condRemByChar.get(cid)!.add(ef.conditionId!);
+              });
+              ef.targetTokenIds.forEach((tid) => {
+                if (!condRemByTok.has(tid)) condRemByTok.set(tid, new Set());
+                condRemByTok.get(tid)!.add(ef.conditionId!);
+              });
+            });
+            const affectedNames = trackedConcEffects.flatMap((e) => e.targetNames).filter(Boolean);
+            const concLog: CombatLogEntry = {
+              id: `clog-conc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+              timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+              category: 'condition',
+              actorName: targetName,
+              actorKind: updatedTargetChar ? 'hero' : 'monster',
+              actorColor: updatedTargetChar?.playerColor || updatedTargetChar?.tokenColor || '#e0b84c',
+              summary:
+                affectedNames.length > 0
+                  ? `caiu a 0 PV e perdeu concentração em ${concSpell} — efeito removido de ${affectedNames.join(', ')}`
+                  : `caiu a 0 PV e perdeu concentração em ${concSpell}`,
+            };
+
             campaignState = {
               ...campaignState,
-              characters: campaignState.characters.map((c) =>
-                c.id === updatedTargetChar?.id ? { ...c, concentratingSpell: null } : c
+              characters: campaignState.characters.map((c) => {
+                let next = c;
+                const toRem = condRemByChar.get(c.id);
+                if (toRem && toRem.size > 0) {
+                  next = {
+                    ...next,
+                    activeConditionIds: next.activeConditionIds.filter((id) => !toRem.has(id)),
+                  };
+                }
+                if (c.id === updatedTargetChar?.id) {
+                  next = {
+                    ...next,
+                    concentratingSpell: null,
+                    activeTrackedEffects: (next.activeTrackedEffects || []).filter(
+                      (e) => !e.isConcentration
+                    ),
+                  };
+                }
+                return next;
+              }),
+              maps: campaignState.maps.map((m) =>
+                m.id !== campaignState.activeMapId
+                  ? m
+                  : {
+                      ...m,
+                      tokens: m.tokens.map((t) => {
+                        const toRem = condRemByTok.get(t.id);
+                        if (!toRem || toRem.size === 0) return t;
+                        return {
+                          ...t,
+                          activeConditionIds: (t.activeConditionIds || []).filter(
+                            (id) => !toRem.has(id)
+                          ),
+                        };
+                      }),
+                    }
               ),
               combat: {
                 ...campaignState.combat,
-                combatants: campaignState.combat.combatants.map((cb) =>
-                  cb.id === updatedTargetCb?.id ? { ...cb, concentratingSpell: null } : cb
-                ),
+                combatants: campaignState.combat.combatants.map((cb) => {
+                  let nextCb = cb;
+                  if (cb.id === updatedTargetCb?.id) {
+                    nextCb = { ...nextCb, concentratingSpell: null };
+                  }
+                  const toRemTok = cb.tokenId ? condRemByTok.get(cb.tokenId) : undefined;
+                  const toRemChar = cb.referenceId ? condRemByChar.get(cb.referenceId) : undefined;
+                  if ((toRemTok && toRemTok.size > 0) || (toRemChar && toRemChar.size > 0)) {
+                    nextCb = {
+                      ...nextCb,
+                      effects: nextCb.effects.filter(
+                        (ef) =>
+                          !(
+                            ef.conditionId &&
+                            ((toRemTok && toRemTok.has(ef.conditionId)) ||
+                              (toRemChar && toRemChar.has(ef.conditionId)))
+                          )
+                      ),
+                    };
+                  }
+                  return nextCb;
+                }),
               },
+              combatLog: [...(campaignState.combatLog || []).slice(-119), concLog],
             };
             await persistState();
             io.emit('campaign:updated', campaignState);
@@ -1207,8 +1486,67 @@ io.on('connection', (socket) => {
   });
 
   // Player Requests to GM (Descanso Longo, Descanso Curto, Cura/Ajuste, Entrada como Herói)
-  socket.on('request:send', (reqPayload: PlayerRequest) => {
+  socket.on('request:send', async (reqPayload: PlayerRequest) => {
     if (reqPayload.type === 'claim-hero' || reqPayload.type === 'import-hero') {
+      // Check if there is actually a GM connected on the server; if not, auto-approve so nobody gets stuck waiting for a nonexistent GM
+      const hasOnlineGm = Array.from(connectedPlayers.values()).some((p) => p.role === 'gm');
+      if (!hasOnlineGm) {
+        if (reqPayload.type === 'claim-hero') {
+          const target = campaignState.characters.find((c) => c.id === reqPayload.characterId);
+          if (target && reqPayload.requesterPlayerId) {
+            const now = new Date().toISOString();
+            const claimed: Character = {
+              ...target,
+              ownerPlayerId: reqPayload.requesterPlayerId,
+              playerName: reqPayload.requesterPlayerName?.trim() || target.playerName,
+              vaultId: target.vaultId || target.id,
+              lastSyncedAt: now,
+            };
+            campaignState = normalizeCampaign({
+              ...campaignState,
+              characters: campaignState.characters.map((c) => (c.id === target.id ? claimed : c)),
+            });
+            await persistState();
+            await upsertSavedCharacter(claimed, {
+              originCampaignId: campaignState.id,
+              originCampaignName: campaignState.name,
+            }).catch(() => {});
+            io.emit('campaign:updated', campaignState);
+          }
+        } else if (reqPayload.type === 'import-hero' && reqPayload.heroPayload) {
+          const now = new Date().toISOString();
+          const finalChar: Character = {
+            ...reqPayload.heroPayload,
+            ownerPlayerId: reqPayload.requesterPlayerId || reqPayload.heroPayload.ownerPlayerId,
+            playerName: reqPayload.requesterPlayerName?.trim() || reqPayload.heroPayload.playerName,
+            lastSyncedAt: now,
+          };
+          const existsInCampaign = campaignState.characters.some((c) => c.id === finalChar.id);
+          campaignState = normalizeCampaign({
+            ...campaignState,
+            characters: existsInCampaign
+              ? campaignState.characters.map((c) => (c.id === finalChar.id ? finalChar : c))
+              : [...campaignState.characters, finalChar],
+          });
+          await persistState();
+          await upsertSavedCharacter(finalChar, {
+            originCampaignId: campaignState.id,
+            originCampaignName: campaignState.name,
+          }).catch(() => {});
+          io.emit('campaign:updated', campaignState);
+        }
+
+        io.emit('request:resolved', {
+          type: reqPayload.type,
+          requesterPlayerId: reqPayload.requesterPlayerId,
+          characterId: reqPayload.characterId,
+          characterName: reqPayload.characterName,
+          label: reqPayload.label,
+          approved: true,
+        });
+        return;
+      }
+
       // Replace any previous pending hero-join request from the same player
       pendingRequests = [
         ...pendingRequests.filter(
@@ -1539,6 +1877,56 @@ io.on('connection', (socket) => {
     io.emit('opportunity:prompt', prompt);
   });
 
+  // Authoritative Death Save Sync (Player rolls & GM manual pip adjustments)
+  socket.on(
+    'character:deathSave',
+    async (payload: {
+      characterId: string;
+      hp: number;
+      deathSaves: Character['deathSaves'];
+    }) => {
+      const char = campaignState.characters.find((c) => c.id === payload.characterId);
+      if (!char) return;
+      const nextHp = Math.max(0, payload.hp);
+      campaignState = normalizeCampaign({
+        ...campaignState,
+        characters: campaignState.characters.map((c) =>
+          c.id !== char.id
+            ? c
+            : {
+                ...c,
+                hp: nextHp,
+                deathSaves: {
+                  successes: Math.max(0, Math.min(3, payload.deathSaves?.successes || 0)),
+                  failures: Math.max(0, Math.min(3, payload.deathSaves?.failures || 0)),
+                  stabilized: Boolean(payload.deathSaves?.stabilized),
+                  dead: Boolean(payload.deathSaves?.dead),
+                  assistedBy: payload.deathSaves?.assistedBy,
+                },
+              }
+        ),
+        maps: campaignState.maps.map((m) => ({
+          ...m,
+          tokens: m.tokens.map((t) =>
+            t.type === 'character' && t.referenceId === char.id
+              ? { ...t, hp: nextHp }
+              : t
+          ),
+        })),
+        combat: {
+          ...campaignState.combat,
+          combatants: campaignState.combat.combatants.map((cb) =>
+            cb.type === 'character' && cb.referenceId === char.id
+              ? { ...cb, hp: nextHp }
+              : cb
+          ),
+        },
+      });
+      await persistState();
+      io.emit('campaign:updated', campaignState);
+    }
+  );
+
   // Unified Hybrid Save Prompt (Traps, AoE Spells, Concentration Checks)
   socket.on('save-prompt:update', (prompt: TacticalSavePrompt | null) => {
     activeSavePrompt = prompt;
@@ -1612,10 +2000,47 @@ io.on('connection', (socket) => {
     io.emit('map:ping', payload);
   });
 
+  socket.on('rest:announce', (payload: { id: string; kind: 'short' | 'long'; summary: string; affectedCount: number }) => {
+    io.emit('rest:banner', payload);
+  });
+
+  socket.on('vfx:projectile', (payload: unknown) => {
+    io.emit('vfx:projectile', payload);
+  });
+
+  socket.on('combat:mvp-summary', (payload: unknown) => {
+    io.emit('combat:mvp-summary', payload);
+  });
+
   socket.on('disconnect', () => {
+    const leaving = connectedPlayers.get(socket.id);
+    const wasGmHost = gmHostSocketIds.delete(socket.id) || leaving?.role === 'gm';
     connectedPlayers.delete(socket.id);
     io.emit('presence:list', Array.from(connectedPlayers.values()));
     io.emit('presence:count', io.engine.clientsCount);
+
+    if (wasGmHost && gmRoomOpen) {
+      const anyOtherGm =
+        gmHostSocketIds.size > 0 ||
+        Array.from(connectedPlayers.values()).some((p) => p.role === 'gm');
+      if (!anyOtherGm) {
+        if (gmDisconnectTimer) clearTimeout(gmDisconnectTimer);
+        // Short 2.5s grace period so an accidental F5 refresh by GM doesn't kick players,
+        // while closing the app or losing connection cleanly closes the room!
+        gmDisconnectTimer = setTimeout(() => {
+          gmDisconnectTimer = null;
+          const gmBack =
+            gmHostSocketIds.size > 0 ||
+            Array.from(connectedPlayers.values()).some((p) => p.role === 'gm');
+          if (!gmBack && gmRoomOpen) {
+            gmRoomOpen = false;
+            io.emit('room:closed', {
+              reason: 'O Mestre desconectou — a sala foi encerrada automaticamente.',
+            });
+          }
+        }, 2500);
+      }
+    }
   });
 });
 

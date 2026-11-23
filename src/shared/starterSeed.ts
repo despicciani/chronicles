@@ -1,4 +1,11 @@
 import { CampaignState } from './types';
+import {
+  DND5E_CLASSIC_CLASSES,
+  DND5E_CLASSIC_ITEMS,
+  DND5E_CLASSIC_MONSTERS,
+  DND5E_CLASSIC_RACES,
+  DND5E_CLASSIC_SPELLS,
+} from './dnd5ePack';
 
 export function createStarterCampaign(): CampaignState {
   return {
@@ -36,7 +43,7 @@ export function createStarterCampaign(): CampaignState {
         { id: 'atletismo', name: 'Atletismo', defaultAttributeId: 'for', description: 'Escalar, nadar, saltar e empurrar.' },
         { id: 'atuacao', name: 'Atuação', defaultAttributeId: 'car', description: 'Música, teatro e disfarce expressivo.' },
         { id: 'enganacao', name: 'Enganação', defaultAttributeId: 'car', description: 'Blefar, mentir e dissimular intenções.' },
-        { id: 'fortitude', name: 'Fortitude', defaultAttributeId: 'con', isSavingThrow: true, description: 'Resistência física contra venenos e cansaço.' },
+        { id: 'fortitude', name: 'Resiliência', defaultAttributeId: 'con', isSavingThrow: true, description: 'Resistência corporal contra venenos, doenças, frio e fadiga.' },
         { id: 'furtividade', name: 'Furtividade', defaultAttributeId: 'des', description: 'Mover-se em silêncio e esconder-se.' },
         { id: 'historia', name: 'História', defaultAttributeId: 'int', description: 'Lendas, reinos antigos e linhagens.' },
         { id: 'intimidacao', name: 'Intimidação', defaultAttributeId: 'car', description: 'Coagir através de ameaças ou presença.' },
@@ -53,6 +60,9 @@ export function createStarterCampaign(): CampaignState {
         { id: 'religiao', name: 'Religião', defaultAttributeId: 'int', description: 'Deuses, ritos sagrados e mortos-vivos.' },
         { id: 'sobrevivencia', name: 'Sobrevivência', defaultAttributeId: 'sab', description: 'Rastrear, caçar e orientar-se em ermos.' },
         { id: 'vontade', name: 'Vontade', defaultAttributeId: 'sab', isSavingThrow: true, description: 'Resistência mental contra medo e controle.' },
+        { id: 'salv-forca', name: 'Vigor Físico', defaultAttributeId: 'for', isSavingThrow: true, description: 'Resistir a empurrões, agarrões e força bruta.' },
+        { id: 'salv-inteligencia', name: 'Lucidez', defaultAttributeId: 'int', isSavingThrow: true, description: 'Resistir a ilusões, labirintos mentais e ataques psíquicos.' },
+        { id: 'salv-carisma', name: 'Presença', defaultAttributeId: 'car', isSavingThrow: true, description: 'Resistir a banimento, possessão e drenagem espiritual.' },
       ],
       conditions: [
         {
@@ -185,7 +195,8 @@ export function createStarterCampaign(): CampaignState {
           name: 'Invisível',
           color: '#2dd4bf',
           icon: '👻',
-          description: '+4 em ataques, +4 na Defesa e +5 em Furtividade.',
+          description: '+4 em ataques, +4 na Defesa, +5 em Furtividade e imune a Ataques de Oportunidade.',
+          preventsOpportunityAttacks: true,
           modifiers: [
             { target: 'attack', value: 4, label: 'Invisível' },
             { target: 'defense', value: 4, label: 'Invisível' },
@@ -249,6 +260,7 @@ export function createStarterCampaign(): CampaignState {
           customTraits: ['Ataques Selvagens', 'Tenacidade Implacável (fica com 1 PV 1x/dia)'],
           abilityIds: ['hab-visao-escuro'],
         },
+        ...DND5E_CLASSIC_RACES,
       ],
       classes: [
         {
@@ -353,6 +365,7 @@ export function createStarterCampaign(): CampaignState {
             { level: 20, featureName: 'Campeão Juramentado', description: 'Transformação angelical em combate.' },
           ],
         },
+        ...DND5E_CLASSIC_CLASSES,
       ],
       abilities: [
         {
@@ -506,6 +519,7 @@ export function createStarterCampaign(): CampaignState {
           duration: 'Permanente',
           description: 'Enxerga na escuridão ou penumbra sem penalidades.',
         },
+        ...DND5E_CLASSIC_SPELLS,
       ],
       items: [
         {
@@ -687,6 +701,7 @@ export function createStarterCampaign(): CampaignState {
             { target: 'speed', value: 1.5, label: 'Grevas Aladas' },
           ],
         },
+        ...DND5E_CLASSIC_ITEMS,
       ],
       monsters: [
         {
@@ -811,6 +826,7 @@ export function createStarterCampaign(): CampaignState {
           description: 'Senhor alado das chamas e acumulador de tesouros antigos.',
           tokenColor: '#b91c1c',
         },
+        ...DND5E_CLASSIC_MONSTERS,
       ],
     },
     characters: [

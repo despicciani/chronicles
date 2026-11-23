@@ -1,24 +1,120 @@
-# CHRONICLE — Mesa Virtual de RPG de Alta Fantasia
+<div align="center">
 
-Aplicação Desktop (**Electron + Vite + React + Socket.IO**) para mesas de RPG de Alta Fantasia em tempo real, com tela inicial cinematográfica, motor d20 configurável pelo Mestre, criação de personagem com orçamento de pontos e perícias definidos por campanha, cerimônia animada de iniciativa e Arena de Duelo tática (Ataque vs CA → Rolagem de Dano → Redução automática de PV).
+# ⚔️ CHRONICLES ⚔️
+### *A Mesa Virtual de RPG de Alta Fantasia & Dark Fantasy*
 
-## Como Abrir o Programa Desktop
+> *"Acendam as tochas, rolem a iniciativa e escrevam sua lenda em aço, sangue e arcano."*
 
-- **Clique Duplo:** Execute `Iniciar Cronicas d20 (Desktop).vbs` (ou `Iniciar Cronicas d20 (Desktop).bat`).
-- **Pelo Terminal:** `npm run desktop:start` (ou `npm run desktop` para recompilar e abrir).
+![Electron](https://img.shields.io/badge/Electron-Desktop%20App-2b2e3b?style=for-the-badge&logo=electron&logoColor=e8c266)
+![React](https://img.shields.io/badge/React-18-161822?style=for-the-badge&logo=react&logoColor=38bdf8)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.7-161822?style=for-the-badge&logo=typescript&logoColor=60a5fa)
+![Socket.IO](https://img.shields.io/badge/Socket.IO-Multiplayer%20Real--Time-161822?style=for-the-badge&logo=socketdotio&logoColor=e8c266)
+![Vite](https://img.shields.io/badge/Vite-6-161822?style=for-the-badge&logo=vite&logoColor=c084fc)
 
-## Fluxo da Mesa no CHRONICLE
+</div>
 
-1. **Tela de Título & Portais:**
-   - Abertura animada do emblema **CHRONICLE** revelando os dois portais de entrada: **SOU JOGADOR** e **SOU MESTRE**.
-2. **Santuário do Mestre & Criação de Campanha:**
-   - Ao criar uma nova campanha, o Mestre define Nome, Foto de Capa, Descrição, **Pontos de Atributo (`attributePointBudget`)** e **Máximo de Perícias Treinadas (`maxTrainedSkills`)**.
-   - As campanhas ficam salvas em `server/data/campaigns/`.
-3. **Entrada do Jogador & Ficha Controlada:**
-   - Descoberta automática de salas na rede local/VPN (ou conexão por Código Curto `RUNA-XXXX-XXXX`).
-   - Cada jogador cria seu único personagem distribuindo exatamente os pontos de atributo e perícias configurados pelo Mestre; após criado, atributos e perícias ficam protegidos sob controle do Mestre, e pedidos de descanso ou cura passam pelo sistema de solicitação.
-4. **Combate Cinematográfico & Automação:**
-   - **Iniciativa:** Ao iniciar combate, uma cerimônia animada rola os `d20` e organiza os combatentes da maior para a menor iniciativa no topo da tela (`1º`, `2º`, `3º`...).
-   - **Arena de Duelo (Ataque vs CA → Dano):** Ao selecionar um alvo no mapa (ou escolher uma arma/ataque), o duelo rola `1d20` (ou `2d20` com Vantagem/Desvantagem) contra a CA do defensor, exibe o bloqueio ou estilhaçamento do escudo, e em seguida rola o dano reduzindo automaticamente os PV no mapa, iniciativa e ficha.
-   - **Controle Tático do Mestre:** Clique em qualquer token/monstro no mapa para atacar heróis, ajustar PV, ocultar/revelar ou **remover** monstros adicionados por engano.
-   - **Consumíveis & Modelos em Área:** Poções consumíveis na hotbar curam PV/PM e consomem carga automaticamente; esferas, cones e linhas no mapa podem ser arrastados e girados livremente.
+---
+
+## 🕯️ O que é o CHRONICLES?
+
+**CHRONICLES** é uma aplicação desktop (**Electron + React + TypeScript + Socket.IO**) inspirada em **D&D 5e** e **Baldur's Gate 3**, projetada para transformar sessões de RPG de mesa em uma experiência visual, tática e sonora cinematográfica — com estética de obsidiana, latão antigo e pergaminho, sem depender de navegadores ou assinaturas.
+
+O Mestre hospeda a sessão diretamente do próprio computador (em **rede local/LAN** ou via **Túnel Público Cloudflare** com 1 clique), enquanto os jogadores entram pelo portal do aventureiro com sincronização instantânea em tempo real.
+
+---
+
+## ✨ Pilares da Experiência
+
+### ⚔️ Combate Tático & Cinematográfico
+- **Cerimônia de Iniciativa & Banner de Turno:** Rola a iniciativa da mesa em uma sequência animada, organiza os combatentes no topo e dispara um aviso visual + toque sonoro (**"É O SEU TURNO!"**) quando chega a vez de cada herói.
+- **Arena de Duelo Coreografada (Ataque vs CA → Dano):** Rola `1d20` (ou `2d20` com Vantagem/Desvantagem, Flanqueamento, Cobertura e Linha de Visão), suporta **Reações** (*Escudo Arcano +5 CA*) e, ao confirmar/disparar o golpe, fecha o dado para toda a mesa assistir o impacto ao vivo no mapa.
+- **Projéteis, Feixes Mágicos & *Screen-Shake* de Crítico:** Flechas, bolas de fogo, relâmpagos bifurcados, estilhaços de gelo, curas e maldições voam em 60fps pelo mapa até o alvo, com explosão dourada e tremor de tela no **Crítico Natural (Nat 20)**.
+- **Magias em Área (AoE) & Salvaguardas Híbridas:** Esferas, cones, linhas e cubos com mira translúcida e hitbox geométrica exata. NPCs e monstros rolam salvaguarda automaticamente, enquanto jogadores rolam seus próprios `d20` com aplicação automática de dano/condição.
+- **Card de Vitória & MVP do Combate:** Ao encerrar um confronto, toda a mesa recebe um resumo épico com *Maior Dano*, *Maior Cura*, *Críticos (Nat 20)*, placar completo e botões rápidos de XP para o Mestre.
+
+### 🔥 Mundo Vivo, Tochas & Combos Elementais
+- **Combos Elementais em Cadeia (*Flood-Fill*):** Superfícies pintadas no mapa ou criadas por magias reagem entre si por toda a poça conectada:
+  - ⚡ **Raio + Água** → *Tempestade na Poça* (eletrifica a poça, dano elétrico extra + Atordoado)
+  - ❄️ **Gelo + Água** → *Congelamento em Cadeia* (transforma a poça em gelo + dano frio + Caído)
+  - 💨 **Fogo + Gelo** → *Explosão de Vapor* (derrete para água + dano de vapor)
+  - 💥 **Fogo + Ácido** → *Detonação Tóxica* (inflama toda a poça em fogo + dano explosivo)
+- **Iluminação Dinâmica & Névoa de Guerra (*Fog of War*):** Tokens equipados com **Tocha (6m)**, **Lanterna (9m)** ou **Visão no Escuro (18m)** projetam aura luminosa e revelam a névoa automaticamente conforme exploram o mapa.
+- **Clima Atmosférico em Canvas 2D:** Chuva, Brasas, Neve e Névoa em camadas sobre o mapa de batalha.
+- **Paredes, Linha de Visão, Cobertura & Armadilhas:** Terrenos táticos que bloqueiam visão/ataques, concedem `+2` / `+5` CA por cobertura e disparam armadilhas ou passagens secretas ao pisar.
+
+### 📜 Grimório, Concentração & Crônicas da Campanha
+- **Concentração & Alvo Único Exclusivo:** Magias de concentração exibem brasão dourado no token e **linhas arcanas** ligando o conjurador aos alvos; sofrer dano dispara teste de CON automático, e perder concentração (ou cair a `0 PV`) remove os efeitos aplicados. Habilidades de alvo único (como *Bênção*) pedem confirmação ao trocar de alvo.
+- **Recursos Customizados & Usos por Descanso:** O Mestre pode criar barras extras no Compêndio (*Estamina*, *Ki*, *Sanidade*, etc.), configurar habilidades que consomem PV, MP ou recursos customizados, e controlar cargas por descanso (`● ○`) diretamente no HUD.
+- **Quadro de Missões (*Quest Log*) & Baú de Saque:** Missões principais, secundárias e contratos com objetivos marcáveis e entrega de **XP + Ouro** para a party com 1 clique, além de baús interativos de loot e **Descanso em Grupo** (Curto/Longo) com banner cinematográfico.
+- **Chefes de Fase (*Boss Fight*):** Barra de Chefe arrastável com transição automática para **Fase 2**, Ações Lendárias e Resistências Lendárias.
+
+### 🎵 Som Imersivo & Controle da Mesa
+- **Efeitos Sonoros Inteligentes (WebAudio + Reverb):** Cada habilidade dispara SFX temático sincronizado para toda a mesa (espada, arco, fogo, raio, gelo, cura, bênção, maldição, escudo, crítico), com seletor customizável no Compêndio.
+- **Player de Músicas do PC & Mesa de Som:** Importe suas próprias trilhas de batalha/taverna com controles independentes de Música e SFX, *Fade Out*, *Loop*, *Shuffle* e temas musicais individuais por herói.
+- **Sala Protegida pelo Mestre:** Se o Mestre sair para o Lobby, desconectar ou fechar o aplicativo, a sala se encerra automaticamente e impede entrada sem a presença do Mestre.
+
+---
+
+## ⌨️ Atalhos Táticos na Mesa
+
+| Tecla | Ação |
+| :---: | :--- |
+| **`1` – `9`** | Dispara rapidamente ataques, armas e habilidades da barra do jogador |
+| **`Esc`** | Cancela mira ativa ou fecha menus abertos |
+| **`Espaço`** | Encerra/avança o turno atual na iniciativa |
+| **`I`** | Inspeciona o token selecionado (Card de Inspeção estilo BG3) |
+| **`Ctrl + Z`** | Desfaz a última ação tática (Mestre) |
+
+---
+
+## 🚀 Como Executar & Compilar
+
+### Pré-requisitos
+- **Node.js** 20+ (com `npm`)
+
+### 1. Instalar dependências
+```bash
+npm install
+```
+
+### 2. Rodar em modo desenvolvimento (Cliente + Servidor)
+```bash
+npm run dev
+```
+
+### 3. Abrir o aplicativo Desktop (Electron)
+```bash
+npm run desktop
+```
+*(Ou `npm run desktop:start` se o frontend já estiver compilado.)*
+
+### 4. Compilar o executável portátil do Windows (`Chronicles.exe`)
+```bash
+npm run build:exe
+```
+O executável portátil será gerado em `release/Chronicles.exe`.
+
+---
+
+## 🗂️ Estrutura do Grimório (Projeto)
+
+```text
+rpg-tabletop/
+├── electron/          # Processo principal Electron & empacotamento desktop
+├── server/            # Servidor Express + Socket.IO + Túnel Cloudflare
+│   └── data/          # Campanhas, personagens e uploads locais (ignorado no Git)
+├── src/
+│   ├── components/    # Battlemap, HUD, Arena de Duelo, Ficha, Missões, VFX, Som
+│   ├── context/       # Estado sincronizado da campanha e motor de eventos em tempo real
+│   ├── shared/        # Motor de regras d20, combos elementais, tipos e compêndio 5e
+│   └── utils/         # Motor de áudio WebAudio (SFX sintetizados + Player de Música)
+└── build/             # Ícone e recursos do instalador
+```
+
+---
+
+<div align="center">
+
+*Forjado para noites épicas de dados rolados, planos mirabolantes e críticos naturais no último segundo.* 🎲✨
+
+</div>

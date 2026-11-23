@@ -26,7 +26,24 @@ export const DAMAGE_TYPE_OPTIONS = [
   'Psíquico',
   'Arcano',
   'Trovejante',
+  'Cura',
 ] as const;
+
+export const ATTACK_RANGE_OPTIONS = [
+  'Corpo a Corpo (1,5m)',
+  'Alcance Corpo a Corpo (3m)',
+  'Toque',
+  'Pessoal',
+  'Distância Curta (9m)',
+  'Distância Média (18m)',
+  'Distância Longa (36m)',
+  'Distância Extrema (60m)',
+] as const;
+
+export function getCampaignDamageTypes(campaign?: Pick<CampaignState, 'compendium'> | null): string[] {
+  const custom = campaign?.compendium?.customDamageTypes || [];
+  return Array.from(new Set([...DAMAGE_TYPE_OPTIONS, ...custom.filter((x) => Boolean(x && x.trim()))]));
+}
 
 export function inferPaperdollArchetype(className?: string): PaperdollArchetype {
   const lower = (className || '').toLowerCase();
@@ -175,10 +192,121 @@ export function formatSigned(n: number): string {
   return n >= 0 ? `+${n}` : `${n}`;
 }
 
+export function getCharacterCustomResourceState(
+  char: { level: number; customResourceValues?: Record<string, { current: number; maxOverride?: number }> },
+  res: { id: string; baseMax: number; perLevel: number }
+): { current: number; max: number } {
+  const entry = char.customResourceValues?.[res.id];
+  const computedMax = Math.max(1, res.baseMax + Math.max(0, char.level - 1) * res.perLevel);
+  const max =
+    typeof entry?.maxOverride === 'number' && entry.maxOverride > 0
+      ? entry.maxOverride
+      : computedMax;
+  const current =
+    typeof entry?.current === 'number' ? Math.max(0, Math.min(max, entry.current)) : max;
+  return { current, max };
+}
+
+export const DEFAULT_XP_THRESHOLDS: number[] = [
+  0, 300, 900, 2700, 6500, 14000, 23000, 34000, 48000, 64000,
+  85000, 100000, 120000, 140000, 165000, 195000, 225000, 265000, 305000, 355000,
+];
+
+export function getXpThresholds(custom?: number[]): number[] {
+  if (!Array.isArray(custom) || custom.length < 2) return DEFAULT_XP_THRESHOLDS;
+  const merged = [...DEFAULT_XP_THRESHOLDS];
+  for (let i = 0; i < Math.min(20, custom.length); i++) {
+    const val = Number(custom[i]);
+    if (Number.isFinite(val) && val >= 0) merged[i] = Math.round(val);
+  }
+  merged[0] = 0;
+  return merged;
+}
+
+export function computeLevelForXp(xp: number, customThresholds?: number[]): number {
+  const thresholds = getXpThresholds(customThresholds);
+  let level = 1;
+  for (let i = 1; i < thresholds.length; i++) {
+    if (xp >= thresholds[i]) level = i + 1;
+    else break;
+  }
+  return Math.max(1, Math.min(20, level));
+}
+
+export function getNextLevelXp(level: number, customThresholds?: number[]): number | null {
+  const thresholds = getXpThresholds(customThresholds);
+  if (level >= 20) return null;
+  return thresholds[Math.max(1, level)] ?? null;
+}
+
+export function isTokenInsideAoE(
+  tok: { x: number; y: number; size?: number },
+  shape: 'sphere' | 'cone' | 'line' | 'cube',
+  originX: number,
+  originY: number,
+  radiusSquares: number,
+  angleDeg = 0
+): boolean {
+  const sz = Math.max(1, tok.size || 1);
+  // Inset token AABB slightly (0.12 squares) so grazing an outer border pixel doesn't false-trigger
+  const minX = tok.x + 0.12;
+  const maxX = tok.x + sz - 0.12;
+  const minY = tok.y + 0.12;
+  const maxY = tok.y + sz - 0.12;
+
+  if (shape === 'sphere') {
+    // Exact Circle vs AABB intersection matching drawn circle (radius = radiusSquares)
+    const closestX = Math.max(minX, Math.min(originX, maxX));
+    const closestY = Math.max(minY, Math.min(originY, maxY));
+    return Math.hypot(closestX - originX, closestY - originY) <= radiusSquares;
+  }
+
+  if (shape === 'cube') {
+    // Exact AABB vs AABB intersection matching drawn square (side = radiusSquares)
+    const half = radiusSquares / 2;
+    return (
+      minX <= originX + half &&
+      maxX >= originX - half &&
+      minY <= originY + half &&
+      maxY >= originY - half
+    );
+  }
+
+  // For Line and Cone, test each occupied 1x1 sub-cell center of the token against exact SVG geometry
+  const rad = (angleDeg * Math.PI) / 180;
+  const ux = Math.cos(rad);
+  const uy = Math.sin(rad);
+
+  for (let ox = 0; ox < sz; ox++) {
+    for (let oy = 0; oy < sz; oy++) {
+      const px = tok.x + ox + 0.5;
+      const py = tok.y + oy + 0.5;
+      const dx = px - originX;
+      const dy = py - originY;
+      const along = dx * ux + dy * uy;
+      const perp = Math.abs(-dx * uy + dy * ux);
+
+      if (shape === 'line') {
+        // Matches SVG rect: x=0..radiusSquares, half-height = 0.5 squares
+        if (along >= -0.05 && along <= radiusSquares + 0.05 && perp <= 0.55) {
+          return true;
+        }
+      } else {
+        // Matches SVG cone: apex (0,0), radius=radiusSquares, slope=0.52
+        const dist = Math.hypot(dx, dy);
+        if (along >= 0 && dist <= radiusSquares + 0.05 && perp <= along * 0.52 + 0.12) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 export function parseAttackRangeMeters(range?: string, actionName?: string): number {
   const clean = (range || '').trim();
   if (clean) {
-    const mMatch = clean.match(/(\d+(?:[.,]\d+)?)\s*m\b/i);
+    const mMatch = clean.match(/(\d+(?:[.,]\d+)?)\s*(?:m\b|metros?\b)/i);
     if (mMatch) {
       const val = parseFloat(mMatch[1].replace(',', '.'));
       if (!isNaN(val) && val > 0) return val;
@@ -203,7 +331,7 @@ export function parseAttackRangeSquares(
   gridSquareMeters = 1.5
 ): number {
   const meters = parseAttackRangeMeters(range, actionName);
-  return Math.max(1, Math.round(meters / Math.max(0.5, gridSquareMeters)));
+  return Math.max(1, Math.floor((meters + 0.05) / Math.max(0.5, gridSquareMeters)));
 }
 
 export function getGridSpanDistance(
@@ -1233,6 +1361,140 @@ export function computeConcentrationDc(damageTaken: number): number {
   return Math.max(10, Math.floor(Math.abs(damageTaken) / 2));
 }
 
+export interface ElementalComboResult {
+  triggered: boolean;
+  comboName: string;
+  affectedCells: Array<{ x: number; y: number }>;
+  nextSurface: 'fire' | 'ice' | 'acid' | 'water';
+  bonusDamageFormula: string;
+  bonusDamageType: string;
+  applyConditionId?: string;
+  sfx: 'thunder' | 'frost' | 'fireball';
+  vfxKind: 'lightning' | 'frost' | 'fireball';
+}
+
+/**
+ * Baldur's Gate 3 / Divinity: Original Sin 2 style Elemental Surface Chain Reactions.
+ * Flood-fills all 4-connected cells of the matching surface starting from seedCells.
+ */
+export function resolveElementalSurfaceCombo(
+  surfaces: Record<string, 'fire' | 'ice' | 'acid' | 'water'> | undefined,
+  seedCells: Array<{ x: number; y: number }>,
+  damageType: string | undefined
+): ElementalComboResult | null {
+  if (!surfaces || seedCells.length === 0 || !damageType) return null;
+  const dt = damageType
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const isFire = dt.includes('fogo') || dt.includes('chama');
+  const isLightning = dt.includes('eletric') || dt.includes('relampago') || dt.includes('raio') || dt.includes('trov');
+  const isIce = dt.includes('frio') || dt.includes('gelo') || dt.includes('gelid');
+  if (!isFire && !isLightning && !isIce) return null;
+
+  // Determine which surface reaction applies to any seed cell
+  let targetSurface: 'water' | 'ice' | 'acid' | null = null;
+  let comboConfig: Omit<ElementalComboResult, 'triggered' | 'affectedCells'> | null = null;
+
+  for (const cell of seedCells) {
+    const s = surfaces[`${cell.x},${cell.y}`];
+    if (!s) continue;
+    if (isLightning && s === 'water') {
+      targetSurface = 'water';
+      comboConfig = {
+        comboName: '⚡ Tempestade na Poça (Água Eletrificada)',
+        nextSurface: 'water',
+        bonusDamageFormula: '2d6',
+        bonusDamageType: 'Elétrico',
+        applyConditionId: 'cond-atordoado',
+        sfx: 'thunder',
+        vfxKind: 'lightning',
+      };
+      break;
+    }
+    if (isIce && s === 'water') {
+      targetSurface = 'water';
+      comboConfig = {
+        comboName: '❄️ Congelamento em Cadeia (Poça Congelada)',
+        nextSurface: 'ice',
+        bonusDamageFormula: '1d6',
+        bonusDamageType: 'Frio',
+        applyConditionId: 'cond-caido',
+        sfx: 'frost',
+        vfxKind: 'frost',
+      };
+      break;
+    }
+    if (isFire && s === 'ice') {
+      targetSurface = 'ice';
+      comboConfig = {
+        comboName: '💨 Explosão de Vapor (Degelo Súbito)',
+        nextSurface: 'water',
+        bonusDamageFormula: '1d4',
+        bonusDamageType: 'Fogo',
+        sfx: 'fireball',
+        vfxKind: 'fireball',
+      };
+      break;
+    }
+    if (isFire && s === 'acid') {
+      targetSurface = 'acid';
+      comboConfig = {
+        comboName: '💥 Detonação Tóxica (Ácido Inflamado)',
+        nextSurface: 'fire',
+        bonusDamageFormula: '2d6',
+        bonusDamageType: 'Fogo',
+        sfx: 'fireball',
+        vfxKind: 'fireball',
+      };
+      break;
+    }
+  }
+
+  if (!targetSurface || !comboConfig) return null;
+
+  // 4-connected BFS flood-fill across connected puddle (capped at 120 cells for safety)
+  const visited = new Set<string>();
+  const queue: Array<{ x: number; y: number }> = [];
+  const affectedCells: Array<{ x: number; y: number }> = [];
+
+  for (const c of seedCells) {
+    const k = `${c.x},${c.y}`;
+    if (surfaces[k] === targetSurface && !visited.has(k)) {
+      visited.add(k);
+      queue.push(c);
+    }
+  }
+
+  const dirs = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ];
+  while (queue.length > 0 && affectedCells.length < 120) {
+    const cur = queue.shift()!;
+    affectedCells.push(cur);
+    for (const [dx, dy] of dirs) {
+      const nx = cur.x + dx;
+      const ny = cur.y + dy;
+      const nk = `${nx},${ny}`;
+      if (!visited.has(nk) && surfaces[nk] === targetSurface) {
+        visited.add(nk);
+        queue.push({ x: nx, y: ny });
+      }
+    }
+  }
+
+  if (affectedCells.length === 0) return null;
+  return {
+    triggered: true,
+    affectedCells,
+    ...comboConfig,
+  };
+}
+
 function normalizeDamageKey(val: string): string {
   const clean = val
     .toLowerCase()
@@ -1439,7 +1701,18 @@ export function evaluateTacticalAttackModifiers(params: {
   }
 
   const maxRangeMeters = parseAttackRangeMeters(range, actionTitle);
-  const isRangedAttack = !isReaction && maxRangeMeters > sqMeters + 0.05;
+  const rangeLower = (range || '').toLowerCase();
+  const titleLower = (actionTitle || '').toLowerCase();
+  const isExplicitMelee =
+    /corpo a corpo|melee|toque|adjacente|pessoal|espada|machado|adaga|ma[çc]a|martelo|lan[çc]a|alabarda|garra|mordida|soco|cajado/.test(
+      `${rangeLower} ${titleLower}`
+    ) && !/dist[aâ]ncia|ranged|arco|besta|disparo|tiro|arremesso|flecha|virote|raio|bola|m[ií]ssil/.test(`${rangeLower} ${titleLower}`);
+  const isExplicitRanged =
+    /dist[aâ]ncia|ranged|arco|besta|disparo|tiro|arremesso|flecha|virote/.test(
+      `${rangeLower} ${titleLower}`
+    );
+  const isRangedAttack =
+    !isReaction && !isExplicitMelee && (isExplicitRanged || maxRangeMeters > Math.max(3.05, sqMeters * 2 + 0.05));
   const distInfo =
     attackerToken && defenderToken
       ? getGridSpanDistance(
@@ -1477,11 +1750,12 @@ export function evaluateTacticalAttackModifiers(params: {
     }
   }
 
-  // 3. Attacker Conditions
-  const atkConds = new Set([
-    ...(attackerToken?.activeConditionIds || []),
-    ...(attackerChar?.activeConditionIds || []),
-  ]);
+  // 3. Attacker Conditions (use Character sheet as single source of truth for heroes to avoid stale token flags)
+  const atkConds = new Set(
+    attackerChar
+      ? attackerChar.activeConditionIds || []
+      : attackerToken?.activeConditionIds || []
+  );
   if (atkConds.has('cond-invisivel')) advantages.push('Atacante Invisível');
   if (atkConds.has('cond-cego')) disadvantages.push('Atacante Cego');
   if (atkConds.has('cond-envenenado')) disadvantages.push('Atacante Envenenado');
@@ -1489,10 +1763,11 @@ export function evaluateTacticalAttackModifiers(params: {
   if (atkConds.has('cond-amedrontado')) disadvantages.push('Atacante Amedrontado');
 
   // 4. Defender Conditions
-  const defConds = new Set([
-    ...(defenderToken?.activeConditionIds || []),
-    ...(defenderChar?.activeConditionIds || []),
-  ]);
+  const defConds = new Set(
+    defenderChar
+      ? defenderChar.activeConditionIds || []
+      : defenderToken?.activeConditionIds || []
+  );
   const isAdjacentToDefender = distInfo ? distInfo.squares <= 1 : !isRangedAttack;
   if (defConds.has('cond-caido')) {
     if (isAdjacentToDefender) {

@@ -458,6 +458,20 @@ body {
   animation: critShake 0.28s ease-out;
 }
 
+@keyframes mapScreenShake {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  12% { transform: translate3d(-7px, -4px, 0); }
+  25% { transform: translate3d(7px, 5px, 0); }
+  38% { transform: translate3d(-6px, 4px, 0); }
+  52% { transform: translate3d(6px, -3px, 0); }
+  66% { transform: translate3d(-4px, 2px, 0); }
+  80% { transform: translate3d(3px, -2px, 0); }
+}
+
+.animate-map-screen-shake {
+  animation: mapScreenShake 0.48s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
 @keyframes shieldShatter {
   0% { transform: scale(1); filter: brightness(1); }
   32% { transform: scale(1.14) rotate(6deg); filter: brightness(1.65); }

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Check,
   ChevronLeft,
@@ -6,6 +6,8 @@ import {
   Dices,
   Eye,
   EyeOff,
+  Maximize2,
+  Minimize2,
   Music,
   RotateCcw,
   Square,
@@ -21,26 +23,59 @@ export const InitiativeBar: React.FC = () => {
     campaign,
     role,
     myCharacter,
+    targetTokenId,
+    setTargetTokenId,
+    setActiveCharacterId,
     updateCampaign,
     sendRoll,
     playCharacterTheme,
     triggerOpportunityPrompt,
     startCombatFromMap,
+    endCombatWithSummary,
   } = useCampaign();
   const { combat, maps, activeMapId, characters, compendium } = campaign;
   const activeMap = maps.find((m) => m.id === activeMapId);
+  const [compactMode, setCompactMode] = useState<boolean>(
+    () => localStorage.getItem('chronicle_compact_init') === '1'
+  );
+  const toggleCompactMode = () => {
+    setCompactMode((prev) => {
+      const next = !prev;
+      localStorage.setItem('chronicle_compact_init', next ? '1' : '0');
+      return next;
+    });
+  };
+
+  // Spacebar shortcut to advance turn when combat is active (strictly ignored inside text inputs/buttons/modals)
+  useEffect(() => {
+    if (!combat.active || combat.combatants.length === 0) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        tag === 'BUTTON' ||
+        el?.isContentEditable
+      ) {
+        return;
+      }
+      const activeCb = combat.combatants[combat.currentTurnIndex];
+      const canPass =
+        role === 'gm' ||
+        Boolean(activeCb && myCharacter && activeCb.referenceId === myCharacter.id);
+      if (!canPass) return;
+      e.preventDefault();
+      changeTurn(1);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
 
   const endCombat = () => {
-    triggerOpportunityPrompt(null);
-    updateCampaign((prev) => ({
-      ...prev,
-      combat: {
-        active: false,
-        round: 1,
-        currentTurnIndex: 0,
-        combatants: [],
-      },
-    }));
+    endCombatWithSummary();
   };
 
   const changeTurn = (direction: 1 | -1) => {
@@ -58,7 +93,7 @@ export const InitiativeBar: React.FC = () => {
 
     const activeCombatant = combat.combatants[nextIdx];
     const expiredLabels: string[] = [];
-    const expiredCondIdsToRemove: Array<{ charId?: string; condId: string }> = [];
+    const expiredCondIdsToRemove: Array<{ charId?: string; tokenId?: string; condId: string }> = [];
 
     const updatedCombatants = combat.combatants.map((cb, idx) => {
       if (direction === 1 && idx === nextIdx) {
@@ -67,8 +102,12 @@ export const InitiativeBar: React.FC = () => {
           .filter((ef) => {
             if (ef.remainingRounds <= 0) {
               expiredLabels.push(`${ef.label} em ${cb.name}`);
-              if (ef.conditionId && cb.referenceId) {
-                expiredCondIdsToRemove.push({ charId: cb.referenceId, condId: ef.conditionId });
+              if (ef.conditionId && (cb.referenceId || cb.tokenId)) {
+                expiredCondIdsToRemove.push({
+                  charId: cb.referenceId,
+                  tokenId: cb.tokenId,
+                  condId: ef.conditionId,
+                });
               }
               return false;
             }
@@ -103,6 +142,32 @@ export const InitiativeBar: React.FC = () => {
           activeConditionIds: ch.activeConditionIds.filter((cid) => !toRemove.includes(cid)),
         };
       }),
+      maps:
+        expiredCondIdsToRemove.length > 0
+          ? prev.maps.map((m) =>
+              m.id !== prev.activeMapId
+                ? m
+                : {
+                    ...m,
+                    tokens: m.tokens.map((tok) => {
+                      const toRemove = expiredCondIdsToRemove
+                        .filter(
+                          (item) =>
+                            (item.tokenId && item.tokenId === tok.id) ||
+                            (item.charId && tok.type === 'character' && tok.referenceId === item.charId)
+                        )
+                        .map((item) => item.condId);
+                      if (!toRemove.length) return tok;
+                      return {
+                        ...tok,
+                        activeConditionIds: (tok.activeConditionIds || []).filter(
+                          (cid) => !toRemove.includes(cid)
+                        ),
+                      };
+                    }),
+                  }
+            )
+          : prev.maps,
       combat: {
         ...prev.combat,
         round: nextRound,
@@ -196,17 +261,41 @@ export const InitiativeBar: React.FC = () => {
     currentActive?.referenceId === myCharacter.id;
 
   return (
-    <div className="rpg-panel border-b px-3 py-2 flex items-center gap-3 overflow-x-auto shrink-0 z-20 relative">
+    <div
+      className={`rpg-panel border-b px-3 flex items-center gap-2.5 overflow-x-auto shrink-0 z-20 relative ${
+        compactMode ? 'py-1' : 'py-2'
+      }`}
+    >
       {/* Round & Turn Controls */}
-      <div className="flex items-center gap-2 shrink-0 pr-3 border-r" style={{ borderColor: 'var(--border-subtle)' }}>
-        <div className="text-center px-2.5 py-0.5 rounded-lg rpg-card">
+      <div className="flex items-center gap-1.5 shrink-0 pr-2.5 border-r" style={{ borderColor: 'var(--border-subtle)' }}>
+        <div className={`text-center rounded-lg rpg-card ${compactMode ? 'px-2 py-0.5 flex items-center gap-1.5' : 'px-2.5 py-0.5'}`}>
           <div className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
-            Rodada
+            {compactMode ? 'R' : 'Rodada'}
           </div>
-          <div className="font-chronicle font-bold text-base leading-none" style={{ color: 'var(--accent-primary)' }}>
+          <div
+            className={`font-chronicle font-bold leading-none ${compactMode ? 'text-xs' : 'text-base'}`}
+            style={{ color: 'var(--accent-primary)' }}
+          >
             {combat.round}
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={toggleCompactMode}
+          className="rpg-card p-1.5 rounded hover:border-amber-400/70 cursor-pointer"
+          title={
+            compactMode
+              ? 'Expandir barra de iniciativa completa'
+              : 'Recolher barra de iniciativa (modo compacto só com nomes)'
+          }
+        >
+          {compactMode ? (
+            <Maximize2 className="w-3.5 h-3.5 text-amber-300" />
+          ) : (
+            <Minimize2 className="w-3.5 h-3.5 text-amber-300" />
+          )}
+        </button>
 
         {isMyTurn && (
           <button
@@ -254,9 +343,44 @@ export const InitiativeBar: React.FC = () => {
       </div>
 
       {/* Combatant Banners (Ordered from Highest Initiative to Lowest) */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
         {visibleCombatants.map((cb, idx) => {
           const isTurn = cb.id === currentActiveId;
+          const isSelectedOnMap = Boolean(cb.tokenId && targetTokenId === cb.tokenId);
+
+          if (compactMode) {
+            return (
+              <button
+                key={cb.id}
+                type="button"
+                onClick={() => {
+                  if (cb.tokenId) {
+                    setTargetTokenId(isSelectedOnMap ? null : cb.tokenId);
+                  }
+                  if (role === 'gm' && cb.type === 'character' && cb.referenceId) {
+                    setActiveCharacterId(cb.referenceId);
+                  }
+                }}
+                title={`${cb.name} • Init ${cb.initiative}${role === 'gm' || cb.type === 'character' ? ` • PV ${cb.hp}/${cb.maxHp}` : ''}`}
+                className={`px-2.5 py-1 rounded-md text-xs font-display font-bold flex items-center gap-1.5 shrink-0 transition cursor-pointer border ${
+                  isTurn
+                    ? 'bg-amber-500/20 border-amber-400 text-amber-100 shadow-[0_0_12px_rgba(245,158,11,0.35)]'
+                    : isSelectedOnMap
+                      ? 'bg-sky-500/20 border-sky-400 text-sky-100'
+                      : 'rpg-card border-white/10 hover:border-amber-400/50 opacity-85'
+                } ${cb.hp <= 0 ? 'line-through opacity-45' : ''} ${cb.isHidden ? 'border-dashed opacity-60' : ''}`}
+              >
+                <span className="text-[10px] font-mono-dice opacity-70">{idx + 1}.</span>
+                <span
+                  className="w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: cb.hp <= 0 ? '#ef4444' : cb.color }}
+                />
+                <span className="max-w-[125px] truncate">{cb.name}</span>
+                {isTurn && <span className="text-[9px] text-amber-300">◀</span>}
+              </button>
+            );
+          }
+
           const linkedChar =
             cb.type === 'character' && cb.referenceId
               ? characters.find((c) => c.id === cb.referenceId)
@@ -277,8 +401,21 @@ export const InitiativeBar: React.FC = () => {
           return (
             <div
               key={cb.id}
-              className={`rpg-card rounded-md px-2.5 py-1.5 min-w-[186px] shrink-0 transition relative ${
-                isTurn ? 'rpg-ornate-border ring-1 ring-amber-400/70' : ''
+              onClick={() => {
+                if (cb.tokenId) {
+                  setTargetTokenId(isSelectedOnMap ? null : cb.tokenId);
+                }
+                if (role === 'gm' && cb.type === 'character' && cb.referenceId) {
+                  setActiveCharacterId(cb.referenceId);
+                }
+              }}
+              title="Clique para selecionar e destacar este combatente no mapa"
+              className={`rpg-card rounded-md px-2.5 py-1.5 min-w-[186px] shrink-0 transition relative cursor-pointer ${
+                isSelectedOnMap
+                  ? 'ring-2 ring-sky-400 border-sky-400/80 shadow-[0_0_14px_rgba(56,189,248,0.4)]'
+                  : isTurn
+                    ? 'rpg-ornate-border ring-1 ring-amber-400/70'
+                    : 'hover:border-amber-400/50'
               } ${cb.isHidden ? 'opacity-60 border-dashed' : ''}`}
             >
               <div className="flex items-center justify-between gap-2">
@@ -305,6 +442,7 @@ export const InitiativeBar: React.FC = () => {
                   <input
                     type="number"
                     value={cb.initiative}
+                    onClick={(e) => e.stopPropagation()}
                     onChange={(e) => updateCombatantInit(cb.id, Number(e.target.value))}
                     className="w-10 text-center text-xs font-mono-dice rpg-input py-0 px-1"
                     title="Editar Iniciativa"
@@ -328,7 +466,20 @@ export const InitiativeBar: React.FC = () => {
               ) : (
                 (() => {
                   const wound = getMonsterWoundStatus(cb.hp, cb.maxHp);
-                  const showAc = Boolean(campaign.settings.showEnemyAcToPlayers);
+                  const activeMap = campaign.maps.find((m) => m.id === campaign.activeMapId);
+                  const matchedTok = activeMap?.tokens.find(
+                    (t) => (cb.tokenId && t.id === cb.tokenId) || (cb.referenceId && t.referenceId === cb.referenceId)
+                  );
+                  const matchedMon = cb.referenceId
+                    ? campaign.compendium.monsters.find((m) => m.id === cb.referenceId)
+                    : undefined;
+                  const hideAc =
+                    matchedTok?.hideAcFromPlayers !== undefined
+                      ? matchedTok.hideAcFromPlayers
+                      : matchedMon?.hideAcFromPlayers !== undefined
+                        ? matchedMon.hideAcFromPlayers
+                        : !campaign.settings.showEnemyAcToPlayers;
+                  const showAc = !hideAc;
                   return (
                     <div className="mt-1.5 flex items-center justify-between text-[10px] font-display">
                       <span className={`font-bold ${wound.colorClass}`}>{wound.label}</span>
@@ -379,19 +530,40 @@ export const InitiativeBar: React.FC = () => {
                 </span>
               </div>
 
-              {/* Active Effects */}
-              {cb.effects.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {cb.effects.map((ef) => (
-                    <span
-                      key={ef.id}
-                      className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
-                    >
-                      {ef.label} ({ef.remainingRounds}r)
-                    </span>
-                  ))}
-                </div>
-              )}
+              {/* Active Effects & Conditions (Synced for Heroes, Monsters & NPCs!) */}
+              {(() => {
+                const tokCondIds =
+                  cb.type === 'character'
+                    ? characters.find((c) => c.id === cb.referenceId)?.activeConditionIds || []
+                    : activeMap?.tokens.find((t) => t.id === cb.tokenId)?.activeConditionIds || [];
+                const effectCondIds = new Set(cb.effects.map((e) => e.conditionId).filter(Boolean));
+                const extraConds = tokCondIds
+                  .filter((cid) => !effectCondIds.has(cid))
+                  .map((cid) => campaign.compendium.conditions.find((c) => c.id === cid))
+                  .filter((c): c is NonNullable<typeof c> => Boolean(c));
+                if (cb.effects.length === 0 && extraConds.length === 0) return null;
+                return (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {cb.effects.map((ef) => (
+                      <span
+                        key={ef.id}
+                        className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                      >
+                        {ef.label} ({ef.remainingRounds}r)
+                      </span>
+                    ))}
+                    {extraConds.map((c) => (
+                      <span
+                        key={`cond-${c.id}`}
+                        className="text-[10px] px-1.5 py-0.2 rounded bg-violet-500/20 text-violet-200 border border-violet-400/40"
+                        title={c.description}
+                      >
+                        {c.icon} {c.name}
+                      </span>
+                    ))}
+                  </div>
+                );
+              })()}
 
               {/* GM quick actions + Theme Song button */}
               {role === 'gm' && (

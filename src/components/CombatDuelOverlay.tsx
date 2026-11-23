@@ -14,6 +14,7 @@ export const CombatDuelOverlay: React.FC = () => {
     activeDuel,
     rollDuelAttack,
     rollDuelDamage,
+    triggerDuelShieldReaction,
     advanceDuelPhase,
     dismissDuel,
   } = useCampaign();
@@ -66,8 +67,17 @@ export const CombatDuelOverlay: React.FC = () => {
   const isHeal = activeDuel.damageType?.toLowerCase() === 'cura';
   const isDefenderMonster =
     activeDuel.defenderType === 'monster' || liveDefenderToken?.type === 'monster';
-  const hideEnemyAc =
-    role !== 'gm' && isDefenderMonster && !campaign.settings.showEnemyAcToPlayers;
+  const defenderMonsterDef =
+    liveDefenderToken?.referenceId
+      ? campaign.compendium.monsters.find((m) => m.id === liveDefenderToken.referenceId)
+      : undefined;
+  const effectiveHideAc =
+    liveDefenderToken?.hideAcFromPlayers !== undefined
+      ? liveDefenderToken.hideAcFromPlayers
+      : defenderMonsterDef?.hideAcFromPlayers !== undefined
+        ? defenderMonsterDef.hideAcFromPlayers
+        : !campaign.settings.showEnemyAcToPlayers;
+  const hideEnemyAc = role !== 'gm' && isDefenderMonster && effectiveHideAc;
   const displayedAc = hideEnemyAc ? '??' : activeDuel.defenderDefense;
 
   return (
@@ -87,12 +97,15 @@ export const CombatDuelOverlay: React.FC = () => {
             subtitle="Confronto de Combate"
             icon={<Swords className="w-5 h-5" style={{ color: activeDuel.attackerColor }} />}
           />
-          <button
-            onClick={dismissDuel}
-            className="rpg-card p-1.5 rounded-md hover:border-amber-400 cursor-pointer shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          {canRollDuel && (
+            <button
+              onClick={dismissDuel}
+              className="rpg-card p-1.5 rounded-md hover:border-amber-400 cursor-pointer shrink-0"
+              title="Fechar duelo"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
 
         <OrnateDivider />
@@ -370,7 +383,17 @@ export const CombatDuelOverlay: React.FC = () => {
                       )}
                       {activeDuel.damageFormula ? (
                         canRollDuel ? (
-                          <div>
+                          <div className="space-y-2">
+                            {activeDuel.defenderCanShieldReaction && !activeDuel.reactionShieldApplied && (
+                              <button
+                                type="button"
+                                onClick={triggerDuelShieldReaction}
+                                className="px-5 py-2 rounded-md text-xs font-display font-bold flex items-center gap-2 mx-auto cursor-pointer bg-sky-900/90 hover:bg-sky-800 border-2 border-sky-400 text-sky-100 shadow-[0_0_24px_rgba(56,189,248,0.55)] animate-pulse"
+                              >
+                                <Shield className="w-4 h-4 text-sky-300" />
+                                <span>⚡ Usar Reação: Escudo Arcano (+5 CA)!</span>
+                              </button>
+                            )}
                             <button
                               onClick={rollDuelDamage}
                               className="rpg-btn-crimson px-7 py-2.5 rounded-md text-sm flex items-center gap-2 mx-auto cursor-pointer shadow-xl"
@@ -386,13 +409,17 @@ export const CombatDuelOverlay: React.FC = () => {
                             Aguardando <strong>{activeDuel.attackerName}</strong> rolar o {isHeal ? 'efeito' : 'dano'}...
                           </div>
                         )
-                      ) : (
+                      ) : canRollDuel ? (
                         <button
                           onClick={dismissDuel}
                           className="rpg-btn-primary px-6 py-2 rounded-md text-xs cursor-pointer"
                         >
-                          Concluir Ataque
+                          ⚔️ Disparar & Concluir Ataque
                         </button>
+                      ) : (
+                        <div className="px-4 py-1.5 rounded-md bg-black/35 border border-amber-500/30 text-xs font-lore italic text-amber-200/85">
+                          Aguardando <strong>{activeDuel.attackerName}</strong> concluir o ataque...
+                        </div>
                       )}
                     </div>
                   ) : (
@@ -401,14 +428,20 @@ export const CombatDuelOverlay: React.FC = () => {
                         <Shield className="w-4 h-4 text-sky-400" />
                         BLOQUEADO PELA DEFESA (CA {displayedAc})!
                       </div>
-                      <div>
-                        <button
-                          onClick={dismissDuel}
-                          className="rpg-card px-5 py-2 rounded-md text-xs font-display font-semibold cursor-pointer"
-                        >
-                          Fechar
-                        </button>
-                      </div>
+                      {canRollDuel ? (
+                        <div>
+                          <button
+                            onClick={dismissDuel}
+                            className="rpg-card px-5 py-2 rounded-md text-xs font-display font-semibold cursor-pointer hover:border-amber-400"
+                          >
+                            Fechar
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="px-4 py-1.5 rounded-md bg-black/35 border border-amber-500/30 text-xs font-lore italic text-amber-200/85">
+                          Aguardando <strong>{activeDuel.attackerName}</strong> fechar...
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -437,18 +470,24 @@ export const CombatDuelOverlay: React.FC = () => {
                 <div className="space-y-2.5 animate-ui-enter">
                   <div className="font-chronicle font-black text-3xl text-red-400 drop-shadow">
                     {isHeal
-                      ? `+${activeDuel.damageTotal} PV Restaurados!`
+                      ? `+${activeDuel.damageTotal} PV de Cura!`
                       : `-${activeDuel.damageTotal} de Dano (${activeDuel.damageType || 'Físico'})!`}
                   </div>
-                  <div className="text-xs text-emerald-300 font-semibold">
-                    Vida de {activeDuel.defenderName} atualizada automaticamente para {currentDefenderHp}/{activeDuel.defenderMaxHp} PV.
+                  <div className="text-xs text-amber-200/85 font-semibold">
+                    Clique abaixo para fechar o dado, disparar a animação no mapa e aplicar em {activeDuel.defenderName}.
                   </div>
-                  <button
-                    onClick={dismissDuel}
-                    className="rpg-btn-primary px-6 py-2 rounded-md text-xs cursor-pointer"
-                  >
-                    Continuar Batalha
-                  </button>
+                  {canRollDuel ? (
+                    <button
+                      onClick={dismissDuel}
+                      className="rpg-btn-primary px-6 py-2 rounded-md text-xs font-display font-bold cursor-pointer shadow-xl"
+                    >
+                      {isHeal ? '💚 Disparar Cura & Aplicar' : '⚔️ Disparar Golpe & Aplicar Dano'}
+                    </button>
+                  ) : (
+                    <div className="px-4 py-1.5 rounded-md bg-black/35 border border-amber-500/30 text-xs font-lore italic text-amber-200/85">
+                      Aguardando <strong>{activeDuel.attackerName}</strong> disparar o golpe no mapa...
+                    </div>
+                  )}
                 </div>
               )}
             </>

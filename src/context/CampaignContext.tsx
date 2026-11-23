@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { io, Socket } from 'socket.io-client';
 import {
   ActionEconomyCost,
+  ActiveTrackedAbilityEffect,
   BossBannerState,
   CampaignState,
   CampaignSummary,
@@ -9,19 +10,24 @@ import {
   Character,
   ChatMessageEntry,
   CombatDuelState,
+  CombatMvpSummary,
   ConnectedPlayerInfo,
   DiceSkin,
   HandoutPayload,
   InitiativeCeremonyState,
   MapPointerState,
+  MapProjectileVfx,
   MapToken,
   OpportunityAttackPrompt,
   PendingAttackChoice,
+  CombatLogEntry,
   PendingManualRoll,
   PlayerRequest,
+  ProjectileVfxKind,
   RollLogEntry,
   RolledDieVisual,
   SavedHeroEntry,
+  SecretPassageAlert,
   SkillCheckRequest,
   TacticalSavePrompt,
   TacticalSaveTargetEntry,
@@ -32,21 +38,28 @@ import { createStarterCampaign } from '../shared/starterSeed';
 import {
   buildPreviewDiceForFormula,
   computeCharacterStats,
+  computeLevelForXp,
+  doesTokenCollideAt,
   evaluateFormula,
   evaluateLineOfSightAndCover,
   evaluateTacticalAttackModifiers,
   findNearestFreeGridCell,
   formatFormulaForDisplay,
+  getCharacterCustomResourceState,
   getGridSpanDistance,
   getTokensInsideTemplate,
+  isTokenInsideAoE,
   normalizeHeroCharacter,
   parseAttackRangeMeters,
+  parseAttackRangeSquares,
   pickRandomPlayerColor,
   resolveDamageWithAffinities,
+  resolveElementalSurfaceCombo,
   RollAdvantageMode,
   syncCampaignDerivedCharacterStats,
 } from '../shared/rulesEngine';
-import { soundEngine } from '../utils/soundEngine';
+import { resolveAbilitySfxPreset, soundEngine } from '../utils/soundEngine';
+import { openAlertDialog, openConfirmDialog } from '../components/PromptDialog';
 
 const LOCAL_HERO_VAULT_KEY = 'chronicle_hero_vault_v1';
 
@@ -96,6 +109,331 @@ export function triggerHeroJsonDownload(char: Character): void {
   a.download = `${char.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'heroi'}.hero.json`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+export interface RestBannerState {
+  id: string;
+  kind: 'short' | 'long';
+  summary: string;
+  affectedCount: number;
+}
+
+function getAbilityUsesRemaining(
+  char: Character,
+  ability: { id: string; maxUsesPerRest?: number } | undefined
+): number | null {
+  if (!ability?.maxUsesPerRest || ability.maxUsesPerRest <= 0) return null;
+  const current = char.abilityUsesRemaining?.[ability.id];
+  return typeof current === 'number' ? Math.max(0, current) : ability.maxUsesPerRest;
+}
+
+function checkAbilityUsesRemaining(
+  char: Character,
+  ability: { id: string; name: string; maxUsesPerRest?: number; restType?: 'curto' | 'longo' } | undefined
+): { ok: true } | { ok: false; error: string } {
+  const rem = getAbilityUsesRemaining(char, ability);
+  if (rem === null) return { ok: true };
+  if (rem <= 0) {
+    const restLabel = ability?.restType === 'curto' ? 'Descanso Curto' : 'Descanso Longo';
+    return {
+      ok: false,
+      error: `"${ability?.name}" sem usos restantes (0/${ability?.maxUsesPerRest})! Recarregue com um ${restLabel}.`,
+    };
+  }
+  return { ok: true };
+}
+
+function decrementAbilityUse(
+  c: Character,
+  ability: { id: string; maxUsesPerRest?: number } | undefined
+): Record<string, number> {
+  if (!ability?.maxUsesPerRest || ability.maxUsesPerRest <= 0) {
+    return c.abilityUsesRemaining || {};
+  }
+  const current = getAbilityUsesRemaining(c, ability) ?? ability.maxUsesPerRest;
+  return {
+    ...(c.abilityUsesRemaining || {}),
+    [ability.id]: Math.max(0, current - 1),
+  };
+}
+
+function detectProjectileKind(params: {
+  title?: string;
+  damageType?: string;
+  applyConditionId?: string;
+  range?: string;
+}): ProjectileVfxKind {
+  const dt = (params.damageType || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const title = (params.title || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const range = (params.range || '').toLowerCase();
+
+  if (dt === 'cura' || title.includes('cura')) return 'heal';
+  if (dt.includes('fogo') || dt.includes('chama') || title.includes('fogo')) return 'fireball';
+  if (dt.includes('eletric') || dt.includes('relampago') || dt.includes('raio') || dt.includes('trov')) {
+    return 'lightning';
+  }
+  if (dt.includes('frio') || dt.includes('gelo') || dt.includes('gelid') || title.includes('gelo')) {
+    return 'frost';
+  }
+  if (dt.includes('radiante') || title.includes('bencao') || title.includes('sagrad')) {
+    return 'blessing';
+  }
+  if (dt.includes('necrot') || dt.includes('veneno') || dt.includes('psiquic') || dt.includes('acido')) {
+    return 'curse';
+  }
+  if (!dt && params.applyConditionId) {
+    return /abencoado|velocidade|inspirado|escudo|protegido/i.test(
+      `${params.applyConditionId} ${title}`
+    )
+      ? 'blessing'
+      : 'curse';
+  }
+  if (
+    title.includes('arco') ||
+    title.includes('flecha') ||
+    title.includes('besta') ||
+    title.includes('tiro') ||
+    title.includes('disparo') ||
+    (dt.includes('perfur') && (range.includes('dist') || range.includes('m')))
+  ) {
+    return 'arrow';
+  }
+  if (dt.includes('cort') || dt.includes('concuss') || dt.includes('impact') || dt.includes('perfur')) {
+    return 'slash';
+  }
+  return 'arcane';
+}
+
+function normalizeAbilityKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+function checkCharacterResource(
+  char: Character,
+  costMp: number | undefined,
+  costResourceId: string | undefined,
+  campaign: CampaignState
+): { ok: true } | { ok: false; error: string } {
+  if (!costMp || costMp <= 0) return { ok: true };
+  const resId = costResourceId || 'mp';
+  if (resId === 'hp') {
+    if (char.hp <= costMp) {
+      return { ok: false, error: `Vida (PV) insuficiente para conjurar (${char.hp}/${costMp} PV).` };
+    }
+    return { ok: true };
+  }
+  if (resId === 'mp') {
+    if (char.mp < costMp) {
+      return {
+        ok: false,
+        error: `${campaign.settings.resourceName} insuficiente (${char.mp}/${costMp} ${campaign.settings.resourceShort}).`,
+      };
+    }
+    return { ok: true };
+  }
+  const resDef = (campaign.compendium.customResources || []).find((r) => r.id === resId);
+  if (resDef) {
+    const st = getCharacterCustomResourceState(char, resDef);
+    if (st.current < costMp) {
+      return {
+        ok: false,
+        error: `${resDef.name} insuficiente (${st.current}/${costMp} ${resDef.shortName}).`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+function deductCharacterResource(
+  c: Character,
+  costMp: number | undefined,
+  costResourceId: string | undefined,
+  customResources: CampaignState['compendium']['customResources']
+): Pick<Character, 'hp' | 'mp' | 'customResourceValues'> {
+  let nextHp = c.hp;
+  let nextMp = c.mp;
+  let nextCustomRes = c.customResourceValues;
+  if (costMp && costMp > 0) {
+    const resId = costResourceId || 'mp';
+    if (resId === 'hp') {
+      nextHp = Math.max(1, c.hp - costMp);
+    } else if (resId === 'mp') {
+      nextMp = Math.max(0, c.mp - costMp);
+    } else {
+      const resDef = (customResources || []).find((r) => r.id === resId);
+      if (resDef) {
+        const st = getCharacterCustomResourceState(c, resDef);
+        nextCustomRes = {
+          ...(c.customResourceValues || {}),
+          [resDef.id]: {
+            ...(c.customResourceValues?.[resDef.id] || {}),
+            current: Math.max(0, st.current - costMp),
+          },
+        };
+      }
+    }
+  }
+  return { hp: nextHp, mp: nextMp, customResourceValues: nextCustomRes };
+}
+
+function removeTrackedEffectsFromState(
+  prev: CampaignState,
+  casterCharId: string,
+  effectsToRemove: ActiveTrackedAbilityEffect[]
+): CampaignState {
+  if (effectsToRemove.length === 0) return prev;
+  const removeKeys = new Set(effectsToRemove.map((e) => e.abilityKey));
+
+  const condRemovalsByChar = new Map<string, Set<string>>();
+  const condRemovalsByToken = new Map<string, Set<string>>();
+  effectsToRemove.forEach((eff) => {
+    if (!eff.conditionId) return;
+    eff.targetCharacterIds.forEach((cid) => {
+      if (!condRemovalsByChar.has(cid)) condRemovalsByChar.set(cid, new Set());
+      condRemovalsByChar.get(cid)!.add(eff.conditionId!);
+    });
+    eff.targetTokenIds.forEach((tid) => {
+      if (!condRemovalsByToken.has(tid)) condRemovalsByToken.set(tid, new Set());
+      condRemovalsByToken.get(tid)!.add(eff.conditionId!);
+    });
+  });
+
+  return {
+    ...prev,
+    characters: prev.characters.map((c) => {
+      let next = c;
+      const toRem = condRemovalsByChar.get(c.id);
+      if (toRem && toRem.size > 0) {
+        next = {
+          ...next,
+          activeConditionIds: next.activeConditionIds.filter((id) => !toRem.has(id)),
+        };
+      }
+      if (c.id === casterCharId && c.activeTrackedEffects?.length) {
+        next = {
+          ...next,
+          activeTrackedEffects: c.activeTrackedEffects.filter(
+            (e) => !removeKeys.has(e.abilityKey)
+          ),
+        };
+      }
+      return next;
+    }),
+    maps: prev.maps.map((m) =>
+      m.id !== prev.activeMapId
+        ? m
+        : {
+            ...m,
+            tokens: m.tokens.map((t) => {
+              const toRem = condRemovalsByToken.get(t.id);
+              if (!toRem || toRem.size === 0) return t;
+              return {
+                ...t,
+                activeConditionIds: (t.activeConditionIds || []).filter((id) => !toRem.has(id)),
+              };
+            }),
+          }
+    ),
+    combat: prev.combat.active
+      ? {
+          ...prev.combat,
+          combatants: prev.combat.combatants.map((cb) => {
+            const toRemTok = cb.tokenId ? condRemovalsByToken.get(cb.tokenId) : undefined;
+            const toRemChar = cb.referenceId ? condRemovalsByChar.get(cb.referenceId) : undefined;
+            if ((!toRemTok || toRemTok.size === 0) && (!toRemChar || toRemChar.size === 0)) {
+              return cb;
+            }
+            return {
+              ...cb,
+              effects: cb.effects.filter(
+                (ef) =>
+                  !(
+                    ef.conditionId &&
+                    ((toRemTok && toRemTok.has(ef.conditionId)) ||
+                      (toRemChar && toRemChar.has(ef.conditionId)))
+                  )
+              ),
+            };
+          }),
+        }
+      : prev.combat,
+  };
+}
+
+function upsertTrackedEffectOnCharacter(
+  c: Character,
+  entry: ActiveTrackedAbilityEffect
+): Character {
+  const existing = c.activeTrackedEffects || [];
+  const filtered = existing.filter((e) => e.abilityKey !== entry.abilityKey);
+  return {
+    ...c,
+    activeTrackedEffects: [...filtered, entry],
+  };
+}
+
+async function confirmAbilityConflictIfNeeded(
+  char: Character | undefined,
+  params: {
+    abilityName: string;
+    requiresConcentration?: boolean;
+    singleTargetOnly?: boolean;
+    newTargetTokenId?: string;
+    newTargetName?: string;
+  }
+): Promise<{ proceed: boolean; effectsToClear: ActiveTrackedAbilityEffect[] }> {
+  if (!char) return { proceed: true, effectsToClear: [] };
+  const tracked = char.activeTrackedEffects || [];
+  const key = normalizeAbilityKey(params.abilityName);
+  const effectsToClear: ActiveTrackedAbilityEffect[] = [];
+
+  // 1. Single-target exclusive check (same ability already active on another target)
+  if (params.singleTargetOnly) {
+    const existingSame = tracked.find((e) => e.abilityKey === key);
+    if (existingSame && existingSame.targetTokenIds.length > 0) {
+      const isDifferentTarget =
+        !params.newTargetTokenId || !existingSame.targetTokenIds.includes(params.newTargetTokenId);
+      if (isDifferentTarget) {
+        const oldTargetsStr = existingSame.targetNames.join(', ') || 'alvo anterior';
+        const newTargetLabel = params.newTargetName ? ` para ${params.newTargetName}` : '';
+        const ok = await openConfirmDialog(
+          `"${params.abilityName}" já está ativa em ${oldTargetsStr}. Deseja mover${newTargetLabel}? O efeito será removido do alvo anterior.`,
+          'Trocar Alvo da Habilidade',
+          { confirmLabel: 'Trocar Alvo', cancelLabel: 'Cancelar' }
+        );
+        if (!ok) return { proceed: false, effectsToClear: [] };
+        effectsToClear.push(existingSame);
+      }
+    }
+  }
+
+  // 2. Concentration conflict check (already concentrating on a DIFFERENT spell)
+  if (params.requiresConcentration && char.concentratingSpell) {
+    const currentConcKey = normalizeAbilityKey(char.concentratingSpell);
+    if (currentConcKey !== key) {
+      const ok = await openConfirmDialog(
+        `Você já está mantendo concentração em "${char.concentratingSpell}". Conjurar "${params.abilityName}" encerrará a concentração anterior e removerá seus efeitos ativos. Continuar?`,
+        'Substituir Concentração',
+        { confirmLabel: 'Substituir', cancelLabel: 'Cancelar' }
+      );
+      if (!ok) return { proceed: false, effectsToClear: [] };
+      tracked
+        .filter((e) => e.isConcentration && e.abilityKey !== key)
+        .forEach((e) => {
+          if (!effectsToClear.some((x) => x.abilityKey === e.abilityKey)) {
+            effectsToClear.push(e);
+          }
+        });
+    }
+  }
+
+  return { proceed: true, effectsToClear };
 }
 
 export interface MapPing {
@@ -232,8 +570,16 @@ interface CampaignContextValue {
   tacticalAlert: { id: string; message: string } | null;
   showTacticalAlert: (message: string) => void;
   opportunityPrompt: OpportunityAttackPrompt | null;
+  opportunityQueueCount: number;
   triggerOpportunityPrompt: (prompt: OpportunityAttackPrompt | null) => void;
-  performCombatManeuver: (maneuver: 'dash' | 'disengage' | 'dodge' | 'action-surge') => void;
+  enqueueOpportunityPrompts: (prompts: OpportunityAttackPrompt[]) => void;
+  performCombatManeuver: (
+    maneuver: 'dash' | 'disengage' | 'dodge' | 'action-surge' | 'shove' | 'hide' | 'help' | 'jump',
+    actorTokenId?: string
+  ) => void;
+  toggleHeroInspiration: (characterId: string) => void;
+  spendHeroInspiration: (characterId: string) => void;
+  triggerDuelShieldReaction: () => void;
   activeDuel: CombatDuelState | null;
   startCombatDuel: (choice: PendingAttackChoice, defenderToken: MapToken) => void;
   rollDuelAttack: () => void;
@@ -290,10 +636,22 @@ interface CampaignContextValue {
   updateCampaign: (updater: (prev: CampaignState) => CampaignState) => void;
   deleteCharacter: (characterId: string) => void;
   rollDeathSave: (characterId: string) => void;
+  setDeathSaveManual: (
+    characterId: string,
+    patch: Partial<Character['deathSaves']> & { hp?: number }
+  ) => void;
   assistDeathSave: (helperCharacterId: string, targetCharacterId: string) => void;
   gmResolveDeathSave: (
     characterId: string,
     mode: 'stabilize' | 'save-full' | 'revive-1' | 'revive-full'
+  ) => void;
+  activeSecretPassage: SecretPassageAlert | null;
+  triggerSecretPassage: (markerId: string, token?: MapToken) => void;
+  dismissSecretPassage: () => void;
+  moveTokensToMap: (
+    sourceMapId: string,
+    targetMapId: string,
+    tokenIds: string[] | 'all-heroes'
   ) => void;
   claimTreasureMarker: (markerId: string) => void;
   sendRoll: (entry: Omit<RollLogEntry, 'id' | 'timestamp'>) => void;
@@ -315,18 +673,41 @@ interface CampaignContextValue {
     saveSkillId?: string;
     saveDcFormula?: string;
     costMp?: number;
+    costResourceId?: string;
     applyConditionId?: string;
     conditionDurationRounds?: number;
+    aoeShape?: 'sphere' | 'cone' | 'line' | 'cube';
+    aoeSizeMeters?: number;
+    aoeColor?: string;
+    aoePersistent?: boolean;
     extraBonus?: number;
     extraDice?: string[];
   }) => void;
+  pushCombatLog: (entry: Omit<CombatLogEntry, 'id' | 'timestamp'>) => void;
+  awardXp: (characterIds: string[] | 'all', amount: number) => void;
+  castAoEAbility: (
+    choice: PendingAttackChoice,
+    originX: number,
+    originY: number,
+    angleDeg: number
+  ) => void;
   applyDamage: (
     targetTokenId: string,
     amount: number,
     isHeal?: boolean,
     rollId?: string,
-    damageType?: string
+    damageType?: string,
+    applyConditionId?: string,
+    conditionDurationRounds?: number
   ) => void;
+  activeRestBanner: RestBannerState | null;
+  dismissRestBanner: () => void;
+  partyRest: (kind: 'short' | 'long') => void;
+  projectileVfx: MapProjectileVfx[];
+  screenShakeActive: boolean;
+  activeMvpSummary: CombatMvpSummary | null;
+  dismissMvpSummary: () => void;
+  endCombatWithSummary: () => void;
   setCharacterNextAttackOverride: (
     characterId: string,
     override: 'advantage' | 'disadvantage' | null
@@ -370,11 +751,24 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const isRemoteTunnelSession =
     typeof window !== 'undefined' &&
     window.location.hostname.toLowerCase().includes('trycloudflare.com');
-  const [inLobby, setInLobby] = useState<boolean>(true);
+  const [inLobby, setInLobbyState] = useState<boolean>(true);
+  const lastDispatchedDuelIdRef = useRef<string | null>(null);
+  const gmServerLostTimerRef = useRef<number | null>(null);
+  const setInLobby = useCallback((nextInLobby: boolean) => {
+    if (nextInLobby && roleRef.current === 'gm' && socketRef.current?.connected) {
+      socketRef.current.emit('room:gm-leave');
+    } else if (!nextInLobby && roleRef.current === 'gm' && socketRef.current?.connected) {
+      socketRef.current.emit('room:gm-open');
+    }
+    setInLobbyState(nextInLobby);
+  }, []);
   const [loading, setLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [connectedClients, setConnectedClients] = useState(1);
   const [connectedPlayers, setConnectedPlayers] = useState<ConnectedPlayerInfo[]>([]);
+  const connectedPlayersRef = useRef<ConnectedPlayerInfo[]>([]);
+  connectedPlayersRef.current = connectedPlayers;
+  const [activeSecretPassage, setActiveSecretPassage] = useState<SecretPassageAlert | null>(null);
   const [networkAddresses, setNetworkAddresses] = useState<NetworkAddress[]>([]);
   const [publicTunnel, setPublicTunnel] = useState<{
     status: 'idle' | 'starting' | 'active' | 'error';
@@ -420,6 +814,8 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [pendingManualRoll, setPendingManualRoll] = useState<PendingManualRoll | null>(null);
   const [activeAmbientName, setActiveAmbientName] = useState<string | null>(null);
   const [activeThemeBanner, setActiveThemeBanner] = useState<ThemeMusicBanner | null>(null);
+  const [activeRestBanner, setActiveRestBanner] = useState<RestBannerState | null>(null);
+  const dismissRestBanner = useCallback(() => setActiveRestBanner(null), []);
   const [pings, setPings] = useState<MapPing[]>([]);
   const [activePointers, setActivePointers] = useState<Record<string, MapPointerState>>({});
   const [activeSkillCheck, setActiveSkillCheck] = useState<SkillCheckRequest | null>(null);
@@ -437,10 +833,20 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [activeReward, setActiveReward] = useState<CardRewardNotification | null>(null);
   const [floatingVfx, setFloatingVfx] = useState<FloatingCombatVfx[]>([]);
   const [slashVfx, setSlashVfx] = useState<SlashVfxEvent[]>([]);
+  const [projectileVfx, setProjectileVfx] = useState<MapProjectileVfx[]>([]);
+  const [screenShakeActive, setScreenShakeActive] = useState(false);
+  const [activeMvpSummary, setActiveMvpSummary] = useState<CombatMvpSummary | null>(null);
+  const dismissMvpSummary = useCallback(() => setActiveMvpSummary(null), []);
+  const combatStatsRef = useRef<
+    Record<string, { name: string; color: string; damage: number; healing: number; crits: number }>
+  >({});
   const [mapBannerName, setMapBannerName] = useState<string | null>(null);
   const [pendingAttackChoice, setPendingAttackChoice] = useState<PendingAttackChoice | null>(null);
   const [tacticalAlert, setTacticalAlert] = useState<{ id: string; message: string } | null>(null);
-  const [opportunityPrompt, setOpportunityPrompt] = useState<OpportunityAttackPrompt | null>(null);
+  const [opportunityQueue, setOpportunityQueue] = useState<OpportunityAttackPrompt[]>([]);
+  const opportunityQueueRef = useRef<OpportunityAttackPrompt[]>([]);
+  opportunityQueueRef.current = opportunityQueue;
+  const opportunityPrompt = opportunityQueue[0] || null;
   const [activeSavePrompt, setActiveSavePrompt] = useState<TacticalSavePrompt | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessageEntry[]>([]);
   const [unreadChatCount, setUnreadChatCount] = useState(0);
@@ -523,7 +929,6 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   useEffect(() => {
     if (!mapBannerName) return;
     const t = window.setTimeout(() => setMapBannerName(null), 2800);
-    return () => window.clearTimeout(t);
   }, [mapBannerName]);
 
   const dismissMapBanner = useCallback(() => {
@@ -610,14 +1015,8 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [serverUrl]
   );
 
-  // Locate player's single character when in player role
-  const myCharacter = campaign.characters.find(
-    (c) =>
-      c.ownerPlayerId === myPlayerId ||
-      (role === 'player' &&
-        myPlayerName.trim() !== '' &&
-        c.playerName.toLowerCase() === myPlayerName.trim().toLowerCase())
-  );
+  // Locate player's single character STRICTLY by ownerPlayerId (never hijack another player's hero by matching playerName!)
+  const myCharacter = campaign.characters.find((c) => c.ownerPlayerId === myPlayerId);
 
   useEffect(() => {
     hasPlayerCharRef.current = Boolean(myCharacter);
@@ -719,11 +1118,52 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      if (mounted) setIsConnected(true);
+      if (!mounted) return;
+      setIsConnected(true);
+      if (gmServerLostTimerRef.current !== null) {
+        window.clearTimeout(gmServerLostTimerRef.current);
+        gmServerLostTimerRef.current = null;
+      }
+      if (roleRef.current === 'gm' && !inLobbyRef.current) {
+        socket.emit('room:gm-open');
+      }
     });
 
     socket.on('disconnect', () => {
-      if (mounted) setIsConnected(false);
+      if (!mounted) return;
+      setIsConnected(false);
+      if (roleRef.current === 'player' && !inLobbyRef.current) {
+        if (gmServerLostTimerRef.current !== null) {
+          window.clearTimeout(gmServerLostTimerRef.current);
+        }
+        gmServerLostTimerRef.current = window.setTimeout(() => {
+          gmServerLostTimerRef.current = null;
+          if (!socketRef.current?.connected && roleRef.current === 'player' && !inLobbyRef.current) {
+            setPendingAttackChoice(null);
+            setActiveDuel(null);
+            setActiveSavePrompt(null);
+            setInLobbyState(true);
+            openAlertDialog(
+              'O servidor do Mestre foi encerrado ou a conexão caiu. A sala foi fechada.',
+              'Sala Encerrada'
+            );
+          }
+        }, 3500);
+      }
+    });
+
+    socket.on('room:closed', (payload?: { reason?: string }) => {
+      if (!mounted) return;
+      if (roleRef.current === 'player' && !inLobbyRef.current) {
+        setPendingAttackChoice(null);
+        setActiveDuel(null);
+        setActiveSavePrompt(null);
+        setInLobbyState(true);
+        openAlertDialog(
+          payload?.reason || 'O Mestre saiu da mesa — a sala foi encerrada automaticamente.',
+          'Sala Encerrada'
+        );
+      }
     });
 
     socket.on('presence:count', (count: number) => {
@@ -785,7 +1225,13 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     socket.on('opportunity:prompt', (prompt: OpportunityAttackPrompt | null) => {
       if (!mounted) return;
-      setOpportunityPrompt(prompt);
+      setOpportunityQueue((prev) => {
+        if (!prompt) {
+          return prev.length > 1 ? prev.slice(1) : [];
+        }
+        if (prev[0]?.id === prompt.id) return prev;
+        return [prompt, ...prev.filter((p) => p.id !== prompt.id)];
+      });
     });
 
     socket.on('save-prompt:updated', (prompt: TacticalSavePrompt | null) => {
@@ -837,6 +1283,34 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }, 2100);
       }
     );
+
+    socket.on('rest:banner', (banner: RestBannerState) => {
+      if (!mounted || !banner?.id) return;
+      setActiveRestBanner(banner);
+      soundEngine.playSfxPreset('campfire');
+      window.setTimeout(() => {
+        setActiveRestBanner((curr) => (curr?.id === banner.id ? null : curr));
+      }, 4200);
+    });
+
+    socket.on('vfx:projectile', (proj: MapProjectileVfx) => {
+      if (!mounted || !proj?.id) return;
+      setProjectileVfx((prev) => [...prev, proj]);
+      if (proj.isCrit) {
+        setScreenShakeActive(true);
+        soundEngine.playSfxPreset('crit');
+        window.setTimeout(() => setScreenShakeActive(false), 520);
+      }
+      window.setTimeout(() => {
+        setProjectileVfx((prev) => prev.filter((p) => p.id !== proj.id));
+      }, 1300);
+    });
+
+    socket.on('combat:mvp-summary', (summary: CombatMvpSummary) => {
+      if (!mounted || !summary?.id) return;
+      setActiveMvpSummary(summary);
+      soundEngine.playSfxPreset('levelup');
+    });
 
     socket.on('pointer:bulk', (list: MapPointerState[]) => {
       if (!mounted) return;
@@ -1051,11 +1525,13 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ? '#f59e0b'
           : myCharacter?.playerColor || myPlayerColor || '#38bdf8',
       role,
+      inLobby,
       characterId: controlledChar?.id,
       characterName: controlledChar?.name,
     });
   }, [
     isConnected,
+    inLobby,
     myPlayerId,
     myPlayerName,
     myPlayerColor,
@@ -1229,7 +1705,6 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
   }, [undoLastAction]);
 
   const setCharacterNextAttackOverride = useCallback(
@@ -1319,8 +1794,9 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const normalized = normalizeHeroCharacter(rawHero, camp);
       const vaultId = normalized.vaultId || normalized.id;
 
-      // Players entering with a previously created/saved hero require GM approval when online
-      if (roleRef.current === 'player' && socketRef.current?.connected) {
+      // Players entering with a previously created/saved hero require GM approval ONLY when a GM is online
+      const hasOnlineGm = connectedPlayersRef.current.some((p) => p.role === 'gm');
+      if (roleRef.current === 'player' && socketRef.current?.connected && hasOnlineGm) {
         setHeroJoinFeedback(null);
         const reqPayload: PlayerRequest = {
           id: `req-join-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
@@ -1448,8 +1924,9 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const target = campaignRef.current.characters.find((c) => c.id === characterId);
       if (!target) return;
 
-      // Players claiming an existing campaign hero require GM approval when online
-      if (roleRef.current === 'player' && socketRef.current?.connected) {
+      // Players claiming an existing campaign hero require GM approval ONLY when a GM is online
+      const hasOnlineGm = connectedPlayersRef.current.some((p) => p.role === 'gm');
+      if (roleRef.current === 'player' && socketRef.current?.connected && hasOnlineGm) {
         setHeroJoinFeedback(null);
         const reqPayload: PlayerRequest = {
           id: `req-claim-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
@@ -1640,6 +2117,59 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [advantageMode, myPlayerColor, myPlayerName, openManualRoll, secretRoll, sendRoll, targetTokenId]
   );
 
+  const startTacticalSavePromptRef = useRef<
+    | ((params: {
+        kind: TacticalSavePrompt['kind'];
+        title: string;
+        subtitle?: string;
+        saveSkillId: string;
+        saveLabel: string;
+        dc: number;
+        damageFormula?: string;
+        damageType?: string;
+        halfOnSuccess?: boolean;
+        applyConditionId?: string;
+        conditionDurationRounds?: number;
+        casterCharacterId?: string;
+        casterName?: string;
+        requiresConcentration?: boolean;
+        singleTargetOnly?: boolean;
+        tokens: MapToken[];
+      }) => void)
+    | null
+  >(null);
+
+  const playSyncedAbilitySfx = useCallback(
+    (params: {
+      explicitSfxPreset?: string;
+      title?: string;
+      damageType?: string;
+      range?: string;
+      applyConditionId?: string;
+      isAttack?: boolean;
+    }) => {
+      const condName = params.applyConditionId
+        ? campaignRef.current.compendium.conditions.find((c) => c.id === params.applyConditionId)?.name
+        : undefined;
+      const presetKey = resolveAbilitySfxPreset({
+        explicitSfxPreset: params.explicitSfxPreset,
+        title: params.title,
+        damageType: params.damageType,
+        range: params.range,
+        applyConditionId: params.applyConditionId,
+        conditionName: condName,
+        isAttack: params.isAttack,
+      });
+      const payload = { action: 'sfx' as const, presetKey, name: params.title || presetKey };
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('sound:trigger', payload);
+      } else {
+        soundEngine.playSfxPreset(presetKey);
+      }
+    },
+    []
+  );
+
   const rollCharacterAction: CampaignContextValue['rollCharacterAction'] = useCallback(
     ({
       characterId,
@@ -1652,8 +2182,13 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       saveSkillId,
       saveDcFormula,
       costMp,
+      costResourceId,
       applyConditionId,
       conditionDurationRounds,
+      aoeShape,
+      aoeSizeMeters,
+      aoeColor,
+      aoePersistent,
       extraBonus,
       extraDice,
     }) => {
@@ -1722,17 +2257,61 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
       }
 
-      if (costMp && costMp > 0 && char.mp < costMp) {
-        showTacticalAlert(
-          `${campaignRef.current.settings.resourceName} insuficiente (${char.mp}/${costMp} ${campaignRef.current.settings.resourceShort}).`
-        );
+      const matchingAbilityForAoe = campaignRef.current.compendium.abilities.find(
+        (ab) => ab.name.trim().toLowerCase() === title.trim().toLowerCase()
+      );
+      const usesCheck = checkAbilityUsesRemaining(char, matchingAbilityForAoe);
+      if (!usesCheck.ok) {
+        showTacticalAlert(usesCheck.error);
         return;
+      }
+      const resolvedCostResId = costResourceId || matchingAbilityForAoe?.costResourceId || 'mp';
+
+      if (costMp && costMp > 0) {
+        if (resolvedCostResId === 'hp') {
+          if (char.hp <= costMp) {
+            showTacticalAlert(`Vida (PV) insuficiente para conjurar (${char.hp}/${costMp} PV).`);
+            return;
+          }
+        } else if (resolvedCostResId === 'mp') {
+          if (char.mp < costMp) {
+            showTacticalAlert(
+              `${campaignRef.current.settings.resourceName} insuficiente (${char.mp}/${costMp} ${campaignRef.current.settings.resourceShort}).`
+            );
+            return;
+          }
+        } else {
+          const resDef = (campaignRef.current.compendium.customResources || []).find(
+            (r) => r.id === resolvedCostResId
+          );
+          if (resDef) {
+            const st = getCharacterCustomResourceState(char, resDef);
+            if (st.current < costMp) {
+              showTacticalAlert(`${resDef.name} insuficiente (${st.current}/${costMp} ${resDef.shortName}).`);
+              return;
+            }
+          }
+        }
       }
 
       const targetToken = activeMap?.tokens.find((t) => t.id === targetTokenId);
-      const isOffensiveAction = Boolean(attackFormula || (damageFormula && damageType?.toLowerCase() !== 'cura'));
+      const resolvedAoeShape = aoeShape || matchingAbilityForAoe?.aoeShape;
+      const resolvedAoeSize = aoeSizeMeters || matchingAbilityForAoe?.aoeSizeMeters;
+      const resolvedAoeColor = aoeColor || matchingAbilityForAoe?.aoeColor;
+      const resolvedAoePersistent =
+        aoePersistent !== undefined
+          ? aoePersistent
+          : matchingAbilityForAoe?.aoePersistent;
+      const resolvedCreatesSurface = matchingAbilityForAoe?.createsSurface;
+      const resolvedAoeTargetFilter = matchingAbilityForAoe?.aoeTargetFilter;
+      const isSelfRange = Boolean(range && range.trim().toLowerCase().includes('pessoal'));
+      const isHealingAction = damageType?.toLowerCase() === 'cura';
+      const isTargetedAction = Boolean(
+        resolvedAoeShape ||
+          (!isSelfRange && (isHealingAction || attackFormula || damageFormula || applyConditionId))
+      );
 
-      if (isOffensiveAction && !applyConditionId) {
+      if (isTargetedAction) {
         const choice: PendingAttackChoice = {
           attackerTokenId: myToken?.id,
           attackerName: char.name,
@@ -1742,15 +2321,29 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           attackerCharacterId: char.id,
           diceSkin: char.diceSkin || 'gold',
           actionTitle: title,
-          attackFormula,
+          attackFormula: isHealingAction ? undefined : attackFormula,
           damageFormula,
           damageType,
           range,
           actionCost,
           costMp,
+          costResourceId: resolvedCostResId,
+          applyConditionId,
+          conditionDurationRounds,
+          requiresConcentration: Boolean(matchingAbilityForAoe?.requiresConcentration),
+          singleTargetOnly: Boolean(matchingAbilityForAoe?.singleTargetOnly),
+          sfxPreset: matchingAbilityForAoe?.sfxPreset,
+          saveSkillId,
+          saveDcFormula,
+          aoeShape: resolvedAoeShape,
+          aoeSizeMeters: resolvedAoeSize,
+          aoeColor: resolvedAoeColor,
+          aoePersistent: resolvedAoePersistent,
+          aoeTargetFilter: resolvedAoeTargetFilter,
+          createsSurface: resolvedCreatesSurface,
         };
-        if (activeMap && activeMap.tokens.length > 0) {
-          // Always require explicit target selection on map for every new attack
+        if (activeMap && (activeMap.tokens.length > 0 || resolvedAoeShape)) {
+          // Always require explicit target selection or AoE placement on map
           setTargetTokenId(null);
           setPendingAttackChoice(choice);
           return;
@@ -1758,65 +2351,123 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       const stats = computeCharacterStats(char, campaignRef.current);
-      const matchingAbility = campaignRef.current.compendium.abilities.find(
-        (ab) => ab.name.trim().toLowerCase() === title.trim().toLowerCase()
-      );
+      const matchingAbility = matchingAbilityForAoe;
       const shouldSetConcentration = Boolean(matchingAbility?.requiresConcentration);
+      const isSingleTargetOnly = Boolean(matchingAbility?.singleTargetOnly);
+      const targetCharIdForSelf =
+        !isSelfRange && targetToken?.type === 'character' ? targetToken.referenceId : char.id;
+      const targetTokIdForSelf = !isSelfRange && targetToken ? targetToken.id : myToken?.id;
+      const targetNameForSelf = !isSelfRange && targetToken ? targetToken.name : char.name;
 
-      updateCampaign((prev) => ({
-        ...prev,
-        characters: prev.characters.map((c) => {
-          if (c.id !== char.id) return c;
-          const nextMp = costMp && costMp > 0 ? Math.max(0, c.mp - costMp) : c.mp;
+      void (async () => {
+        const conflict = await confirmAbilityConflictIfNeeded(char, {
+          abilityName: title,
+          requiresConcentration: shouldSetConcentration,
+          singleTargetOnly: isSingleTargetOnly,
+          newTargetTokenId: targetTokIdForSelf,
+          newTargetName: targetNameForSelf,
+        });
+        if (!conflict.proceed) return;
+
+        playSyncedAbilitySfx({
+          explicitSfxPreset: matchingAbility?.sfxPreset,
+          title,
+          damageType,
+          range,
+          applyConditionId,
+          isAttack: Boolean(attackFormula),
+        });
+
+        updateCampaign((prev) => {
+          const base = removeTrackedEffectsFromState(prev, char.id, conflict.effectsToClear);
           return {
-            ...c,
-            mp: nextMp,
-            ...(shouldSetConcentration ? { concentratingSpell: title } : {}),
-          };
-        }),
-        combat:
-          prev.combat.active && charCb && (actionCost !== 'Livre' || shouldSetConcentration)
-            ? {
-                ...prev.combat,
-                combatants: prev.combat.combatants.map((cb) =>
-                  cb.id !== charCb.id
-                    ? cb
-                    : {
-                        ...cb,
-                        actionAvailable: actionCost === 'Padrão' ? false : cb.actionAvailable,
-                        bonusActionAvailable:
-                          actionCost === 'Bônus' ? false : cb.bonusActionAvailable,
-                        reactionAvailable:
-                          actionCost === 'Reação' ? false : cb.reactionAvailable,
-                        ...(shouldSetConcentration ? { concentratingSpell: title } : {}),
-                      }
-                ),
+            ...base,
+            characters: base.characters.map((c) => {
+              if (c.id !== char.id) return c;
+              const res = deductCharacterResource(
+                c,
+                costMp,
+                resolvedCostResId,
+                base.compendium.customResources
+              );
+              let nextChar: Character = {
+                ...c,
+                ...res,
+                abilityUsesRemaining: decrementAbilityUse(c, matchingAbility),
+                ...(shouldSetConcentration ? { concentratingSpell: title } : {}),
+              };
+              if (applyConditionId && (shouldSetConcentration || isSingleTargetOnly)) {
+                nextChar = upsertTrackedEffectOnCharacter(nextChar, {
+                  abilityKey: normalizeAbilityKey(title),
+                  abilityName: title,
+                  conditionId: applyConditionId,
+                  targetTokenIds: targetTokIdForSelf ? [targetTokIdForSelf] : [],
+                  targetCharacterIds: targetCharIdForSelf ? [targetCharIdForSelf] : [],
+                  targetNames: [targetNameForSelf],
+                  isConcentration: shouldSetConcentration,
+                  singleTargetOnly: isSingleTargetOnly,
+                });
               }
-            : prev.combat,
-      }));
+              return nextChar;
+            }),
+            combat:
+              base.combat.active && charCb && (actionCost !== 'Livre' || shouldSetConcentration)
+                ? {
+                    ...base.combat,
+                    combatants: base.combat.combatants.map((cb) =>
+                      cb.id !== charCb.id
+                        ? cb
+                        : {
+                            ...cb,
+                            actionAvailable: actionCost === 'Padrão' ? false : cb.actionAvailable,
+                            bonusActionAvailable:
+                              actionCost === 'Bônus' ? false : cb.bonusActionAvailable,
+                            reactionAvailable:
+                              actionCost === 'Reação' ? false : cb.reactionAvailable,
+                            ...(shouldSetConcentration ? { concentratingSpell: title } : {}),
+                          }
+                    ),
+                  }
+                : base.combat,
+          };
+        });
 
-      if (applyConditionId) {
-        const condDef = campaignRef.current.compendium.conditions.find(
-          (c) => c.id === applyConditionId
-        );
-        if (condDef) {
-          updateCampaign((prev) => {
-            const targetCharId =
-              targetToken?.type === 'character' ? targetToken.referenceId : char.id;
-            return {
+        if (applyConditionId) {
+          const condDef = campaignRef.current.compendium.conditions.find(
+            (c) => c.id === applyConditionId
+          );
+          if (condDef) {
+            updateCampaign((prev) => ({
               ...prev,
               characters: prev.characters.map((c) => {
-                if (c.id !== targetCharId) return c;
+                if (c.id !== targetCharIdForSelf) return c;
                 if (c.activeConditionIds.includes(applyConditionId)) return c;
                 return { ...c, activeConditionIds: [...c.activeConditionIds, applyConditionId] };
               }),
+              maps: targetTokIdForSelf
+                ? prev.maps.map((m) =>
+                    m.id !== prev.activeMapId
+                      ? m
+                      : {
+                          ...m,
+                          tokens: m.tokens.map((t) => {
+                            if (t.id !== targetTokIdForSelf) return t;
+                            if (t.activeConditionIds.includes(applyConditionId)) return t;
+                            return {
+                              ...t,
+                              activeConditionIds: [...t.activeConditionIds, applyConditionId],
+                            };
+                          }),
+                        }
+                  )
+                : prev.maps,
               combat: prev.combat.active
                 ? {
                     ...prev.combat,
                     combatants: prev.combat.combatants.map((cb) => {
                       if (
-                        (targetToken && cb.tokenId === targetToken.id) ||
-                        (!targetToken && cb.referenceId === char.id)
+                        (targetTokIdForSelf && cb.tokenId === targetTokIdForSelf) ||
+                        (!targetTokIdForSelf && cb.referenceId === char.id)
                       ) {
                         return {
                           ...cb,
@@ -1836,10 +2487,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     }),
                   }
                 : prev.combat,
-            };
-          });
+            }));
+          }
         }
-      }
+      })();
 
       const combinedExtraBonus = (extraBonus || 0) + (attackFormula ? stats.attackBonusExtra : 0);
       const combinedDice = [
@@ -1944,13 +2595,123 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [advantageMode, openManualRoll, secretRoll, sendRoll, targetTokenId, updateCampaign]
   );
 
+  const pushCombatLog = useCallback(
+    (entry: Omit<CombatLogEntry, 'id' | 'timestamp'>) => {
+      const full: CombatLogEntry = {
+        ...entry,
+        id: `clog-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+      };
+      updateCampaign((prev) => ({
+        ...prev,
+        combatLog: [...(prev.combatLog || []).slice(-119), full],
+      }));
+    },
+    [updateCampaign]
+  );
+
+  const awardXp = useCallback(
+    (characterIds: string[] | 'all', amount: number) => {
+      const cleanAmt = Math.round(amount);
+      if (!Number.isFinite(cleanAmt) || cleanAmt === 0) return;
+      const ASI_LEVELS = [4, 8, 12, 16, 19];
+      const curr = campaignRef.current;
+      const targetIds = new Set(
+        characterIds === 'all' ? curr.characters.map((c) => c.id) : characterIds
+      );
+      if (targetIds.size === 0) return;
+
+      const leveledUpNames: string[] = [];
+      const newLogs: CombatLogEntry[] = [];
+      const nowIso = new Date().toISOString();
+
+      updateCampaign((prev) => {
+        const thresholds = prev.settings.xpThresholds;
+        const nextChars = prev.characters.map((c) => {
+          if (!targetIds.has(c.id)) return c;
+          const prevXp = c.xp ?? 0;
+          const nextXp = Math.max(0, prevXp + cleanAmt);
+          const computedLv = computeLevelForXp(nextXp, thresholds);
+          const nextLevel = Math.max(c.level, computedLv);
+
+          newLogs.push({
+            id: `clog-xp-${Date.now()}-${c.id}`,
+            timestamp: nowIso,
+            category: 'xp',
+            actorName: c.name,
+            actorKind: 'hero',
+            actorColor: c.playerColor || c.tokenColor,
+            summary: `recebeu ${cleanAmt > 0 ? `+${cleanAmt}` : cleanAmt} XP (Total: ${nextXp} XP)`,
+          });
+
+          if (nextLevel > c.level) {
+            let gainedAsi = 0;
+            const unlockedAbilities: string[] = [];
+            const cls = prev.compendium.classes.find((cl) => cl.id === c.classId);
+            for (let lv = c.level + 1; lv <= nextLevel; lv++) {
+              if (ASI_LEVELS.includes(lv)) gainedAsi += 2;
+              cls?.levelFeatures
+                .filter((f) => f.level === lv)
+                .forEach((f) => {
+                  if (f.abilityIds) unlockedAbilities.push(...f.abilityIds);
+                });
+            }
+            const draft: Character = {
+              ...c,
+              xp: nextXp,
+              level: nextLevel,
+              unspentAttributePoints: (c.unspentAttributePoints ?? 0) + gainedAsi,
+              knownAbilityIds: Array.from(new Set([...c.knownAbilityIds, ...unlockedAbilities])),
+            };
+            const nextStats = computeCharacterStats(draft, prev);
+            leveledUpNames.push(`${c.name} → Nv ${nextLevel}`);
+            newLogs.push({
+              id: `clog-lv-${Date.now()}-${c.id}`,
+              timestamp: nowIso,
+              category: 'levelup',
+              actorName: c.name,
+              actorKind: 'hero',
+              actorColor: c.playerColor || c.tokenColor,
+              summary: `subiu automaticamente para o Nível ${nextLevel}!${gainedAsi > 0 ? ` (+${gainedAsi} pts atributo)` : ''}`,
+            });
+            return {
+              ...draft,
+              hp: nextStats.maxHp,
+              mp: nextStats.maxMp,
+            };
+          }
+
+          return { ...c, xp: nextXp };
+        });
+
+        return {
+          ...prev,
+          characters: nextChars,
+          combatLog: [...(prev.combatLog || []).slice(-(120 - newLogs.length)), ...newLogs],
+        };
+      });
+
+      if (leveledUpNames.length > 0) {
+        soundEngine.playSfxPreset('levelup');
+        setTacticalAlert({
+          id: `xp-lv-${Date.now()}`,
+          message: `✨ Level Up Automático: ${leveledUpNames.join(' • ')}!`,
+        });
+        setTimeout(() => setTacticalAlert(null), 5000);
+      }
+    },
+    [updateCampaign]
+  );
+
   const applyDamage = useCallback(
     (
       targetTokenIdParam: string,
       amount: number,
       isHeal = false,
       rollId?: string,
-      damageType?: string
+      damageType?: string,
+      applyConditionId?: string,
+      conditionDurationRounds?: number
     ) => {
       pushUndoSnapshot(campaignRef.current, true);
       if (socketRef.current?.connected) {
@@ -1960,6 +2721,8 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           isHeal,
           rollId,
           damageType,
+          applyConditionId,
+          conditionDurationRounds,
         });
       } else {
         const curr = campaignRef.current;
@@ -1983,17 +2746,77 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             ],
           }).finalAmount;
         }
-        const delta = isHeal ? finalAmt : -finalAmt;
+        let tempAbsorbed = 0;
+        let dmgAfterTemp = finalAmt;
+        if (!isHeal && finalAmt > 0 && char && (char.tempHp || 0) > 0) {
+          tempAbsorbed = Math.min(char.tempHp || 0, finalAmt);
+          dmgAfterTemp = finalAmt - tempAbsorbed;
+        }
+        const delta = isHeal ? finalAmt : -dmgAfterTemp;
+        const condDef = applyConditionId
+          ? curr.compendium.conditions.find((c) => c.id === applyConditionId)
+          : undefined;
+
         updateCampaign((prev) => ({
           ...prev,
+          characters: prev.characters.map((c) => {
+            if (c.id !== tok?.referenceId && c.id !== targetTokenIdParam) return c;
+            const maxHp = Math.max(
+              1,
+              tok?.maxHp || c.maxHpOverride || computeCharacterStats(c, prev).maxHp
+            );
+            const nextHp = Math.max(0, Math.min(maxHp, c.hp + delta));
+            const nextTempHp = Math.max(0, (c.tempHp || 0) - tempAbsorbed);
+            const nextConds =
+              applyConditionId && !c.activeConditionIds.includes(applyConditionId)
+                ? [...c.activeConditionIds, applyConditionId]
+                : c.activeConditionIds;
+            return { ...c, hp: nextHp, tempHp: nextTempHp, activeConditionIds: nextConds };
+          }),
           maps: prev.maps.map((m) => ({
             ...m,
-            tokens: m.tokens.map((t) =>
-              t.id === targetTokenIdParam
-                ? { ...t, hp: Math.max(0, Math.min(t.maxHp, t.hp + delta)) }
-                : t
-            ),
+            tokens: m.tokens.map((t) => {
+              if (t.id !== targetTokenIdParam) return t;
+              const nextConds =
+                applyConditionId && !(t.activeConditionIds || []).includes(applyConditionId)
+                  ? [...(t.activeConditionIds || []), applyConditionId]
+                  : t.activeConditionIds || [];
+              return {
+                ...t,
+                hp: Math.max(0, Math.min(t.maxHp, t.hp + delta)),
+                activeConditionIds: nextConds,
+              };
+            }),
           })),
+          combat: prev.combat.active
+            ? {
+                ...prev.combat,
+                combatants: prev.combat.combatants.map((cb) => {
+                  const matches = cb.tokenId
+                    ? cb.tokenId === targetTokenIdParam
+                    : Boolean(tok?.referenceId && cb.referenceId === tok.referenceId);
+                  if (!matches) return cb;
+                  const nextEffects =
+                    applyConditionId && condDef
+                      ? [
+                          ...cb.effects.filter((ef) => ef.conditionId !== applyConditionId),
+                          {
+                            id: `eff-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                            label: condDef.name,
+                            conditionId: applyConditionId,
+                            remainingRounds: conditionDurationRounds || 3,
+                            sourceName: 'Combate',
+                          },
+                        ]
+                      : cb.effects;
+                  return {
+                    ...cb,
+                    hp: Math.max(0, Math.min(cb.maxHp, cb.hp + delta)),
+                    effects: nextEffects,
+                  };
+                }),
+              }
+            : prev.combat,
           rollLog: rollId
             ? prev.rollLog.map((r) => (r.id === rollId ? { ...r, applied: true } : r))
             : prev.rollLog,
@@ -2002,6 +2825,425 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     },
     [pushUndoSnapshot, updateCampaign]
   );
+
+  const partyRest = useCallback(
+    (kind: 'short' | 'long') => {
+      const curr = campaignRef.current;
+      const livingChars = curr.characters.filter(
+        (c) => c.hp > 0 && !c.deathSaves?.dead && (c.deathSaves?.failures || 0) < 3
+      );
+      if (livingChars.length === 0) {
+        const id = `rest-empty-${Date.now()}`;
+        setTacticalAlert({ id, message: 'Nenhum herói vivo disponível para descansar.' });
+        window.setTimeout(() => {
+          setTacticalAlert((curr) => (curr?.id === id ? null : curr));
+        }, 3500);
+        return;
+      }
+
+      const hpByCharId = new Map<string, { hp: number; maxHp: number }>();
+      const allConcEffectsToClear: Array<{ casterId: string; effects: ActiveTrackedAbilityEffect[] }> = [];
+
+      updateCampaign((prev) => {
+        let working = prev;
+        if (kind === 'long') {
+          prev.characters.forEach((c) => {
+            const concEffs = (c.activeTrackedEffects || []).filter((e) => e.isConcentration);
+            if (concEffs.length > 0) {
+              allConcEffectsToClear.push({ casterId: c.id, effects: concEffs });
+            }
+          });
+          allConcEffectsToClear.forEach(({ casterId, effects }) => {
+            working = removeTrackedEffectsFromState(working, casterId, effects);
+          });
+        }
+
+        const nextCharacters = working.characters.map((c) => {
+          if (c.hp <= 0 || c.deathSaves?.dead || (c.deathSaves?.failures || 0) >= 3) {
+            return c;
+          }
+          const stats = computeCharacterStats(c, working);
+          const charClass = working.compendium.classes.find((cl) => cl.id === c.classId);
+          let nextHp = stats.maxHp;
+          let nextMp = stats.maxMp;
+          if (kind === 'short') {
+            const hitDie = charClass?.hitDie || 8;
+            const conMod = stats.attributes['con']?.mod || 0;
+            const rollHeal = Math.max(1, Math.floor(Math.random() * hitDie) + 1 + conMod);
+            nextHp = Math.min(stats.maxHp, c.hp + rollHeal);
+            nextMp = Math.min(stats.maxMp, c.mp + Math.ceil(stats.maxMp / 3));
+          }
+          hpByCharId.set(c.id, { hp: nextHp, maxHp: stats.maxHp });
+
+          const resetUses: Record<string, number> =
+            kind === 'long' ? {} : { ...(c.abilityUsesRemaining || {}) };
+          c.knownAbilityIds.forEach((aid) => {
+            const ab = working.compendium.abilities.find((a) => a.id === aid);
+            if (!ab?.maxUsesPerRest) return;
+            if (kind === 'long' || ab.restType === 'curto') {
+              resetUses[aid] = ab.maxUsesPerRest;
+            }
+          });
+
+          const nextCustomRes = { ...(c.customResourceValues || {}) };
+          (working.compendium.customResources || []).forEach((resDef) => {
+            if (kind === 'long' ? resDef.resetOn === 'short' || resDef.resetOn === 'long' : resDef.resetOn === 'short') {
+              const st = getCharacterCustomResourceState(c, resDef);
+              nextCustomRes[resDef.id] = { ...(nextCustomRes[resDef.id] || {}), current: st.max };
+            }
+          });
+
+          return {
+            ...c,
+            hp: nextHp,
+            mp: nextMp,
+            tempHp: kind === 'long' ? 0 : c.tempHp,
+            abilityUsesRemaining: resetUses,
+            resourceTrackers: (c.resourceTrackers || []).map((tr) =>
+              kind === 'long'
+                ? tr.resetOn === 'short' || tr.resetOn === 'long'
+                  ? { ...tr, current: tr.max }
+                  : tr
+                : tr.resetOn === 'short'
+                  ? { ...tr, current: tr.max }
+                  : tr
+            ),
+            customResourceValues: nextCustomRes,
+            activeConditionIds:
+              kind === 'long'
+                ? c.activeConditionIds.filter((id) => id !== 'cond-exausto')
+                : c.activeConditionIds,
+            concentratingSpell: kind === 'long' ? null : c.concentratingSpell,
+            deathSaves: { successes: 0, failures: 0 },
+          };
+        });
+
+        const logEntry: CombatLogEntry = {
+          id: `clog-rest-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          category: 'heal',
+          actorName: 'Grupo',
+          actorKind: 'system',
+          actorColor: kind === 'long' ? '#a78bfa' : '#f59e0b',
+          summary:
+            kind === 'long'
+              ? `concluiu um Descanso Longo (${livingChars.length} heróis com PV, recursos e cargas restaurados!)`
+              : `concluiu um Descanso Curto (${livingChars.length} heróis recuperaram fôlego e cargas curtas!)`,
+        };
+
+        return {
+          ...working,
+          characters: nextCharacters,
+          maps: working.maps.map((m) => ({
+            ...m,
+            tokens: m.tokens.map((t) => {
+              if (t.type !== 'character' || !t.referenceId) return t;
+              const rec = hpByCharId.get(t.referenceId);
+              if (!rec) return t;
+              return {
+                ...t,
+                hp: Math.min(rec.maxHp, rec.hp),
+                maxHp: rec.maxHp,
+                activeConditionIds:
+                  kind === 'long'
+                    ? (t.activeConditionIds || []).filter((id) => id !== 'cond-exausto')
+                    : t.activeConditionIds || [],
+              };
+            }),
+          })),
+          combat: {
+            ...working.combat,
+            combatants: working.combat.combatants.map((cb) => {
+              if (!cb.referenceId) return cb;
+              const rec = hpByCharId.get(cb.referenceId);
+              if (!rec) return cb;
+              return {
+                ...cb,
+                hp: Math.min(rec.maxHp, rec.hp),
+                maxHp: rec.maxHp,
+                ...(kind === 'long' ? { concentratingSpell: null } : {}),
+              };
+            }),
+          },
+          combatLog: [...(working.combatLog || []).slice(-119), logEntry],
+        };
+      });
+
+      const banner: RestBannerState = {
+        id: `rest-${Date.now()}`,
+        kind,
+        summary:
+          kind === 'long'
+            ? `${livingChars.length} heróis restauraram 100% de PV, recursos e cargas de habilidades.`
+            : `${livingChars.length} heróis recuperaram PV (Dado de Vida), 1/3 de energia e cargas curtas.`,
+        affectedCount: livingChars.length,
+      };
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('rest:announce', banner);
+      } else {
+        setActiveRestBanner(banner);
+        soundEngine.playSfxPreset('campfire');
+        window.setTimeout(() => {
+          setActiveRestBanner((b) => (b?.id === banner.id ? null : b));
+        }, 4200);
+      }
+    },
+    [updateCampaign]
+  );
+
+  const recordCombatStat = useCallback(
+    (
+      actorName: string,
+      actorColor: string,
+      delta: { damage?: number; healing?: number; crits?: number }
+    ) => {
+      if (!campaignRef.current.combat.active || !actorName) return;
+      const key = actorName.trim().toLowerCase();
+      const prev = combatStatsRef.current[key] || {
+        name: actorName,
+        color: actorColor || '#e0b84c',
+        damage: 0,
+        healing: 0,
+        crits: 0,
+      };
+      combatStatsRef.current[key] = {
+        ...prev,
+        damage: prev.damage + Math.max(0, delta.damage || 0),
+        healing: prev.healing + Math.max(0, delta.healing || 0),
+        crits: prev.crits + Math.max(0, delta.crits || 0),
+      };
+    },
+    []
+  );
+
+  const fireProjectileVfx = useCallback(
+    (params: {
+      fromToken?: MapToken;
+      toToken?: MapToken;
+      toX?: number;
+      toY?: number;
+      title?: string;
+      damageType?: string;
+      applyConditionId?: string;
+      range?: string;
+      kind?: ProjectileVfxKind;
+      isCrit?: boolean;
+    }) => {
+      const curr = campaignRef.current;
+      const activeMap = curr.maps.find((m) => m.id === curr.activeMapId);
+      if (!activeMap) return;
+      const toX =
+        typeof params.toX === 'number'
+          ? params.toX
+          : params.toToken
+            ? params.toToken.x + (params.toToken.size || 1) / 2
+            : undefined;
+      const toY =
+        typeof params.toY === 'number'
+          ? params.toY
+          : params.toToken
+            ? params.toToken.y + (params.toToken.size || 1) / 2
+            : undefined;
+      if (toX === undefined || toY === undefined) return;
+      const fromX = params.fromToken
+        ? params.fromToken.x + (params.fromToken.size || 1) / 2
+        : toX;
+      const fromY = params.fromToken
+        ? params.fromToken.y + (params.fromToken.size || 1) / 2
+        : toY;
+
+      const proj: MapProjectileVfx = {
+        id: `proj-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        mapId: activeMap.id,
+        fromX,
+        fromY,
+        toX,
+        toY,
+        kind:
+          params.kind ||
+          detectProjectileKind({
+            title: params.title,
+            damageType: params.damageType,
+            applyConditionId: params.applyConditionId,
+            range: params.range,
+          }),
+        isCrit: params.isCrit,
+        label: params.title,
+      };
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('vfx:projectile', proj);
+      } else {
+        setProjectileVfx((prev) => [...prev, proj]);
+        if (proj.isCrit) {
+          setScreenShakeActive(true);
+          soundEngine.playSfxPreset('crit');
+          window.setTimeout(() => setScreenShakeActive(false), 520);
+        }
+        window.setTimeout(() => {
+          setProjectileVfx((prev) => prev.filter((p) => p.id !== proj.id));
+        }, 1300);
+      }
+    },
+    []
+  );
+
+  const triggerElementalComboAtCells = useCallback(
+    (
+      seedCells: Array<{ x: number; y: number }>,
+      damageType: string | undefined,
+      actorName: string,
+      actorColor: string
+    ) => {
+      const curr = campaignRef.current;
+      const activeMap = curr.maps.find((m) => m.id === curr.activeMapId);
+      if (!activeMap || !activeMap.elementalSurfaces || seedCells.length === 0) return;
+      const combo = resolveElementalSurfaceCombo(activeMap.elementalSurfaces, seedCells, damageType);
+      if (!combo || !combo.triggered) return;
+
+      const cellKeySet = new Set(combo.affectedCells.map((c) => `${c.x},${c.y}`));
+      // 1. Find all living visible tokens standing on any connected puddle cell
+      const affectedTokens = activeMap.tokens.filter((tok) => {
+        if (tok.isHidden || tok.hp <= 0) return false;
+        const size = Math.max(1, tok.size || 1);
+        for (let dx = 0; dx < size; dx++) {
+          for (let dy = 0; dy < size; dy++) {
+            if (cellKeySet.has(`${Math.floor(tok.x) + dx},${Math.floor(tok.y) + dy}`)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      });
+
+      const comboRoll = evaluateFormula(combo.bonusDamageFormula);
+      const bonusDmg = Math.max(1, comboRoll.total);
+
+      // 2. Atomically transform connected puddle cells AND append BG3 combat log in ONE updateCampaign call
+      const logEntry: CombatLogEntry = {
+        id: `clog-combo-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        category: 'spell',
+        actorName: actorName || 'Terreno',
+        actorKind: 'system',
+        actorColor: actorColor || '#38bdf8',
+        summary: `COMBO ELEMENTAL: ${combo.comboName} propagou por ${combo.affectedCells.length} células e atingiu ${affectedTokens.length} alvo(s)!`,
+        detail: `${combo.bonusDamageFormula} = ${bonusDmg} (${combo.bonusDamageType})`,
+      };
+      updateCampaign((prev) => ({
+        ...prev,
+        maps: prev.maps.map((m) => {
+          if (m.id !== activeMap.id) return m;
+          const nextSurfaces = { ...(m.elementalSurfaces || {}) };
+          combo.affectedCells.forEach((c) => {
+            nextSurfaces[`${c.x},${c.y}`] = combo.nextSurface;
+          });
+          return { ...m, elementalSurfaces: nextSurfaces };
+        }),
+        combatLog: [...(prev.combatLog || []).slice(-119), logEntry],
+      }));
+
+      // 3. Play synced SFX + VFX burst at puddle center
+      const centerCell = combo.affectedCells[Math.floor(combo.affectedCells.length / 2)];
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('sound:trigger', {
+          action: 'sfx',
+          presetKey: combo.sfx,
+          name: combo.comboName,
+        });
+      } else {
+        soundEngine.playSfxPreset(combo.sfx);
+      }
+      fireProjectileVfx({
+        toX: centerCell.x + 0.5,
+        toY: centerCell.y + 0.5,
+        kind: combo.vfxKind,
+        isCrit: true,
+        title: combo.comboName,
+      });
+
+      // 4. Apply bonus damage/condition safely after surface update lands
+      if (affectedTokens.length > 0) {
+        recordCombatStat(actorName, actorColor, { damage: bonusDmg * affectedTokens.length });
+        window.setTimeout(() => {
+          affectedTokens.forEach((tok) => {
+            applyDamage(
+              tok.id,
+              bonusDmg,
+              false,
+              undefined,
+              combo.bonusDamageType,
+              combo.applyConditionId,
+              2
+            );
+          });
+        }, 160);
+      }
+    },
+    [applyDamage, fireProjectileVfx, recordCombatStat, updateCampaign]
+  );
+
+  const endCombatWithSummary = useCallback(() => {
+    const curr = campaignRef.current;
+    const combat = curr.combat;
+    const rounds = Math.max(1, combat.round || 1);
+    const enemiesDefeated = combat.combatants.filter(
+      (cb) => cb.type === 'monster' && cb.hp <= 0
+    ).length;
+
+    const participants = Object.values(combatStatsRef.current).sort(
+      (a, b) => b.damage - a.damage || b.healing - a.healing
+    );
+    const totalDamageDealt = participants.reduce((acc, p) => acc + p.damage, 0);
+    const totalHealingDone = participants.reduce((acc, p) => acc + p.healing, 0);
+
+    const topDmgEntry = [...participants].sort((a, b) => b.damage - a.damage)[0];
+    const topHealEntry = [...participants].sort((a, b) => b.healing - a.healing)[0];
+    const topCritEntry = [...participants].sort((a, b) => b.crits - a.crits)[0];
+
+    const summary: CombatMvpSummary = {
+      id: `mvp-${Date.now()}`,
+      rounds,
+      totalDamageDealt,
+      totalHealingDone,
+      enemiesDefeated,
+      topDamageDealer:
+        topDmgEntry && topDmgEntry.damage > 0
+          ? { name: topDmgEntry.name, color: topDmgEntry.color, value: topDmgEntry.damage }
+          : undefined,
+      topHealer:
+        topHealEntry && topHealEntry.healing > 0
+          ? { name: topHealEntry.name, color: topHealEntry.color, value: topHealEntry.healing }
+          : undefined,
+      topCrits:
+        topCritEntry && topCritEntry.crits > 0
+          ? { name: topCritEntry.name, color: topCritEntry.color, value: topCritEntry.crits }
+          : undefined,
+      participants,
+    };
+
+    combatStatsRef.current = {};
+    setOpportunityQueue([]);
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('opportunity:show', null);
+    }
+
+    updateCampaign((prev) => ({
+      ...prev,
+      combat: {
+        active: false,
+        round: 1,
+        currentTurnIndex: 0,
+        combatants: [],
+      },
+    }));
+
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('combat:mvp-summary', summary);
+    } else {
+      setActiveMvpSummary(summary);
+      soundEngine.playSfxPreset('levelup');
+    }
+  }, [updateCampaign]);
 
   const sendHandout = useCallback((handout: Omit<HandoutPayload, 'id' | 'sentAt'>) => {
     const payload: HandoutPayload = {
@@ -2084,7 +3326,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const pointer: MapPointerState = {
         playerId: myPlayerId,
         playerName: roleRef.current === 'gm' ? 'Mestre' : char?.name || myPlayerName,
-        color: roleRef.current === 'gm' ? '#e0b84c' : char?.playerColor || myPlayerColor,
+        color:
+          roleRef.current === 'gm'
+            ? myPlayerColor || '#e0b84c'
+            : char?.playerColor || myPlayerColor,
         mapId,
         xPct,
         yPct,
@@ -2235,12 +3480,27 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const enterTableAsPlayer = useCallback(
     async (params: { targetServerUrl: string; playerName: string; playerColor: string }) => {
+      const base = params.targetServerUrl.trim().replace(/\/+$/, '');
+      try {
+        const statusRes = await fetch(`${base}/api/room-status`);
+        if (statusRes.ok) {
+          const status = (await statusRes.json()) as { open?: boolean; hasGm?: boolean };
+          if (status && status.open === false) {
+            await openAlertDialog(
+              'A sala está fechada no momento porque o Mestre não está na mesa. Aguarde o Mestre abrir a sessão para entrar.',
+              'Sala Fechada'
+            );
+            return;
+          }
+        }
+      } catch {
+        // if room-status unreachable, let connection attempt proceed
+      }
       setMyPlayerName(params.playerName.trim() || 'Aventureiro');
       setMyPlayerColorState(params.playerColor);
       localStorage.setItem('rpg_player_color', params.playerColor);
       setRole('player');
       setServerUrl(params.targetServerUrl);
-      const base = params.targetServerUrl.trim().replace(/\/+$/, '');
       serverUrlRef.current = base;
       try {
         const res = await fetch(`${base}/api/campaign`);
@@ -2254,7 +3514,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       refreshSavedHeroes().catch(() => {});
       setInLobby(false);
     },
-    [refreshSavedHeroes, setMyPlayerName, setRole, setServerUrl]
+    [refreshSavedHeroes, setInLobby, setMyPlayerName, setRole, setServerUrl]
   );
 
   const resetCampaign = useCallback(async () => {
@@ -2355,29 +3615,72 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   const triggerOpportunityPrompt = useCallback((prompt: OpportunityAttackPrompt | null) => {
-    setOpportunityPrompt(prompt);
+    if (prompt) {
+      setOpportunityQueue([prompt]);
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('opportunity:prompt', prompt);
+      }
+      return;
+    }
+    const remaining = opportunityQueueRef.current.slice(1);
+    setOpportunityQueue(remaining);
     if (socketRef.current?.connected) {
-      socketRef.current.emit('opportunity:prompt', prompt);
+      socketRef.current.emit('opportunity:prompt', remaining[0] || null);
+    }
+  }, []);
+
+  const enqueueOpportunityPrompts = useCallback((prompts: OpportunityAttackPrompt[]) => {
+    if (!prompts || prompts.length === 0) return;
+    setOpportunityQueue(prompts);
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('opportunity:prompt', prompts[0]);
     }
   }, []);
 
   const performCombatManeuver = useCallback(
-    (maneuver: 'dash' | 'disengage' | 'dodge' | 'action-surge') => {
-      const char =
-        roleRef.current === 'player'
-          ? campaignRef.current.characters.find((c) => c.ownerPlayerId === myPlayerId) ||
-            campaignRef.current.characters.find((c) => c.id === activeCharRef.current)
-          : campaignRef.current.characters.find((c) => c.id === activeCharRef.current) ||
-            campaignRef.current.characters[0];
+    (
+      maneuver:
+        | 'dash'
+        | 'disengage'
+        | 'dodge'
+        | 'action-surge'
+        | 'shove'
+        | 'hide'
+        | 'help'
+        | 'jump',
+      actorTokenId?: string
+    ) => {
+      const curr = campaignRef.current;
+      const activeMap = curr.maps.find((m) => m.id === curr.activeMapId);
+      const explicitToken = actorTokenId
+        ? activeMap?.tokens.find((t) => t.id === actorTokenId)
+        : undefined;
 
-      const combat = campaignRef.current.combat;
+      const char =
+        explicitToken
+          ? explicitToken.type === 'character' && explicitToken.referenceId
+            ? curr.characters.find((c) => c.id === explicitToken.referenceId)
+            : undefined
+          : roleRef.current === 'player'
+            ? curr.characters.find((c) => c.ownerPlayerId === myPlayerId) ||
+              curr.characters.find((c) => c.id === activeCharRef.current)
+            : curr.characters.find((c) => c.id === activeCharRef.current) ||
+              curr.characters[0];
+
+      const combat = curr.combat;
       if (!combat.active) {
-        showTacticalAlert('As manobras de combate (Disparada, Desengajar, Esquivar) ficam ativas durante o combate.');
+        showTacticalAlert('As manobras de combate ficam ativas durante o combate.');
         return;
       }
 
       const activeTurnCb = combat.combatants[combat.currentTurnIndex];
       const targetCb =
+        (explicitToken &&
+          combat.combatants.find(
+            (cb) =>
+              cb.tokenId === explicitToken.id ||
+              (explicitToken.referenceId && cb.referenceId === explicitToken.referenceId)
+          )) ||
         (char && combat.combatants.find((cb) => cb.referenceId === char.id)) ||
         (roleRef.current === 'gm' ? activeTurnCb : undefined);
 
@@ -2388,6 +3691,171 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if ((char && char.hp <= 0) || targetCb.hp <= 0) {
         showTacticalAlert(`${targetCb.name} está caído (0 PV) e não pode realizar manobras!`);
         return;
+      }
+
+      // BG3 / D&D 5e Universal Maneuvers: Shove, Hide, Help, Jump
+      if (maneuver === 'shove' || maneuver === 'hide' || maneuver === 'help' || maneuver === 'jump') {
+        const isBonus = maneuver === 'shove' || maneuver === 'hide' || maneuver === 'jump';
+        if (isBonus && targetCb.bonusActionAvailable === false) {
+          showTacticalAlert(`${targetCb.name} já gastou a Ação Bônus neste turno!`);
+          return;
+        }
+        if (!isBonus && targetCb.actionAvailable === false) {
+          showTacticalAlert(`${targetCb.name} já gastou a Ação Padrão neste turno!`);
+          return;
+        }
+        const myTok =
+          explicitToken ||
+          activeMap?.tokens.find(
+            (t) =>
+              (targetCb.tokenId && t.id === targetCb.tokenId) ||
+              (char && t.type === 'character' && t.referenceId === char.id)
+          );
+        const stats = char ? computeCharacterStats(char, curr) : undefined;
+
+        if (maneuver === 'shove') {
+          if (!myTok) {
+            showTacticalAlert(`${targetCb.name} precisa estar no mapa para usar Empurrar!`);
+            return;
+          }
+          setTargetTokenId(null);
+          setPendingAttackChoice({
+            attackerTokenId: myTok.id,
+            attackerName: char?.name || myTok.name || targetCb.name,
+            attackerColor: char?.playerColor || myTok.color || targetCb.color || '#e0b84c',
+            attackerImageUrl: char?.portraitUrl || myTok.imageUrl,
+            attackerFrame: char?.tokenFrameStyle || myTok.frameStyle || 'gold',
+            attackerCharacterId: char?.id,
+            diceSkin: char?.diceSkin || 'gold',
+            actionTitle: 'Empurrar (Shove)',
+            range: 'Corpo a Corpo (1,5m)',
+            actionCost: 'Bônus',
+            isShoveManeuver: true,
+          });
+          showTacticalAlert(
+            `Clique em um alvo adjacente (1,5m) no mapa para Empurrar com ${char?.name || myTok.name}!`
+          );
+          return;
+        }
+
+        if (maneuver === 'hide') {
+          const stealthBonus = stats?.skills['furtividade']?.total ?? 2;
+          const roll = evaluateFormula(`1d20 + ${stealthBonus}`, stats, char);
+          updateCampaign((prev) => ({
+            ...prev,
+            characters: prev.characters.map((c) =>
+              char && c.id === char.id && !c.activeConditionIds.includes('cond-invisivel')
+                ? { ...c, activeConditionIds: [...c.activeConditionIds, 'cond-invisivel'] }
+                : c
+            ),
+            maps: myTok
+              ? prev.maps.map((m) =>
+                  m.id !== activeMap?.id
+                    ? m
+                    : {
+                        ...m,
+                        tokens: m.tokens.map((t) =>
+                          t.id === myTok.id && !(t.activeConditionIds || []).includes('cond-invisivel')
+                            ? { ...t, activeConditionIds: [...(t.activeConditionIds || []), 'cond-invisivel'] }
+                            : t
+                        ),
+                      }
+                )
+              : prev.maps,
+            combat: {
+              ...prev.combat,
+              combatants: prev.combat.combatants.map((cb) =>
+                cb.id === targetCb.id ? { ...cb, bonusActionAvailable: false } : cb
+              ),
+            },
+          }));
+          sendRoll({
+            rollerName: targetCb.name,
+            rollerRole: roleRef.current,
+            rollerColor: targetCb.color,
+            title: 'Esconder / Hide (Furtividade)',
+            formula: roll.resolvedFormula,
+            individualRolls: roll.individualRolls,
+            total: roll.total,
+            isSecret: false,
+            details: `${targetCb.name} escondeu-se nas sombras (Furtividade ${roll.total} • Vantagem no próximo ataque).`,
+          });
+          pushCombatLog({
+            category: 'condition',
+            actorName: targetCb.name,
+            actorKind: char ? 'hero' : 'monster',
+            actorColor: targetCb.color,
+            summary: `usou Esconder (Furtividade ${roll.total}) e ficou Oculto`,
+          });
+          return;
+        }
+
+        if (maneuver === 'help') {
+          const adjAlly = curr.characters.find((c) => {
+            if (char && c.id === char.id) return false;
+            if (c.hp <= 0) return false;
+            const allyTok = activeMap?.tokens.find((t) => t.type === 'character' && t.referenceId === c.id);
+            if (!allyTok || !myTok) return true;
+            return getGridSpanDistance(myTok.x, myTok.y, myTok.size, allyTok.x, allyTok.y, allyTok.size, 1.5).squares <= 2;
+          });
+          updateCampaign((prev) => ({
+            ...prev,
+            characters: adjAlly
+              ? prev.characters.map((c) =>
+                  c.id === adjAlly.id ? { ...c, nextAttackRollOverride: 'advantage' } : c
+                )
+              : prev.characters,
+            combat: {
+              ...prev.combat,
+              combatants: prev.combat.combatants.map((cb) =>
+                cb.id === targetCb.id ? { ...cb, actionAvailable: false } : cb
+              ),
+            },
+          }));
+          pushCombatLog({
+            category: 'system',
+            actorName: targetCb.name,
+            actorKind: char ? 'hero' : 'monster',
+            actorColor: targetCb.color,
+            targetName: adjAlly?.name,
+            targetKind: adjAlly ? 'hero' : undefined,
+            summary: adjAlly
+              ? 'usou Ajudar (concedeu Vantagem no próximo ataque) para'
+              : 'usou Ajudar (próximo teste de aliado adjacente tem Vantagem)',
+          });
+          showTacticalAlert(
+            adjAlly
+              ? `${targetCb.name} ajudou ${adjAlly.name} (+Vantagem no próximo ataque)!`
+              : `${targetCb.name} usou Ajudar!`
+          );
+          return;
+        }
+
+        if (maneuver === 'jump') {
+          updateCampaign((prev) => ({
+            ...prev,
+            combat: {
+              ...prev.combat,
+              combatants: prev.combat.combatants.map((cb) =>
+                cb.id === targetCb.id
+                  ? {
+                      ...cb,
+                      bonusActionAvailable: false,
+                      remainingMoveMeters: (cb.remainingMoveMeters ?? cb.speedMeters ?? 9) + 3,
+                    }
+                  : cb
+              ),
+            },
+          }));
+          pushCombatLog({
+            category: 'system',
+            actorName: targetCb.name,
+            actorKind: char ? 'hero' : 'monster',
+            actorColor: targetCb.color,
+            summary: 'usou Saltar (+3m de salto sobre obstáculos)',
+          });
+          return;
+        }
       }
       if (roleRef.current === 'player' && activeTurnCb?.id !== targetCb.id) {
         showTacticalAlert(`Aguarde seu turno (${activeTurnCb?.name || 'outro combatente'}).`);
@@ -2534,8 +4002,12 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return;
       }
 
-      // 2. Self-Attack Guard (prevent attacking own token unless healing)
+      // 2. Self-Attack Guard (prevent attacking own token unless healing, self-range, or condition-only)
       const isHealingAction = choice.damageType?.toLowerCase() === 'cura';
+      const isConditionOnlyAction = Boolean(!choice.damageType && choice.applyConditionId);
+      const isSelfRangeChoice = Boolean(
+        choice.range && choice.range.trim().toLowerCase().includes('pessoal')
+      );
       const isSelfTarget =
         (attackerToken && attackerToken.id === defenderToken.id) ||
         Boolean(
@@ -2543,30 +4015,32 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             defenderToken.type === 'character' &&
             defenderToken.referenceId === choice.attackerCharacterId
         );
-      if (isSelfTarget && !isHealingAction) {
+      if (isSelfTarget && !isHealingAction && !isSelfRangeChoice && !isConditionOnlyAction) {
         showTacticalAlert('Você não pode atacar a si mesmo! Clique em um inimigo no mapa.');
         return;
       }
 
-      // 3. Range Validation (D&D Melee 1.5m vs Ranged Xm; Reaction Opportunity Attacks fire right as the target leaves reach)
+      // 3. Range Validation (uses exact same square count as map range highlight!)
       if (
         choice.actionCost !== 'Reação' &&
         attackerToken &&
         attackerToken.id !== defenderToken.id
       ) {
-        const maxRangeMeters = parseAttackRangeMeters(choice.range, choice.actionTitle);
-        const { meters: distMeters } = getGridSpanDistance(
+        const sqM = currCampaign.settings.gridSquareMeters || 1.5;
+        const maxSq = parseAttackRangeSquares(choice.range, choice.actionTitle, sqM);
+        const maxRangeMeters = Math.round(maxSq * sqM * 10) / 10;
+        const { squares: distSquares, meters: distMeters } = getGridSpanDistance(
           attackerToken.x,
           attackerToken.y,
           attackerToken.size,
           defenderToken.x,
           defenderToken.y,
           defenderToken.size,
-          currCampaign.settings.gridSquareMeters || 1.5
+          sqM
         );
-        if (distMeters > maxRangeMeters + 0.05) {
+        if (distSquares > maxSq) {
           showTacticalAlert(
-            `Alvo fora de alcance! ${defenderToken.name} está a ${distMeters}m, mas "${choice.actionTitle}" alcança até ${maxRangeMeters}m.`
+            `Alvo fora de alcance! ${defenderToken.name} está a ${distMeters}m (${distSquares} quad.), mas "${choice.actionTitle}" alcança até ${maxRangeMeters}m (${maxSq} quad.).`
           );
           return;
         }
@@ -2617,11 +4091,17 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
       }
 
-      if (choice.costMp && choice.costMp > 0 && char && char.mp < choice.costMp) {
-        showTacticalAlert(
-          `${currCampaign.settings.resourceName} insuficiente (${char.mp}/${choice.costMp}).`
+      if (char) {
+        const resCheck = checkCharacterResource(
+          char,
+          choice.costMp,
+          choice.costResourceId,
+          currCampaign
         );
-        return;
+        if (!resCheck.ok) {
+          showTacticalAlert(resCheck.error);
+          return;
+        }
       }
 
       setPendingAttackChoice(null);
@@ -2630,7 +4110,556 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         triggerOpportunityPrompt(null);
       }
 
-      const stats = char ? computeCharacterStats(char, currCampaign) : undefined;
+      // 4.0 BG3 / D&D 5e Targeted Shove (Empurrar): Size limit + Opposed Strength/Athletics test + collision-safe 1,5m push!
+      if (choice.isShoveManeuver) {
+        if (!attackerToken || !activeMap) {
+          showTacticalAlert('Token do atacante não encontrado no mapa.');
+          return;
+        }
+        if (defenderToken.hp <= 0) {
+          showTacticalAlert(`${defenderToken.name} já está caído (0 PV).`);
+          return;
+        }
+        const getTokenSizeTier = (tok: MapToken): number => {
+          if (tok.type === 'monster' && tok.referenceId) {
+            const mon = currCampaign.compendium.monsters.find((m) => m.id === tok.referenceId);
+            if (mon?.size === 'Pequeno') return 1;
+            if (mon?.size === 'Médio') return 1;
+            if (mon?.size === 'Grande') return 2;
+            if (mon?.size === 'Enorme') return 3;
+            if (mon?.size === 'Colossal') return 4;
+          }
+          return Math.max(1, tok.size || 1);
+        };
+        const atkSizeTier = getTokenSizeTier(attackerToken);
+        const defSizeTier = getTokenSizeTier(defenderToken);
+        if (defSizeTier >= atkSizeTier + 2) {
+          showTacticalAlert(
+            `Alvo grande demais! ${choice.attackerName} não consegue empurrar ${defenderToken.name} (2+ categorias de tamanho maior).`
+          );
+          return;
+        }
+
+        const getTokenShoveAttackBonus = (tok: MapToken, linkedCh?: Character): number => {
+          if (linkedCh) {
+            const st = computeCharacterStats(linkedCh, currCampaign);
+            return st.skills['atletismo']?.total ?? st.attributes['for']?.mod ?? 0;
+          }
+          if (tok.type === 'monster' && tok.referenceId) {
+            const mon = currCampaign.compendium.monsters.find((m) => m.id === tok.referenceId);
+            const strVal = mon?.attributes?.['for'] ?? 12;
+            return Math.floor((strVal - 10) / 2);
+          }
+          return 1;
+        };
+        const getTokenShoveDefenseBonus = (tok: MapToken): number => {
+          if (tok.type === 'character' && tok.referenceId) {
+            const defCh = currCampaign.characters.find((c) => c.id === tok.referenceId);
+            if (defCh) {
+              const st = computeCharacterStats(defCh, currCampaign);
+              const ath = st.skills['atletismo']?.total ?? st.attributes['for']?.mod ?? 0;
+              const acr = st.skills['acrobacia']?.total ?? st.attributes['des']?.mod ?? 0;
+              return Math.max(ath, acr);
+            }
+          }
+          if (tok.type === 'monster' && tok.referenceId) {
+            const mon = currCampaign.compendium.monsters.find((m) => m.id === tok.referenceId);
+            const strMod = Math.floor(((mon?.attributes?.['for'] ?? 10) - 10) / 2);
+            const dexMod = Math.floor(((mon?.attributes?.['des'] ?? 10) - 10) / 2);
+            return Math.max(strMod, dexMod);
+          }
+          return 0;
+        };
+
+        const atkBonus = getTokenShoveAttackBonus(attackerToken, char);
+        const defBonus = getTokenShoveDefenseBonus(defenderToken);
+        const atkRoll = evaluateFormula(`1d20 + ${atkBonus}`);
+        const defRoll = evaluateFormula(`1d20 + ${defBonus}`);
+        const shoveSucceeded = atkRoll.total >= defRoll.total;
+
+        // Compute push destination (1 square away from attacker, respecting map bounds & walls/collisions)
+        const atkCx = attackerToken.x + (attackerToken.size || 1) / 2;
+        const atkCy = attackerToken.y + (attackerToken.size || 1) / 2;
+        const defCx = defenderToken.x + (defenderToken.size || 1) / 2;
+        const defCy = defenderToken.y + (defenderToken.size || 1) / 2;
+        const rawDx = defCx - atkCx;
+        const rawDy = defCy - atkCy;
+        const stepX = Math.abs(rawDx) >= 0.35 ? Math.sign(rawDx) : 0;
+        const stepY = Math.abs(rawDy) >= 0.35 ? Math.sign(rawDy) : 0;
+        const pushX = Math.max(0, Math.min(activeMap.gridWidth - defenderToken.size, defenderToken.x + stepX));
+        const pushY = Math.max(0, Math.min(activeMap.gridHeight - defenderToken.size, defenderToken.y + stepY));
+        const blockedByObstacle =
+          (pushX === defenderToken.x && pushY === defenderToken.y) ||
+          doesTokenCollideAt(
+            activeMap.tokens,
+            pushX,
+            pushY,
+            defenderToken.size,
+            defenderToken.id,
+            true,
+            activeMap.terrainCells
+          );
+        const actuallyMoved = shoveSucceeded && !blockedByObstacle;
+
+        updateCampaign((prev) => ({
+          ...prev,
+          combat:
+            prev.combat.active && attackerCb
+              ? {
+                  ...prev.combat,
+                  combatants: prev.combat.combatants.map((cb) =>
+                    cb.id === attackerCb.id ? { ...cb, bonusActionAvailable: false } : cb
+                  ),
+                }
+              : prev.combat,
+          maps: actuallyMoved
+            ? prev.maps.map((m) =>
+                m.id !== activeMap.id
+                  ? m
+                  : {
+                      ...m,
+                      tokens: m.tokens.map((t) =>
+                        t.id === defenderToken.id ? { ...t, x: pushX, y: pushY } : t
+                      ),
+                    }
+              )
+            : prev.maps,
+        }));
+
+        playSyncedAbilitySfx({
+          explicitSfxPreset: shoveSucceeded ? 'shield' : 'sword',
+          title: 'Empurrar',
+        });
+        fireProjectileVfx({
+          fromToken: attackerToken,
+          toToken: defenderToken,
+          kind: 'slash',
+          title: 'Empurrar',
+        });
+        triggerSlashVfx(defenderToken.id, shoveSucceeded ? 'hit' : 'block');
+
+        const outcomeText = actuallyMoved
+          ? `EMPURRADO 1,5m! (FOR ${atkRoll.total} vs Defesa ${defRoll.total})`
+          : shoveSucceeded && blockedByObstacle
+            ? `VENCEU O TESTE (FOR ${atkRoll.total} vs ${defRoll.total}), mas há um obstáculo atrás de ${defenderToken.name}!`
+            : `RESISTIU AO EMPURRÃO! (FOR ${atkRoll.total} vs Defesa ${defRoll.total})`;
+
+        sendRoll({
+          rollerName: choice.attackerName,
+          rollerRole: roleRef.current,
+          rollerColor: choice.attackerColor,
+          title: `Empurrar (Força/Atletismo) → ${defenderToken.name}`,
+          formula: atkRoll.resolvedFormula,
+          individualRolls: atkRoll.individualRolls,
+          total: atkRoll.total,
+          isSecret: false,
+          details: outcomeText,
+        });
+        pushCombatLog({
+          category: 'attack',
+          actorName: choice.attackerName,
+          actorKind: char ? 'hero' : attackerToken.type === 'npc' ? 'npc' : 'monster',
+          actorColor: choice.attackerColor,
+          targetName: defenderToken.name,
+          targetKind:
+            defenderToken.type === 'character'
+              ? 'hero'
+              : defenderToken.type === 'npc'
+                ? 'npc'
+                : 'monster',
+          targetColor: defenderToken.color,
+          summary: actuallyMoved
+            ? `empurrou (${atkRoll.total} vs ${defRoll.total}) 1,5m para trás`
+            : `tentou empurrar (${atkRoll.total} vs ${defRoll.total})`,
+          detail: blockedByObstacle && shoveSucceeded ? 'Bloqueado por obstáculo' : undefined,
+        });
+        return;
+      }
+
+      const matchingAbilityDef = currCampaign.compendium.abilities.find(
+        (ab) => normalizeAbilityKey(ab.name) === normalizeAbilityKey(choice.actionTitle)
+      );
+      if (char) {
+        const usesCheck = checkAbilityUsesRemaining(char, matchingAbilityDef);
+        if (!usesCheck.ok) {
+          showTacticalAlert(usesCheck.error);
+          return;
+        }
+      }
+      const shouldSetConcentration = Boolean(
+        choice.requiresConcentration ?? matchingAbilityDef?.requiresConcentration
+      );
+      const isSingleTargetOnly = Boolean(
+        choice.singleTargetOnly ?? matchingAbilityDef?.singleTargetOnly
+      );
+      const resolvedSfxPreset = choice.sfxPreset || matchingAbilityDef?.sfxPreset;
+
+      void (async () => {
+        const conflict = await confirmAbilityConflictIfNeeded(char, {
+          abilityName: choice.actionTitle,
+          requiresConcentration: shouldSetConcentration,
+          singleTargetOnly: isSingleTargetOnly,
+          newTargetTokenId: defenderToken.id,
+          newTargetName: defenderToken.name,
+        });
+        if (!conflict.proceed) return;
+
+        const stats = char ? computeCharacterStats(char, currCampaign) : undefined;
+        const defenderCharId =
+          defenderToken.type === 'character' && defenderToken.referenceId
+            ? defenderToken.referenceId
+            : undefined;
+
+        const buildCasterTrackedEffect = (): ActiveTrackedAbilityEffect | null => {
+          if (!shouldSetConcentration && !isSingleTargetOnly) return null;
+          return {
+            abilityKey: normalizeAbilityKey(choice.actionTitle),
+            abilityName: choice.actionTitle,
+            conditionId: choice.applyConditionId,
+            targetTokenIds: [defenderToken.id],
+            targetCharacterIds: defenderCharId ? [defenderCharId] : [],
+            targetNames: [defenderToken.name],
+            isConcentration: shouldSetConcentration,
+            singleTargetOnly: isSingleTargetOnly,
+          };
+        };
+
+        // 4A. Single-Target Saving Throw Ability (e.g., Imobilizar Pessoa, Maldição) — no attack roll vs AC, target must roll Save!
+        const isSingleTargetSaveAction = Boolean(
+          !isHealingAction &&
+            choice.saveSkillId &&
+            (!choice.attackFormula || !choice.attackFormula.trim())
+        );
+        if (isSingleTargetSaveAction && choice.saveSkillId) {
+          const saveSkill = currCampaign.compendium.skills.find((s) => s.id === choice.saveSkillId);
+          const dcVal = choice.saveDcFormula
+            ? Math.max(5, evaluateFormula(choice.saveDcFormula, stats, char).total)
+            : 12;
+          updateCampaign((prev) => {
+            const base = char
+              ? removeTrackedEffectsFromState(prev, char.id, conflict.effectsToClear)
+              : prev;
+            return {
+              ...base,
+              characters: base.characters.map((c) => {
+                if (!char || c.id !== char.id) return c;
+                const res = deductCharacterResource(
+                  c,
+                  choice.costMp,
+                  choice.costResourceId,
+                  base.compendium.customResources
+                );
+                return {
+                  ...c,
+                  ...res,
+                  abilityUsesRemaining: decrementAbilityUse(c, matchingAbilityDef),
+                  ...(shouldSetConcentration ? { concentratingSpell: choice.actionTitle } : {}),
+                };
+              }),
+              combat:
+                base.combat.active && attackerCb && (actionCost !== 'Livre' || shouldSetConcentration)
+                  ? {
+                      ...base.combat,
+                      combatants: base.combat.combatants.map((cb) =>
+                        cb.id !== attackerCb.id
+                          ? cb
+                          : {
+                              ...cb,
+                              actionAvailable: actionCost === 'Padrão' ? false : cb.actionAvailable,
+                              bonusActionAvailable:
+                                actionCost === 'Bônus' ? false : cb.bonusActionAvailable,
+                              reactionAvailable:
+                                actionCost === 'Reação' ? false : cb.reactionAvailable,
+                              ...(shouldSetConcentration
+                                ? { concentratingSpell: choice.actionTitle }
+                                : {}),
+                            }
+                      ),
+                    }
+                  : base.combat,
+            };
+          });
+          playSyncedAbilitySfx({
+            explicitSfxPreset: resolvedSfxPreset,
+            title: choice.actionTitle,
+            damageType: choice.damageType,
+            range: choice.range,
+            applyConditionId: choice.applyConditionId,
+          });
+          fireProjectileVfx({
+            fromToken: attackerToken,
+            toToken: defenderToken,
+            title: choice.actionTitle,
+            damageType: choice.damageType,
+            applyConditionId: choice.applyConditionId,
+            range: choice.range,
+          });
+          pushCombatLog({
+            category: 'spell',
+            actorName: choice.attackerName,
+            actorKind: char ? 'hero' : attackerToken?.type === 'npc' ? 'npc' : 'monster',
+            actorColor: choice.attackerColor,
+            targetName: defenderToken.name,
+            targetKind:
+              defenderToken.type === 'character'
+                ? 'hero'
+                : defenderToken.type === 'npc'
+                  ? 'npc'
+                  : 'monster',
+            targetColor: defenderToken.color,
+            summary: `conjurou ${choice.actionTitle} — ${defenderToken.name} precisa rolar ${saveSkill?.name || 'Salvaguarda'} (CD ${dcVal})!`,
+          });
+          window.setTimeout(() => {
+            startTacticalSavePromptRef.current?.({
+              kind: 'aoe',
+              title: choice.actionTitle,
+              subtitle: `Alvo: ${defenderToken.name}`,
+              saveSkillId: choice.saveSkillId!,
+              saveLabel: saveSkill?.name || 'Salvaguarda',
+              dc: dcVal,
+              damageFormula: choice.damageFormula
+                ? formatFormulaForDisplay(choice.damageFormula, stats, char)
+                : '',
+              damageType: choice.damageType || undefined,
+              halfOnSuccess: Boolean(choice.damageFormula),
+              applyConditionId: choice.applyConditionId,
+              conditionDurationRounds: choice.conditionDurationRounds,
+              casterCharacterId: char?.id,
+              casterName: choice.attackerName,
+              requiresConcentration: shouldSetConcentration,
+              singleTargetOnly: isSingleTargetOnly,
+              tokens: [defenderToken],
+            });
+          }, 80);
+          return;
+        }
+
+        // 4B. Condition-Only Skill (e.g., Bênção, Velocidade): skip AC roll/damage, apply condition directly to target token (works for self, allies, NPCs, monsters!)
+        if (isConditionOnlyAction && choice.applyConditionId) {
+          const condId = choice.applyConditionId;
+          const condDef = currCampaign.compendium.conditions.find((c) => c.id === condId);
+          const trackedEntry = buildCasterTrackedEffect();
+          updateCampaign((prev) => {
+            const base = char
+              ? removeTrackedEffectsFromState(prev, char.id, conflict.effectsToClear)
+              : prev;
+            return {
+              ...base,
+              characters: base.characters.map((c) => {
+                let next = c;
+                if (char && c.id === char.id) {
+                  const res = deductCharacterResource(
+                    next,
+                    choice.costMp,
+                    choice.costResourceId,
+                    base.compendium.customResources
+                  );
+                  next = {
+                    ...next,
+                    ...res,
+                    abilityUsesRemaining: decrementAbilityUse(next, matchingAbilityDef),
+                    ...(shouldSetConcentration ? { concentratingSpell: choice.actionTitle } : {}),
+                  };
+                  if (trackedEntry) {
+                    next = upsertTrackedEffectOnCharacter(next, trackedEntry);
+                  }
+                }
+                if (
+                  defenderToken.type === 'character' &&
+                  defenderToken.referenceId === c.id &&
+                  !next.activeConditionIds.includes(condId)
+                ) {
+                  next = { ...next, activeConditionIds: [...next.activeConditionIds, condId] };
+                }
+                return next;
+              }),
+              maps: base.maps.map((m) =>
+                m.id !== base.activeMapId
+                  ? m
+                  : {
+                      ...m,
+                      tokens: m.tokens.map((t) => {
+                        if (t.id !== defenderToken.id) return t;
+                        if ((t.activeConditionIds || []).includes(condId)) return t;
+                        return {
+                          ...t,
+                          activeConditionIds: [...(t.activeConditionIds || []), condId],
+                        };
+                      }),
+                    }
+              ),
+              combat: base.combat.active
+                ? {
+                    ...base.combat,
+                    combatants: base.combat.combatants.map((cb) => {
+                      let nextCb = cb;
+                      if (attackerCb && cb.id === attackerCb.id) {
+                        nextCb = {
+                          ...nextCb,
+                          actionAvailable: actionCost === 'Padrão' ? false : nextCb.actionAvailable,
+                          bonusActionAvailable:
+                            actionCost === 'Bônus' ? false : nextCb.bonusActionAvailable,
+                          reactionAvailable:
+                            actionCost === 'Reação' ? false : nextCb.reactionAvailable,
+                          ...(shouldSetConcentration
+                            ? { concentratingSpell: choice.actionTitle }
+                            : {}),
+                        };
+                      }
+                      if (cb.tokenId === defenderToken.id && condDef) {
+                        nextCb = {
+                          ...nextCb,
+                          effects: [
+                            ...nextCb.effects.filter((ef) => ef.conditionId !== condId),
+                            {
+                              id: `eff-${Date.now()}`,
+                              label: condDef.name,
+                              conditionId: condId,
+                              remainingRounds: choice.conditionDurationRounds || 3,
+                              sourceName: choice.attackerName,
+                            },
+                          ],
+                        };
+                      }
+                      return nextCb;
+                    }),
+                  }
+                : base.combat,
+            };
+          });
+          playSyncedAbilitySfx({
+            explicitSfxPreset: resolvedSfxPreset,
+            title: choice.actionTitle,
+            damageType: choice.damageType,
+            range: choice.range,
+            applyConditionId: condId,
+          });
+          pushCombatLog({
+            category: 'condition',
+            actorName: choice.attackerName,
+            actorKind: char ? 'hero' : attackerToken?.type === 'npc' ? 'npc' : 'monster',
+            actorColor: choice.attackerColor,
+            targetName: defenderToken.name,
+            targetKind:
+              defenderToken.type === 'character'
+                ? 'hero'
+                : defenderToken.type === 'npc'
+                  ? 'npc'
+                  : 'monster',
+            targetColor: defenderToken.color,
+            summary: `usou ${choice.actionTitle}${shouldSetConcentration ? ' (Concentração)' : ''} e aplicou ${condDef?.icon || ''} ${condDef?.name || 'Condição'} em`,
+          });
+          return;
+        }
+
+        // 4C. Guaranteed Direct Healing: never roll vs AC / never miss! Roll ONLY the healing dice & heal target directly.
+        if (isHealingAction) {
+          const healFormula = choice.damageFormula?.trim() || '1d8';
+          const healRoll = evaluateFormula(healFormula, stats, char);
+          const healAmount = Math.max(1, healRoll.total);
+          const trackedEntry = choice.applyConditionId ? buildCasterTrackedEffect() : null;
+
+          if (
+            (choice.costMp && choice.costMp > 0 && char) ||
+            (combat.active && attackerCb && (actionCost !== 'Livre' || shouldSetConcentration)) ||
+            shouldSetConcentration ||
+            conflict.effectsToClear.length > 0 ||
+            trackedEntry
+          ) {
+            updateCampaign((prev) => {
+              const base = char
+                ? removeTrackedEffectsFromState(prev, char.id, conflict.effectsToClear)
+                : prev;
+              return {
+                ...base,
+                characters: base.characters.map((c) => {
+                  if (!char || c.id !== char.id) return c;
+                  const res = deductCharacterResource(
+                    c,
+                    choice.costMp,
+                    choice.costResourceId,
+                    base.compendium.customResources
+                  );
+                  let next: Character = {
+                    ...c,
+                    ...res,
+                    abilityUsesRemaining: decrementAbilityUse(c, matchingAbilityDef),
+                    ...(shouldSetConcentration ? { concentratingSpell: choice.actionTitle } : {}),
+                  };
+                  if (trackedEntry) {
+                    next = upsertTrackedEffectOnCharacter(next, trackedEntry);
+                  }
+                  return next;
+                }),
+                combat:
+                  base.combat.active && attackerCb && (actionCost !== 'Livre' || shouldSetConcentration)
+                    ? {
+                        ...base.combat,
+                        combatants: base.combat.combatants.map((cb) => {
+                          if (cb.id !== attackerCb.id) return cb;
+                          return {
+                            ...cb,
+                            actionAvailable: actionCost === 'Padrão' ? false : cb.actionAvailable,
+                            bonusActionAvailable:
+                              actionCost === 'Bônus' ? false : cb.bonusActionAvailable,
+                            reactionAvailable:
+                              actionCost === 'Reação' ? false : cb.reactionAvailable,
+                            ...(shouldSetConcentration
+                              ? { concentratingSpell: choice.actionTitle }
+                              : {}),
+                          };
+                        }),
+                      }
+                    : base.combat,
+              };
+            });
+          }
+
+          window.setTimeout(() => {
+            applyDamage(
+              defenderToken.id,
+              healAmount,
+              true,
+              undefined,
+              'Cura',
+              choice.applyConditionId
+            );
+            triggerSlashVfx(defenderToken.id, 'heal');
+          }, 80);
+          playSyncedAbilitySfx({
+            explicitSfxPreset: resolvedSfxPreset,
+            title: choice.actionTitle,
+            damageType: 'Cura',
+            range: choice.range,
+            applyConditionId: choice.applyConditionId,
+          });
+          fireProjectileVfx({
+            fromToken: attackerToken,
+            toToken: defenderToken,
+            title: choice.actionTitle,
+            damageType: 'Cura',
+            kind: 'heal',
+          });
+          recordCombatStat(choice.attackerName, choice.attackerColor, { healing: healAmount });
+          sendRoll({
+            rollerName: choice.attackerName,
+            rollerRole: roleRef.current,
+            title: `${choice.actionTitle} → ${defenderToken.name}`,
+            formula: healRoll.resolvedFormula,
+            total: healAmount,
+            individualRolls: healRoll.individualRolls,
+            damageTotal: healAmount,
+            damageType: 'Cura',
+            targetName: defenderToken.name,
+            targetTokenId: defenderToken.id,
+            isSecret: false,
+            details: `Cura garantida (sem teste de CA): +${healAmount} PV • ${healRoll.details}`,
+            isCrit: false,
+            isFumble: false,
+          });
+          return;
+        }
+
       const defenderChar =
         defenderToken.type === 'character' && defenderToken.referenceId
           ? currCampaign.characters.find((c) => c.id === defenderToken.referenceId)
@@ -2676,39 +4705,57 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ? [...tacticalMods.summaryBadges, losResult.coverLabel]
         : tacticalMods.summaryBadges;
 
-      updateCampaign((prev) => ({
-        ...prev,
-        characters: prev.characters.map((c) => {
-          if (!char || c.id !== char.id) return c;
-          const nextMp =
-            choice.costMp && choice.costMp > 0 ? Math.max(0, c.mp - choice.costMp) : c.mp;
-          const clearGmOverride = Boolean(tacticalMods.gmOverrideUsed);
-          if (nextMp === c.mp && !clearGmOverride) return c;
-          return {
-            ...c,
-            mp: nextMp,
-            nextAttackRollOverride: clearGmOverride ? null : c.nextAttackRollOverride,
-          };
-        }),
-        combat:
-          prev.combat.active && attackerCb && actionCost !== 'Livre'
-            ? {
-                ...prev.combat,
-                combatants: prev.combat.combatants.map((cb) =>
-                  cb.id !== attackerCb.id
-                    ? cb
-                    : {
-                        ...cb,
-                        actionAvailable: actionCost === 'Padrão' ? false : cb.actionAvailable,
-                        bonusActionAvailable:
-                          actionCost === 'Bônus' ? false : cb.bonusActionAvailable,
-                        reactionAvailable:
-                          actionCost === 'Reação' ? false : cb.reactionAvailable,
-                      }
-                ),
-              }
-            : prev.combat,
-      }));
+      const trackedEntry = buildCasterTrackedEffect();
+      updateCampaign((prev) => {
+        const base = char
+          ? removeTrackedEffectsFromState(prev, char.id, conflict.effectsToClear)
+          : prev;
+        return {
+          ...base,
+          characters: base.characters.map((c) => {
+            if (!char || c.id !== char.id) return c;
+            const res = deductCharacterResource(
+              c,
+              choice.costMp,
+              choice.costResourceId,
+              base.compendium.customResources
+            );
+            const clearGmOverride = Boolean(tacticalMods.gmOverrideUsed);
+            let next: Character = {
+              ...c,
+              ...res,
+              abilityUsesRemaining: decrementAbilityUse(c, matchingAbilityDef),
+              nextAttackRollOverride: clearGmOverride ? null : c.nextAttackRollOverride,
+              ...(shouldSetConcentration ? { concentratingSpell: choice.actionTitle } : {}),
+            };
+            if (trackedEntry) {
+              next = upsertTrackedEffectOnCharacter(next, trackedEntry);
+            }
+            return next;
+          }),
+          combat:
+            base.combat.active && attackerCb && (actionCost !== 'Livre' || shouldSetConcentration)
+              ? {
+                  ...base.combat,
+                  combatants: base.combat.combatants.map((cb) =>
+                    cb.id !== attackerCb.id
+                      ? cb
+                      : {
+                          ...cb,
+                          actionAvailable: actionCost === 'Padrão' ? false : cb.actionAvailable,
+                          bonusActionAvailable:
+                            actionCost === 'Bônus' ? false : cb.bonusActionAvailable,
+                          reactionAvailable:
+                            actionCost === 'Reação' ? false : cb.reactionAvailable,
+                          ...(shouldSetConcentration
+                            ? { concentratingSpell: choice.actionTitle }
+                            : {}),
+                        }
+                  ),
+                }
+              : base.combat,
+        };
+      });
 
       const hasAttackRoll = Boolean(choice.attackFormula && choice.attackFormula.trim());
       const previewAttackDice = hasAttackRoll
@@ -2736,6 +4783,8 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         defenderMaxHp: defenderToken.maxHp,
         actionTitle: choice.actionTitle,
         diceSkin: choice.diceSkin,
+        applyConditionId: choice.applyConditionId,
+        sfxPreset: resolvedSfxPreset,
         rawAttackFormula: hasAttackRoll ? choice.attackFormula : undefined,
         attackFormula: displayAtkFormula,
         attackRolledDice: previewAttackDice,
@@ -2753,8 +4802,9 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       activeDuelRef.current = duel;
       emitDuelState(duel);
+      })();
     },
-    [advantageMode, emitDuelState, showTacticalAlert, triggerOpportunityPrompt, updateCampaign]
+    [advantageMode, applyDamage, emitDuelState, playSyncedAbilitySfx, pushCombatLog, sendRoll, showTacticalAlert, triggerOpportunityPrompt, triggerSlashVfx, updateCampaign]
   );
 
   const rollDuelAttack = useCallback(() => {
@@ -2779,10 +4829,38 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       attackRes.isCrit || (!attackRes.isFumble && attackRes.total >= duel.defenderDefense);
     const effectiveIsCrit = Boolean(attackRes.isCrit || (hitSuccess && duel.autoCritOnHit));
 
+    // BG3 Reaction Check: can defender use Escudo Arcano (+5 CA) to turn this hit into a miss?
+    const activeMapForDef = currCampaign.maps.find((m) => m.id === currCampaign.activeMapId);
+    const defTok = activeMapForDef?.tokens.find((t) => t.id === duel.defenderTokenId);
+    const defChar =
+      defTok?.type === 'character' && defTok.referenceId
+        ? currCampaign.characters.find((c) => c.id === defTok.referenceId)
+        : undefined;
+    const defCb = currCampaign.combat.active
+      ? currCampaign.combat.combatants.find((cb) => cb.tokenId === duel.defenderTokenId)
+      : undefined;
+    const defKnowsShield = Boolean(
+      defChar &&
+        (defChar.knownAbilityIds.some((id) => {
+          const ab = currCampaign.compendium.abilities.find((a) => a.id === id);
+          return ab && ab.actionType === 'Reação' && /escudo/i.test(ab.name);
+        }) ||
+          defChar.customAbilities.some((ab) => ab.actionType === 'Reação' && /escudo/i.test(ab.name)))
+    );
+    const defenderCanShieldReaction = Boolean(
+      hitSuccess &&
+        !attackRes.isCrit &&
+        defChar &&
+        defKnowsShield &&
+        defChar.mp >= 1 &&
+        (!defCb || defCb.reactionAvailable !== false)
+    );
+
     const rollingDuel: CombatDuelState = {
       ...duel,
       attackFormula: attackRes.resolvedFormula,
       attackRolledDice: attackRes.rolledDice,
+      defenderCanShieldReaction,
       attackTotal: attackRes.total,
       d20Natural: attackRes.d20Natural,
       isCrit: effectiveIsCrit,
@@ -2828,13 +4906,12 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (activeDuelRef.current?.id === rollingDuel.id) {
         emitDuelState({ ...rollingDuel, phase: 'attack-result' });
       }
-      if (!hitSuccess) {
-        triggerSlashVfx(duel.defenderTokenId, 'block');
-      } else {
-        soundEngine.playSfxPreset('sword');
+      if (effectiveIsCrit) {
+        recordCombatStat(duel.attackerName, duel.attackerColor, { crits: 1 });
       }
+      soundEngine.playSfxPreset(hitSuccess ? 'sword' : 'shield');
     }, 680);
-  }, [emitDuelState, sendRoll, triggerSlashVfx]);
+  }, [emitDuelState, recordCombatStat, sendRoll]);
 
   const rollDuelDamage = useCallback(() => {
     const duel = activeDuelRef.current;
@@ -2854,6 +4931,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ...duel,
       damageRolledDice: dmgRes.rolledDice,
       damageTotal: dmgTotal,
+      damageApplied: false,
       phase: 'rolling-damage',
     };
     emitDuelState(nextDuel);
@@ -2861,12 +4939,8 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     window.setTimeout(() => {
       if (activeDuelRef.current?.id === nextDuel.id) {
-        emitDuelState({ ...nextDuel, phase: 'damage-result', damageApplied: true });
+        emitDuelState({ ...nextDuel, phase: 'damage-result', damageApplied: false });
       }
-      applyDamage(duel.defenderTokenId, dmgTotal, isHealing, undefined, duel.damageType);
-      triggerSlashVfx(duel.defenderTokenId, isHealing ? 'heal' : 'hit');
-      soundEngine.playSfxPreset(isHealing ? 'heal' : duel.damageType?.toLowerCase().includes('fogo') ? 'fireball' : 'sword');
-
       sendRoll({
         rollerName: duel.attackerName,
         rollerRole: roleRef.current,
@@ -2882,20 +4956,159 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         targetName: duel.defenderName,
         targetTokenId: duel.defenderTokenId,
         isSecret: false,
-        details: `${dmgTotal} de ${duel.damageType || 'Dano'} aplicado automaticamente em ${duel.defenderName}!`,
+        details: `${dmgTotal} de ${duel.damageType || 'Dano'} rolado contra ${duel.defenderName}.`,
         applied: true,
       });
     }, 680);
-  }, [applyDamage, emitDuelState, sendRoll, triggerSlashVfx]);
+  }, [emitDuelState, sendRoll]);
 
   const advanceDuelPhase = useCallback((phase: CombatDuelState['phase']) => {
     setActiveDuel((curr) => (curr ? { ...curr, phase } : null));
   }, []);
 
   const dismissDuel = useCallback(() => {
+    const duel = activeDuelRef.current;
     emitDuelState(null);
     setTargetTokenId(null);
-  }, [emitDuelState]);
+    if (!duel || lastDispatchedDuelIdRef.current === duel.id) return;
+    lastDispatchedDuelIdRef.current = duel.id;
+
+    const currCampaign = campaignRef.current;
+    const curMap = currCampaign.maps.find((m) => m.id === currCampaign.activeMapId);
+    const defTok = curMap?.tokens.find((t) => t.id === duel.defenderTokenId);
+    const atkTok = curMap?.tokens.find(
+      (t) =>
+        (duel.attackerCharacterId &&
+          t.type === 'character' &&
+          t.referenceId === duel.attackerCharacterId) ||
+        t.name === duel.attackerName
+    );
+    const isHealing = duel.damageType?.toLowerCase() === 'cura';
+
+    // Case 1: Damage / Healing rolled — close modal first, fly projectile across unobstructed map, then apply damage & combo at exact impact!
+    if (
+      duel.phase === 'damage-result' &&
+      duel.damageTotal &&
+      duel.damageTotal > 0 &&
+      !duel.damageApplied
+    ) {
+      const dmgTotal = duel.damageTotal;
+      window.setTimeout(() => {
+        if (defTok) {
+          fireProjectileVfx({
+            fromToken: atkTok,
+            toToken: defTok,
+            title: duel.actionTitle,
+            damageType: duel.damageType,
+            applyConditionId: duel.applyConditionId,
+            isCrit: duel.isCrit,
+          });
+        }
+        playSyncedAbilitySfx({
+          explicitSfxPreset: duel.sfxPreset,
+          title: duel.actionTitle,
+          damageType: duel.damageType,
+          applyConditionId: duel.applyConditionId,
+          isAttack: !isHealing,
+        });
+
+        // Apply HP damage + slash VFX + elemental combo right when the projectile hits the target!
+        window.setTimeout(() => {
+          applyDamage(
+            duel.defenderTokenId,
+            dmgTotal,
+            isHealing,
+            undefined,
+            duel.damageType,
+            duel.applyConditionId
+          );
+          recordCombatStat(
+            duel.attackerName,
+            duel.attackerColor,
+            isHealing ? { healing: dmgTotal } : { damage: dmgTotal }
+          );
+          triggerSlashVfx(duel.defenderTokenId, isHealing ? 'heal' : 'hit');
+
+          if (!isHealing && duel.damageType && defTok) {
+            const sz = Math.max(1, defTok.size || 1);
+            const seedCells: Array<{ x: number; y: number }> = [];
+            for (let dx = 0; dx < sz; dx++) {
+              for (let dy = 0; dy < sz; dy++) {
+                seedCells.push({ x: Math.floor(defTok.x) + dx, y: Math.floor(defTok.y) + dy });
+              }
+            }
+            window.setTimeout(() => {
+              triggerElementalComboAtCells(
+                seedCells,
+                duel.damageType,
+                duel.attackerName,
+                duel.attackerColor
+              );
+            }, 240);
+          }
+        }, 360);
+      }, 90);
+      return;
+    }
+
+    // Case 2: Attack missed — close modal, fly projectile and show blue Shield Block VFX on map!
+    if (duel.phase === 'attack-result' && !duel.hitSuccess && defTok) {
+      window.setTimeout(() => {
+        fireProjectileVfx({
+          fromToken: atkTok,
+          toToken: defTok,
+          title: duel.actionTitle,
+          damageType: duel.damageType,
+          applyConditionId: duel.applyConditionId,
+          isCrit: false,
+        });
+        window.setTimeout(() => {
+          triggerSlashVfx(duel.defenderTokenId, 'block');
+          playSyncedAbilitySfx({ explicitSfxPreset: 'shield', title: 'Bloqueado' });
+        }, 360);
+      }, 90);
+      return;
+    }
+
+    // Case 3: Attack hit with NO damage formula (utility/condition hit) — fly projectile and apply condition on impact!
+    if (
+      duel.phase === 'attack-result' &&
+      duel.hitSuccess &&
+      !duel.damageFormula &&
+      defTok
+    ) {
+      window.setTimeout(() => {
+        fireProjectileVfx({
+          fromToken: atkTok,
+          toToken: defTok,
+          title: duel.actionTitle,
+          damageType: duel.damageType,
+          applyConditionId: duel.applyConditionId,
+          isCrit: duel.isCrit,
+        });
+        playSyncedAbilitySfx({
+          explicitSfxPreset: duel.sfxPreset,
+          title: duel.actionTitle,
+          damageType: duel.damageType,
+          applyConditionId: duel.applyConditionId,
+        });
+        if (duel.applyConditionId) {
+          window.setTimeout(() => {
+            applyDamage(duel.defenderTokenId, 0, false, undefined, undefined, duel.applyConditionId);
+            triggerSlashVfx(duel.defenderTokenId, 'hit');
+          }, 360);
+        }
+      }, 90);
+    }
+  }, [
+    applyDamage,
+    emitDuelState,
+    fireProjectileVfx,
+    playSyncedAbilitySfx,
+    recordCombatStat,
+    triggerElementalComboAtCells,
+    triggerSlashVfx,
+  ]);
 
   const deleteCharacter = useCallback(
     (characterId: string) => {
@@ -3007,6 +5220,22 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               : `Falha contra a Morte (${nextFail}/3).`;
           }
 
+          const nextDeathPayload: Character['deathSaves'] = {
+            successes: nextSucc,
+            failures: nextFail,
+            stabilized: nextStabilized,
+            dead: nextDead,
+            assistedBy: undefined,
+          };
+
+          if (socketRef.current?.connected) {
+            socketRef.current.emit('character:deathSave', {
+              characterId: liveChar.id,
+              hp: nextHp,
+              deathSaves: nextDeathPayload,
+            });
+          }
+
           updateCampaign((prev) => ({
             ...prev,
             characters: prev.characters.map((c) =>
@@ -3015,13 +5244,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 : {
                     ...c,
                     hp: nextHp,
-                    deathSaves: {
-                      successes: nextSucc,
-                      failures: nextFail,
-                      stabilized: nextStabilized,
-                      dead: nextDead,
-                      assistedBy: undefined,
-                    },
+                    deathSaves: nextDeathPayload,
                   }
             ),
             maps:
@@ -3077,6 +5300,60 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
     },
     [openManualRoll, sendRoll, showTacticalAlert, triggerSlashVfx, updateCampaign]
+  );
+
+  const setDeathSaveManual = useCallback(
+    (
+      characterId: string,
+      patch: Partial<Character['deathSaves']> & { hp?: number }
+    ) => {
+      const camp = campaignRef.current;
+      const char = camp.characters.find((c) => c.id === characterId);
+      if (!char) return;
+      const prevDs = char.deathSaves || { successes: 0, failures: 0 };
+      const nextSucc = Math.max(0, Math.min(3, patch.successes ?? prevDs.successes ?? 0));
+      const nextFail = Math.max(0, Math.min(3, patch.failures ?? prevDs.failures ?? 0));
+      const nextDead = patch.dead !== undefined ? patch.dead : nextFail >= 3;
+      const nextStabilized =
+        patch.stabilized !== undefined ? patch.stabilized : !nextDead && nextSucc >= 3;
+      const nextHp = patch.hp !== undefined ? Math.max(0, patch.hp) : char.hp;
+
+      const nextDeathPayload: Character['deathSaves'] = {
+        successes: nextHp > 0 ? 0 : nextSucc,
+        failures: nextHp > 0 ? 0 : nextFail,
+        stabilized: nextHp > 0 ? false : nextStabilized,
+        dead: nextHp > 0 ? false : nextDead,
+        assistedBy: patch.assistedBy !== undefined ? patch.assistedBy : prevDs.assistedBy,
+      };
+
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('character:deathSave', {
+          characterId: char.id,
+          hp: nextHp,
+          deathSaves: nextDeathPayload,
+        });
+      }
+
+      updateCampaign((prev) => ({
+        ...prev,
+        characters: prev.characters.map((c) =>
+          c.id !== char.id ? c : { ...c, hp: nextHp, deathSaves: nextDeathPayload }
+        ),
+        maps: prev.maps.map((m) => ({
+          ...m,
+          tokens: m.tokens.map((t) =>
+            t.type === 'character' && t.referenceId === char.id ? { ...t, hp: nextHp } : t
+          ),
+        })),
+        combat: {
+          ...prev.combat,
+          combatants: prev.combat.combatants.map((cb) =>
+            cb.type === 'character' && cb.referenceId === char.id ? { ...cb, hp: nextHp } : cb
+          ),
+        },
+      }));
+    },
+    [updateCampaign]
   );
 
   const assistDeathSave = useCallback(
@@ -3253,6 +5530,14 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         dead: false,
         assistedBy: undefined,
       };
+
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('character:deathSave', {
+          characterId: char.id,
+          hp: nextHp,
+          deathSaves: nextDeathSaves,
+        });
+      }
 
       updateCampaign((prev) => ({
         ...prev,
@@ -3467,6 +5752,9 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           if (saveSkillId === 'fortitude' || saveSkillId === 'con') return st.attributes['con']?.mod ?? 0;
           if (saveSkillId === 'reflexos' || saveSkillId === 'des') return st.attributes['des']?.mod ?? 0;
           if (saveSkillId === 'vontade' || saveSkillId === 'sab') return st.attributes['sab']?.mod ?? 0;
+          if (saveSkillId === 'salv-forca' || saveSkillId === 'for') return st.attributes['for']?.mod ?? 0;
+          if (saveSkillId === 'salv-inteligencia' || saveSkillId === 'int') return st.attributes['int']?.mod ?? 0;
+          if (saveSkillId === 'salv-carisma' || saveSkillId === 'car') return st.attributes['car']?.mod ?? 0;
           return 0;
         }
       }
@@ -3476,6 +5764,12 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           if (saveSkillId === 'fortitude' || saveSkillId === 'con') return mon.saves.fort;
           if (saveSkillId === 'reflexos' || saveSkillId === 'des') return mon.saves.ref;
           if (saveSkillId === 'vontade' || saveSkillId === 'sab') return mon.saves.von;
+          if (saveSkillId === 'salv-forca' || saveSkillId === 'for')
+            return mon.saves.for ?? Math.floor(((mon.attributes['for'] ?? 10) - 10) / 2);
+          if (saveSkillId === 'salv-inteligencia' || saveSkillId === 'int')
+            return mon.saves.int ?? Math.floor(((mon.attributes['int'] ?? 10) - 10) / 2);
+          if (saveSkillId === 'salv-carisma' || saveSkillId === 'car')
+            return mon.saves.car ?? Math.floor(((mon.attributes['car'] ?? 10) - 10) / 2);
         }
       }
       return 0;
@@ -3485,20 +5779,47 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const setCharacterConcentration = useCallback(
     (characterId: string, spellName: string | null) => {
-      updateCampaign((prev) => ({
-        ...prev,
-        characters: prev.characters.map((c) =>
-          c.id === characterId ? { ...c, concentratingSpell: spellName } : c
-        ),
-        combat: {
-          ...prev.combat,
-          combatants: prev.combat.combatants.map((cb) =>
-            cb.referenceId === characterId ? { ...cb, concentratingSpell: spellName } : cb
+      const currChar = campaignRef.current.characters.find((c) => c.id === characterId);
+      const prevSpell = currChar?.concentratingSpell || null;
+      const concEffectsToClear =
+        spellName === null
+          ? (currChar?.activeTrackedEffects || []).filter((e) => e.isConcentration)
+          : [];
+
+      updateCampaign((prev) => {
+        const base =
+          concEffectsToClear.length > 0
+            ? removeTrackedEffectsFromState(prev, characterId, concEffectsToClear)
+            : prev;
+        return {
+          ...base,
+          characters: base.characters.map((c) =>
+            c.id === characterId ? { ...c, concentratingSpell: spellName } : c
           ),
-        },
-      }));
+          combat: {
+            ...base.combat,
+            combatants: base.combat.combatants.map((cb) =>
+              cb.referenceId === characterId ? { ...cb, concentratingSpell: spellName } : cb
+            ),
+          },
+        };
+      });
+
+      if (spellName === null && prevSpell && currChar) {
+        const affectedNames = concEffectsToClear.flatMap((e) => e.targetNames).filter(Boolean);
+        pushCombatLog({
+          category: 'condition',
+          actorName: currChar.name,
+          actorKind: 'hero',
+          actorColor: currChar.playerColor || currChar.tokenColor,
+          summary:
+            affectedNames.length > 0
+              ? `encerrou concentração em ${prevSpell} — efeito removido de ${affectedNames.join(', ')}`
+              : `encerrou concentração em ${prevSpell}`,
+        });
+      }
     },
-    [updateCampaign]
+    [pushCombatLog, updateCampaign]
   );
 
   const startTacticalSavePrompt = useCallback(
@@ -3512,6 +5833,12 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       damageFormula?: string;
       damageType?: string;
       halfOnSuccess?: boolean;
+      applyConditionId?: string;
+      conditionDurationRounds?: number;
+      casterCharacterId?: string;
+      casterName?: string;
+      requiresConcentration?: boolean;
+      singleTargetOnly?: boolean;
       tokens: MapToken[];
     }) => {
       if (params.tokens.length === 0) return;
@@ -3519,6 +5846,10 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         params.damageFormula && params.damageFormula.trim()
           ? Math.max(1, evaluateFormula(params.damageFormula).total)
           : 0;
+
+      const autoApplyTargets: Array<{ tokenId: string; dmg: number; applyCond: boolean }> = [];
+      const failedAutoTokens: MapToken[] = [];
+      const shouldAutoApplyKind = params.kind === 'aoe' || params.kind === 'trap';
 
       const entries: TacticalSaveTargetEntry[] = params.tokens.map((tok) => {
         const isMonsterOrNpc = tok.type !== 'character';
@@ -3535,6 +5866,14 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   : 0
                 : rawDamage
               : 0;
+          const applyCond = Boolean(!passed && params.applyConditionId);
+          const willAutoApply = shouldAutoApplyKind && (dmg > 0 || applyCond);
+          if (willAutoApply) {
+            autoApplyTargets.push({ tokenId: tok.id, dmg, applyCond });
+          }
+          if (applyCond) {
+            failedAutoTokens.push(tok);
+          }
           return {
             tokenId: tok.id,
             characterId: tok.type === 'character' ? tok.referenceId : undefined,
@@ -3547,7 +5886,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             bonus,
             total,
             damageToApply: dmg,
-            applied: false,
+            applied: willAutoApply,
           };
         }
 
@@ -3577,13 +5916,70 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         damageType: params.damageType,
         halfOnSuccess: params.halfOnSuccess,
         rolledRawDamage: rawDamage,
+        applyConditionId: params.applyConditionId,
+        conditionDurationRounds: params.conditionDurationRounds,
+        casterCharacterId: params.casterCharacterId,
+        casterName: params.casterName,
+        requiresConcentration: params.requiresConcentration,
+        singleTargetOnly: params.singleTargetOnly,
         targets: entries,
       };
       emitSavePromptState(prompt);
       soundEngine.playSfxPreset(params.kind === 'trap' ? 'sword' : 'dice');
+
+      if (
+        failedAutoTokens.length > 0 &&
+        params.casterCharacterId &&
+        params.applyConditionId &&
+        (params.requiresConcentration || params.singleTargetOnly)
+      ) {
+        updateCampaign((prev) => ({
+          ...prev,
+          characters: prev.characters.map((c) => {
+            if (c.id !== params.casterCharacterId) return c;
+            return upsertTrackedEffectOnCharacter(c, {
+              abilityKey: normalizeAbilityKey(params.title),
+              abilityName: params.title,
+              conditionId: params.applyConditionId,
+              targetTokenIds: failedAutoTokens.map((t) => t.id),
+              targetCharacterIds: failedAutoTokens
+                .filter((t) => t.type === 'character' && t.referenceId)
+                .map((t) => t.referenceId!),
+              targetNames: failedAutoTokens.map((t) => t.name),
+              isConcentration: params.requiresConcentration,
+              singleTargetOnly: params.singleTargetOnly,
+            });
+          }),
+        }));
+      }
+
+      if (autoApplyTargets.length > 0) {
+        if (params.casterName) {
+          const totalAutoDmg = autoApplyTargets.reduce((sum, x) => sum + x.dmg, 0);
+          if (totalAutoDmg > 0) {
+            recordCombatStat(params.casterName, '#e0b84c', { damage: totalAutoDmg });
+          }
+        }
+        window.setTimeout(() => {
+          autoApplyTargets.forEach(({ tokenId, dmg, applyCond }) => {
+            applyDamage(
+              tokenId,
+              dmg,
+              false,
+              undefined,
+              params.damageType,
+              applyCond ? params.applyConditionId : undefined,
+              params.conditionDurationRounds
+            );
+            if (dmg > 0) triggerSlashVfx(tokenId, 'hit');
+          });
+        }, 120);
+      }
     },
-    [emitSavePromptState, getTokenSaveBonus]
+    [applyDamage, emitSavePromptState, getTokenSaveBonus, triggerSlashVfx, updateCampaign]
   );
+
+  startTacticalSavePromptRef.current = startTacticalSavePrompt;
 
   const rollSavePromptTarget = useCallback(
     (tokenId: string) => {
@@ -3645,6 +6041,58 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   : 0
                 : rawDmg
               : 0;
+          const applyCond = Boolean(!passed && livePrompt.applyConditionId);
+
+          const shouldAutoApply =
+            (livePrompt.kind === 'trap' || livePrompt.kind === 'aoe') &&
+            (dmgToApply > 0 || applyCond);
+          if (shouldAutoApply) {
+            if (livePrompt.casterName && dmgToApply > 0) {
+              recordCombatStat(livePrompt.casterName, '#e0b84c', { damage: dmgToApply });
+            }
+            applyDamage(
+              tokenId,
+              dmgToApply,
+              false,
+              undefined,
+              livePrompt.damageType,
+              applyCond ? livePrompt.applyConditionId : undefined,
+              livePrompt.conditionDurationRounds
+            );
+            if (dmgToApply > 0) triggerSlashVfx(tokenId, 'hit');
+          }
+          if (
+            applyCond &&
+            livePrompt.casterCharacterId &&
+            (livePrompt.requiresConcentration || livePrompt.singleTargetOnly)
+          ) {
+            updateCampaign((prev) => ({
+              ...prev,
+              characters: prev.characters.map((c) => {
+                if (c.id !== livePrompt.casterCharacterId) return c;
+                const key = normalizeAbilityKey(livePrompt.title);
+                const prevEff = (c.activeTrackedEffects || []).find((e) => e.abilityKey === key);
+                const nextTokenIds = Array.from(new Set([...(prevEff?.targetTokenIds || []), tokenId]));
+                const nextCharIds = Array.from(
+                  new Set([
+                    ...(prevEff?.targetCharacterIds || []),
+                    ...(liveEntry.characterId ? [liveEntry.characterId] : []),
+                  ])
+                );
+                const nextNames = Array.from(new Set([...(prevEff?.targetNames || []), liveEntry.name]));
+                return upsertTrackedEffectOnCharacter(c, {
+                  abilityKey: key,
+                  abilityName: livePrompt.title,
+                  conditionId: livePrompt.applyConditionId,
+                  targetTokenIds: nextTokenIds,
+                  targetCharacterIds: nextCharIds,
+                  targetNames: nextNames,
+                  isConcentration: livePrompt.requiresConcentration,
+                  singleTargetOnly: livePrompt.singleTargetOnly,
+                });
+              }),
+            }));
+          }
 
           const updated: TacticalSavePrompt = {
             ...livePrompt,
@@ -3657,6 +6105,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     bonus,
                     total,
                     damageToApply: dmgToApply,
+                    applied: shouldAutoApply ? true : t.applied,
                   }
                 : t
             ),
@@ -3688,7 +6137,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   : `CONCENTRAÇÃO QUEBRADA! (${total} vs CD ${livePrompt.dc})`
                 : passed
                   ? `PASSOU NA SALVAGUARDA! (${total} vs CD ${livePrompt.dc})${dmgToApply > 0 ? ` • Metade: ${dmgToApply}` : ' • Sem dano'}`
-                  : `FALHOU NA SALVAGUARDA! (${total} vs CD ${livePrompt.dc})${dmgToApply > 0 ? ` • Dano: ${dmgToApply}` : ''}`,
+                  : `FALHOU NA SALVAGUARDA! (${total} vs CD ${livePrompt.dc})${dmgToApply > 0 ? ` • Dano: ${dmgToApply}` : ''}${applyCond ? ' • Condição aplicada!' : ''}`,
           });
 
           if (livePrompt.kind === 'concentration' && !passed && liveEntry.characterId) {
@@ -3697,7 +6146,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         },
       });
     },
-    [emitSavePromptState, getTokenSaveBonus, openManualRoll, sendRoll, setCharacterConcentration]
+    [applyDamage, emitSavePromptState, getTokenSaveBonus, openManualRoll, sendRoll, setCharacterConcentration, triggerSlashVfx, updateCampaign]
   );
 
   const rollAllPendingSaveTargets = useCallback(() => {
@@ -3726,6 +6175,21 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (prompt.kind === 'concentration' && !passed && t.characterId) {
         brokenConcCharIds.push(t.characterId);
       }
+      const applyCond = Boolean(!passed && prompt.applyConditionId);
+      const shouldAutoApply =
+        (prompt.kind === 'trap' || prompt.kind === 'aoe') && (dmgToApply > 0 || applyCond);
+      if (shouldAutoApply) {
+        applyDamage(
+          t.tokenId,
+          dmgToApply,
+          false,
+          undefined,
+          prompt.damageType,
+          applyCond ? prompt.applyConditionId : undefined,
+          prompt.conditionDurationRounds
+        );
+        if (dmgToApply > 0) triggerSlashVfx(t.tokenId, 'hit');
+      }
       return {
         ...t,
         status: (passed ? 'passed' : 'failed') as 'passed' | 'failed',
@@ -3733,13 +6197,14 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         bonus,
         total,
         damageToApply: dmgToApply,
+        applied: shouldAutoApply ? true : t.applied,
       };
     });
 
     emitSavePromptState({ ...prompt, targets: nextTargets });
     soundEngine.playSfxPreset('dice');
     brokenConcCharIds.forEach((cid) => setCharacterConcentration(cid, null));
-  }, [emitSavePromptState, getTokenSaveBonus, setCharacterConcentration]);
+  }, [applyDamage, emitSavePromptState, getTokenSaveBonus, setCharacterConcentration, triggerSlashVfx]);
 
   const applySavePromptDamages = useCallback(() => {
     const prompt = activeSavePromptRef.current;
@@ -3755,6 +6220,102 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     emitSavePromptState({ ...prompt, targets: nextTargets });
     soundEngine.playSfxPreset('fireball');
   }, [applyDamage, emitSavePromptState, triggerSlashVfx]);
+
+  const triggerSecretPassage = useCallback((markerId: string, token?: MapToken) => {
+    const camp = campaignRef.current;
+    const activeMap = camp.maps.find((m) => m.id === camp.activeMapId) || camp.maps[0];
+    const marker = activeMap?.gmMarkers?.find((gm) => gm.id === markerId);
+    if (!activeMap || !marker || marker.kind !== 'secret') return;
+    const targetMap = marker.targetMapId
+      ? camp.maps.find((m) => m.id === marker.targetMapId)
+      : undefined;
+
+    setActiveSecretPassage({
+      id: `passage-${Date.now()}`,
+      markerId: marker.id,
+      markerTitle: marker.title,
+      markerDescription: marker.description,
+      sourceMapId: activeMap.id,
+      targetMapId: targetMap?.id,
+      targetMapName: targetMap?.name,
+      tokenId: token?.id,
+      tokenName: token?.name,
+      revealed: marker.revealed,
+    });
+    soundEngine.playSfxPreset('magic');
+  }, []);
+
+  const dismissSecretPassage = useCallback(() => {
+    setActiveSecretPassage(null);
+  }, []);
+
+  const moveTokensToMap = useCallback(
+    (sourceMapId: string, targetMapId: string, tokenIds: string[] | 'all-heroes') => {
+      if (sourceMapId === targetMapId) return;
+      updateCampaign((prev) => {
+        const srcMap = prev.maps.find((m) => m.id === sourceMapId);
+        const dstMap = prev.maps.find((m) => m.id === targetMapId);
+        if (!srcMap || !dstMap) return prev;
+
+        const movingTokens =
+          tokenIds === 'all-heroes'
+            ? srcMap.tokens.filter((t) => t.type === 'character')
+            : srcMap.tokens.filter((t) => tokenIds.includes(t.id));
+        if (movingTokens.length === 0) return { ...prev, activeMapId: targetMapId };
+
+        const movingIds = new Set(movingTokens.map((t) => t.id));
+        const movingRefIds = new Set(
+          movingTokens.filter((t) => t.referenceId).map((t) => `${t.type}:${t.referenceId}`)
+        );
+
+        const nextDstTokens = [...dstMap.tokens];
+        movingTokens.forEach((tok, idx) => {
+          const alreadyIdx = nextDstTokens.findIndex(
+            (existing) =>
+              existing.id === tok.id ||
+              (tok.referenceId &&
+                existing.type === tok.type &&
+                existing.referenceId === tok.referenceId)
+          );
+          const spawnPos = findNearestFreeGridCell(
+            { ...dstMap, tokens: nextDstTokens },
+            Math.min(dstMap.gridWidth - 1, 2 + idx),
+            Math.min(dstMap.gridHeight - 1, 2),
+            tok.size
+          );
+          const relocated: MapToken = { ...tok, x: spawnPos.x, y: spawnPos.y };
+          if (alreadyIdx >= 0) {
+            nextDstTokens[alreadyIdx] = relocated;
+          } else {
+            nextDstTokens.push(relocated);
+          }
+        });
+
+        return {
+          ...prev,
+          activeMapId: targetMapId,
+          maps: prev.maps.map((m) => {
+            if (m.id === sourceMapId) {
+              return {
+                ...m,
+                tokens: m.tokens.filter(
+                  (t) =>
+                    !movingIds.has(t.id) &&
+                    !(t.referenceId && movingRefIds.has(`${t.type}:${t.referenceId}`))
+                ),
+              };
+            }
+            if (m.id === targetMapId) {
+              return { ...m, tokens: nextDstTokens };
+            }
+            return m;
+          }),
+        };
+      });
+      setActiveSecretPassage(null);
+    },
+    [updateCampaign]
+  );
 
   const dismissSavePrompt = useCallback(() => {
     emitSavePromptState(null);
@@ -3941,6 +6502,7 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   const startCombatFromMap = useCallback(() => {
+    combatStatsRef.current = {};
     const curr = campaignRef.current;
     const activeMap = curr.maps.find((m) => m.id === curr.activeMapId);
     const tokens = activeMap?.tokens || [];
@@ -4050,6 +6612,525 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     startDuelRef.current = startCombatDuel;
   }, [startCombatDuel]);
 
+  const castAoEAbility = useCallback(
+    (choice: PendingAttackChoice, originX: number, originY: number, angleDeg: number) => {
+      const curr = campaignRef.current;
+      const activeMap = curr.maps.find((m) => m.id === curr.activeMapId) || curr.maps[0];
+      if (!activeMap || !choice.aoeShape) return;
+
+      const sqM = curr.settings.gridSquareMeters || 1.5;
+      const sizeMeters = choice.aoeSizeMeters || 6;
+      // Sphere uses diameter (radius = diameter / 2); cube/cone/line use full width/length
+      const totalSquares = Math.max(1, sizeMeters / sqM);
+      const radiusSquares =
+        choice.aoeShape === 'sphere' ? Math.max(0.5, totalSquares / 2) : totalSquares;
+      const tmplId = `aoe-cast-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+      const baseHex =
+        choice.aoeColor ||
+        (choice.damageType?.toLowerCase().includes('fogo')
+          ? '#f97316'
+          : choice.damageType?.toLowerCase().includes('gelo') || choice.damageType?.toLowerCase().includes('frio')
+            ? '#38bdf8'
+            : choice.damageType?.toLowerCase().includes('veneno') || choice.damageType?.toLowerCase().includes('ácido')
+              ? '#22c55e'
+              : choice.damageType?.toLowerCase() === 'cura'
+                ? '#10b981'
+                : '#a855f7');
+      // Soft translucent fill (~20% opacity) so tokens & grid stay crystal clear underneath
+      const tmplColor = baseHex.startsWith('#') && baseHex.length === 7 ? `${baseHex}33` : baseHex;
+
+      const char = choice.attackerCharacterId
+        ? curr.characters.find((c) => c.id === choice.attackerCharacterId)
+        : undefined;
+      const stats = char ? computeCharacterStats(char, curr) : undefined;
+      const actionCost = choice.actionCost || 'Padrão';
+      const combat = curr.combat;
+      const attackerCb = combat.active
+        ? combat.combatants.find(
+            (cb) =>
+              (choice.attackerTokenId && cb.tokenId === choice.attackerTokenId) ||
+              (choice.attackerCharacterId && cb.referenceId === choice.attackerCharacterId)
+          )
+        : undefined;
+
+      setPendingAttackChoice(null);
+
+      const matchingAbilityDef = curr.compendium.abilities.find(
+        (ab) => normalizeAbilityKey(ab.name) === normalizeAbilityKey(choice.actionTitle)
+      );
+      if (char) {
+        const usesCheck = checkAbilityUsesRemaining(char, matchingAbilityDef);
+        if (!usesCheck.ok) {
+          showTacticalAlert(usesCheck.error);
+          return;
+        }
+      }
+      const shouldSetConcentration = Boolean(
+        choice.requiresConcentration ?? matchingAbilityDef?.requiresConcentration
+      );
+      const resolvedSfxPreset = choice.sfxPreset || matchingAbilityDef?.sfxPreset;
+
+      void (async () => {
+        const conflict = await confirmAbilityConflictIfNeeded(char, {
+          abilityName: choice.actionTitle,
+          requiresConcentration: shouldSetConcentration,
+          singleTargetOnly: false,
+        });
+        if (!conflict.proceed) return;
+
+        // 1. Place geometric template + optional Elemental Surface on map + spend MP & action economy + concentration
+        const surfaceToPaint = choice.createsSurface;
+        updateCampaign((prev) => {
+          const base = char
+            ? removeTrackedEffectsFromState(prev, char.id, conflict.effectsToClear)
+            : prev;
+          return {
+            ...base,
+            characters: base.characters.map((c) => {
+              if (!char || c.id !== char.id) return c;
+              const res = deductCharacterResource(
+                c,
+                choice.costMp,
+                choice.costResourceId,
+                base.compendium.customResources
+              );
+              return {
+                ...c,
+                ...res,
+                abilityUsesRemaining: decrementAbilityUse(c, matchingAbilityDef),
+                ...(shouldSetConcentration ? { concentratingSpell: choice.actionTitle } : {}),
+              };
+            }),
+            maps: base.maps.map((m) => {
+              if (m.id !== activeMap.id) return m;
+              const nextSurfaces = { ...(m.elementalSurfaces || {}) };
+              if (surfaceToPaint) {
+                for (let gx = 0; gx < m.gridWidth; gx++) {
+                  for (let gy = 0; gy < m.gridHeight; gy++) {
+                    if (
+                      isTokenInsideAoE(
+                        { x: gx, y: gy, size: 1 },
+                        choice.aoeShape!,
+                        originX,
+                        originY,
+                        radiusSquares,
+                        angleDeg
+                      )
+                    ) {
+                      nextSurfaces[`${gx},${gy}`] = surfaceToPaint;
+                    }
+                  }
+                }
+              }
+              return {
+                ...m,
+                elementalSurfaces: nextSurfaces,
+                templates: [
+                  ...m.templates,
+                  {
+                    id: tmplId,
+                    shape: choice.aoeShape!,
+                    // StageCanvas renders template origin at (x + 0.5, y + 0.5), so subtract 0.5 for exact pixel alignment
+                    x: originX - 0.5,
+                    y: originY - 0.5,
+                    radiusSquares:
+                      choice.aoeShape === 'cube' || choice.aoeShape === 'line'
+                        ? Math.max(0.5, radiusSquares / 2)
+                        : radiusSquares,
+                    angleDeg,
+                    color: tmplColor,
+                    label: choice.actionTitle,
+                  },
+                ],
+              };
+            }),
+            combat:
+              base.combat.active && attackerCb && (actionCost !== 'Livre' || shouldSetConcentration)
+                ? {
+                    ...base.combat,
+                    combatants: base.combat.combatants.map((cb) =>
+                      cb.id !== attackerCb.id
+                        ? cb
+                        : {
+                            ...cb,
+                            actionAvailable: actionCost === 'Padrão' ? false : cb.actionAvailable,
+                            bonusActionAvailable:
+                              actionCost === 'Bônus' ? false : cb.bonusActionAvailable,
+                            reactionAvailable:
+                              actionCost === 'Reação' ? false : cb.reactionAvailable,
+                            ...(shouldSetConcentration
+                              ? { concentratingSpell: choice.actionTitle }
+                              : {}),
+                          }
+                    ),
+                  }
+                : base.combat,
+          };
+        });
+
+        // Auto-remove transient AoE template after 4.5s unless persistent
+        if (!choice.aoePersistent) {
+          setTimeout(() => {
+            updateCampaign((prev) => ({
+              ...prev,
+              maps: prev.maps.map((m) =>
+                m.id !== activeMap.id
+                  ? m
+                  : { ...m, templates: m.templates.filter((t) => t.id !== tmplId) }
+              ),
+            }));
+          }, 4500);
+        }
+
+        // 2. Find all visible tokens inside the geometric area (respecting aoeTargetFilter!)
+        const targetFilter = choice.aoeTargetFilter || 'all';
+        const casterIsHeroSide =
+          Boolean(choice.attackerCharacterId) ||
+          activeMap.tokens.find((t) => t.id === choice.attackerTokenId)?.type !== 'monster';
+        const hitTokens = activeMap.tokens.filter((t) => {
+          if (t.isHidden || t.hp <= 0) return false;
+          if (!isTokenInsideAoE(t, choice.aoeShape!, originX, originY, radiusSquares, angleDeg)) {
+            return false;
+          }
+          const isCaster =
+            (choice.attackerTokenId && t.id === choice.attackerTokenId) ||
+            (choice.attackerCharacterId &&
+              t.type === 'character' &&
+              t.referenceId === choice.attackerCharacterId);
+          if (targetFilter === 'exclude-caster' && isCaster) return false;
+          if (targetFilter === 'exclude-allies') {
+            if (isCaster) return false;
+            const tokenIsHeroSide =
+              t.type === 'character' ||
+              (t.type === 'npc' &&
+                curr.npcs.find((n) => n.id === t.referenceId)?.disposition !== 'Hostil');
+            if (casterIsHeroSide === tokenIsHeroSide) return false;
+          }
+          return true;
+        });
+
+        const isHeal = choice.damageType?.toLowerCase() === 'cura';
+        const hasDamage = Boolean(choice.damageFormula && choice.damageType);
+        const aoeCasterTok =
+          (choice.attackerTokenId && activeMap.tokens.find((t) => t.id === choice.attackerTokenId)) ||
+          (choice.attackerCharacterId &&
+            activeMap.tokens.find(
+              (t) => t.type === 'character' && t.referenceId === choice.attackerCharacterId
+            )) ||
+          undefined;
+
+        // Collect grid cells inside this AoE for Elemental Surface Chain Reactions!
+        const aoeCells: Array<{ x: number; y: number }> = [];
+        if (!isHeal && choice.damageType && activeMap.elementalSurfaces) {
+          for (let gx = 0; gx < activeMap.gridWidth; gx++) {
+            for (let gy = 0; gy < activeMap.gridHeight; gy++) {
+              if (
+                isTokenInsideAoE(
+                  { x: gx, y: gy, size: 1 },
+                  choice.aoeShape!,
+                  originX,
+                  originY,
+                  radiusSquares,
+                  angleDeg
+                )
+              ) {
+                aoeCells.push({ x: gx, y: gy });
+              }
+            }
+          }
+        }
+
+        // Fire animated projectile from caster token to AoE impact center!
+        fireProjectileVfx({
+          fromToken: aoeCasterTok,
+          toX: originX,
+          toY: originY,
+          title: choice.actionTitle,
+          damageType: choice.damageType,
+          applyConditionId: choice.applyConditionId,
+          range: choice.range,
+        });
+
+        if (hitTokens.length === 0) {
+          showTacticalAlert(`Nenhum alvo encontrado dentro da área de ${choice.actionTitle}.`);
+        }
+
+        if (choice.saveSkillId && hitTokens.length > 0 && !isHeal) {
+          const saveSkill = curr.compendium.skills.find((s) => s.id === choice.saveSkillId);
+          const dcVal = choice.saveDcFormula
+            ? Math.max(5, evaluateFormula(choice.saveDcFormula, stats, char).total)
+            : 12;
+          playSyncedAbilitySfx({
+            explicitSfxPreset: resolvedSfxPreset,
+            title: choice.actionTitle,
+            damageType: choice.damageType,
+            range: choice.range,
+            applyConditionId: choice.applyConditionId,
+          });
+          pushCombatLog({
+            category: 'spell',
+            actorName: choice.attackerName,
+            actorKind: char ? 'hero' : 'monster',
+            actorColor: choice.attackerColor,
+            summary: `conjurou ${choice.actionTitle} (${sizeMeters}m) — ${hitTokens.length} alvo(s) precisam rolar ${saveSkill?.name || 'Salvaguarda'} (CD ${dcVal})!`,
+          });
+          if (aoeCells.length > 0) {
+            window.setTimeout(() => {
+              triggerElementalComboAtCells(
+                aoeCells,
+                choice.damageType,
+                choice.attackerName,
+                choice.attackerColor
+              );
+            }, 220);
+          }
+          window.setTimeout(() => {
+            startTacticalSavePrompt({
+              kind: 'aoe',
+              title: choice.actionTitle,
+              subtitle: `${hitTokens.length} ${hitTokens.length === 1 ? 'alvo' : 'alvos'} na área (${sizeMeters}m)`,
+              saveSkillId: choice.saveSkillId!,
+              saveLabel: saveSkill?.name || 'Salvaguarda',
+              dc: dcVal,
+              damageFormula: choice.damageFormula
+                ? formatFormulaForDisplay(choice.damageFormula, stats, char)
+                : '',
+              damageType: choice.damageType || 'Arcano',
+              halfOnSuccess: true,
+              applyConditionId: choice.applyConditionId,
+              conditionDurationRounds: choice.conditionDurationRounds,
+              casterCharacterId: char?.id,
+              casterName: choice.attackerName,
+              requiresConcentration: shouldSetConcentration,
+              tokens: hitTokens,
+            });
+          }, 80);
+          return;
+        }
+
+        const roll = hasDamage
+          ? evaluateFormula(choice.damageFormula!, stats, char)
+          : null;
+        const totalVal = roll ? Math.max(1, roll.total) : 0;
+
+        playSyncedAbilitySfx({
+          explicitSfxPreset: resolvedSfxPreset,
+          title: choice.actionTitle,
+          damageType: choice.damageType,
+          range: choice.range,
+          applyConditionId: choice.applyConditionId,
+        });
+
+        if (totalVal > 0 && hitTokens.length > 0) {
+          recordCombatStat(
+            choice.attackerName,
+            choice.attackerColor,
+            isHeal
+              ? { healing: totalVal * hitTokens.length }
+              : { damage: totalVal * hitTokens.length }
+          );
+        }
+
+        if (aoeCells.length > 0) {
+          window.setTimeout(() => {
+            triggerElementalComboAtCells(
+              aoeCells,
+              choice.damageType,
+              choice.attackerName,
+              choice.attackerColor
+            );
+          }, 340);
+        }
+
+        pushCombatLog({
+          category: 'spell',
+          actorName: choice.attackerName,
+          actorKind: char ? 'hero' : 'monster',
+          actorColor: choice.attackerColor,
+          summary: `conjurou ${choice.actionTitle} (${sizeMeters}m) atingindo ${hitTokens.length} alvo(s)`,
+          detail: roll ? `${roll.resolvedFormula} = ${totalVal} (${choice.damageType})` : undefined,
+        });
+
+        if (roll) {
+          sendRoll({
+            rollerName: choice.attackerName,
+            rollerRole: roleRef.current,
+            title: `${choice.actionTitle} (Área ${sizeMeters}m • ${hitTokens.length} alvo(s))`,
+            formula: roll.resolvedFormula,
+            total: totalVal,
+            individualRolls: roll.individualRolls,
+            damageTotal: totalVal,
+            damageType: choice.damageType,
+            isSecret: false,
+            details: `${hitTokens.map((t) => t.name).join(', ') || 'Nenhum alvo na área'} • ${roll.details}`,
+            isCrit: false,
+            isFumble: false,
+          });
+        }
+
+        if (
+          char &&
+          shouldSetConcentration &&
+          choice.applyConditionId &&
+          hitTokens.length > 0
+        ) {
+          updateCampaign((prev) => ({
+            ...prev,
+            characters: prev.characters.map((c) => {
+              if (c.id !== char.id) return c;
+              return upsertTrackedEffectOnCharacter(c, {
+                abilityKey: normalizeAbilityKey(choice.actionTitle),
+                abilityName: choice.actionTitle,
+                conditionId: choice.applyConditionId,
+                targetTokenIds: hitTokens.map((t) => t.id),
+                targetCharacterIds: hitTokens
+                  .filter((t) => t.type === 'character' && t.referenceId)
+                  .map((t) => t.referenceId!),
+                targetNames: hitTokens.map((t) => t.name),
+                isConcentration: true,
+              });
+            }),
+          }));
+        }
+
+        // 3. Apply damage / healing / condition to all tokens inside the area (slight delay so template campaign:update lands before combat:apply-damage!)
+        if (hitTokens.length > 0) {
+          window.setTimeout(() => {
+            hitTokens.forEach((tok) => {
+              if (hasDamage && totalVal > 0) {
+                applyDamage(
+                  tok.id,
+                  totalVal,
+                  isHeal,
+                  undefined,
+                  choice.damageType,
+                  choice.applyConditionId,
+                  choice.conditionDurationRounds
+                );
+                triggerSlashVfx(tok.id, isHeal ? 'heal' : 'hit');
+              } else if (choice.applyConditionId) {
+                applyDamage(
+                  tok.id,
+                  0,
+                  false,
+                  undefined,
+                  undefined,
+                  choice.applyConditionId,
+                  choice.conditionDurationRounds
+                );
+              }
+            });
+          }, 120);
+        }
+      })();
+    },
+    [applyDamage, pushCombatLog, sendRoll, showTacticalAlert, startTacticalSavePrompt, triggerSlashVfx, updateCampaign]
+  );
+
+  const toggleHeroInspiration = useCallback(
+    (characterId: string) => {
+      const ch = campaignRef.current.characters.find((c) => c.id === characterId);
+      if (!ch) return;
+      const nextVal = !ch.hasInspiration;
+      updateCampaign((prev) => ({
+        ...prev,
+        characters: prev.characters.map((c) =>
+          c.id === characterId ? { ...c, hasInspiration: nextVal } : c
+        ),
+      }));
+      if (nextVal) {
+        soundEngine.playSfxPreset('levelup');
+        pushCombatLog({
+          category: 'system',
+          actorName: ch.name,
+          actorKind: 'hero',
+          actorColor: ch.playerColor || ch.tokenColor,
+          summary: 'recebeu ★ Inspiração Heroica do Mestre!',
+        });
+      }
+    },
+    [pushCombatLog, updateCampaign]
+  );
+
+  const spendHeroInspiration = useCallback(
+    (characterId: string) => {
+      const ch = campaignRef.current.characters.find((c) => c.id === characterId);
+      if (!ch || !ch.hasInspiration) return;
+      updateCampaign((prev) => ({
+        ...prev,
+        characters: prev.characters.map((c) =>
+          c.id === characterId
+            ? { ...c, hasInspiration: false, nextAttackRollOverride: 'advantage' }
+            : c
+        ),
+      }));
+      setAdvantageMode('advantage');
+      soundEngine.playSfxPreset('spell');
+      pushCombatLog({
+        category: 'system',
+        actorName: ch.name,
+        actorKind: 'hero',
+        actorColor: ch.playerColor || ch.tokenColor,
+        summary: 'gastou ★ Inspiração Heroica (+Vantagem na próxima rolagem)!',
+      });
+      showTacticalAlert(`★ ${ch.name} gastou Inspiração Heroica: Vantagem ativa na próxima rolagem!`);
+    },
+    [pushCombatLog, showTacticalAlert, updateCampaign]
+  );
+
+  const triggerDuelShieldReaction = useCallback(() => {
+    const duel = activeDuelRef.current;
+    if (!duel || duel.reactionShieldApplied || !duel.defenderCanShieldReaction) return;
+    const curr = campaignRef.current;
+    const activeMap = curr.maps.find((m) => m.id === curr.activeMapId);
+    const defTok = activeMap?.tokens.find((t) => t.id === duel.defenderTokenId);
+    const defChar =
+      defTok?.type === 'character' && defTok.referenceId
+        ? curr.characters.find((c) => c.id === defTok.referenceId)
+        : undefined;
+
+    const nextDefense = duel.defenderDefense + 5;
+    const stillHits = duel.isCrit || (duel.attackTotal ?? 0) >= nextDefense;
+
+    updateCampaign((prev) => ({
+      ...prev,
+      characters: prev.characters.map((c) =>
+        defChar && c.id === defChar.id ? { ...c, mp: Math.max(0, c.mp - 2) } : c
+      ),
+      combat: prev.combat.active
+        ? {
+            ...prev.combat,
+            combatants: prev.combat.combatants.map((cb) =>
+              cb.tokenId === duel.defenderTokenId ? { ...cb, reactionAvailable: false } : cb
+            ),
+          }
+        : prev.combat,
+    }));
+
+    soundEngine.playSfxPreset('shield');
+    pushCombatLog({
+      category: 'spell',
+      actorName: duel.defenderName,
+      actorKind: 'hero',
+      actorColor: duel.defenderColor,
+      summary: stillHits
+        ? `usou Reação: Escudo Arcano (+5 CA → ${nextDefense}), mas o golpe (${duel.attackTotal}) ainda acertou!`
+        : `usou Reação: Escudo Arcano (+5 CA → ${nextDefense}) e BLOQUEOU o golpe (${duel.attackTotal})!`,
+    });
+
+    emitDuelState({
+      ...duel,
+      defenderDefense: nextDefense,
+      hitSuccess: stillHits,
+      reactionShieldApplied: true,
+      defenderCanShieldReaction: false,
+      situationalModifiers: [
+        ...(duel.situationalModifiers || []),
+        '⚡ Escudo Arcano (+5 CA)',
+      ],
+    });
+  }, [emitDuelState, pushCombatLog, updateCampaign]);
+
   return (
     <CampaignContext.Provider
       value={{
@@ -4134,8 +7215,13 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         tacticalAlert,
         showTacticalAlert,
         opportunityPrompt,
+        opportunityQueueCount: opportunityQueue.length,
         triggerOpportunityPrompt,
+        enqueueOpportunityPrompts,
         performCombatManeuver,
+        toggleHeroInspiration,
+        spendHeroInspiration,
+        triggerDuelShieldReaction,
         activeDuel,
         startCombatDuel,
         rollDuelAttack,
@@ -4164,13 +7250,29 @@ export const CampaignProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updateCampaign,
         deleteCharacter,
         rollDeathSave,
+        setDeathSaveManual,
         assistDeathSave,
         gmResolveDeathSave,
+        activeSecretPassage,
+        triggerSecretPassage,
+        dismissSecretPassage,
+        moveTokensToMap,
         claimTreasureMarker,
         sendRoll,
         quickRollFormula,
         rollCharacterAction,
+        pushCombatLog,
+        awardXp,
+        castAoEAbility,
         applyDamage,
+        activeRestBanner,
+        dismissRestBanner,
+        partyRest,
+        projectileVfx,
+        screenShakeActive,
+        activeMvpSummary,
+        dismissMvpSummary,
+        endCombatWithSummary,
         setCharacterNextAttackOverride,
         canUndo: undoCount > 0,
         undoCount,

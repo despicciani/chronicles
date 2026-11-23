@@ -240,6 +240,7 @@ export const TokenPortrait: React.FC<TokenPortraitProps> = ({
 
   return (
     <div
+      onDragStart={(e) => e.preventDefault()}
       className={`relative rounded-full flex items-center justify-center shrink-0 select-none ${
         isDead ? 'animate-death-pulse' : ''
       }`}
@@ -264,7 +265,9 @@ export const TokenPortrait: React.FC<TokenPortraitProps> = ({
           <img
             src={resolved}
             alt={name}
-            className={`w-full h-full object-cover ${isDead ? 'grayscale sepia-[0.35] brightness-75' : ''}`}
+            draggable={false}
+            onDragStart={(e) => e.preventDefault()}
+            className={`w-full h-full object-cover pointer-events-none select-none ${isDead ? 'grayscale sepia-[0.35] brightness-75' : ''}`}
           />
         ) : (
           renderFantasyCrestSvg(`${name} ${iconHint || ''}`)

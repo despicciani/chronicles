@@ -27,6 +27,7 @@ export interface CampaignSettings {
   maxTrainedSkills: number;
   showEnemyAcToPlayers?: boolean;
   enableFlanking?: boolean;
+  xpThresholds?: number[];
 }
 
 export interface AttributeDef {
@@ -69,6 +70,7 @@ export interface ConditionDef {
   color: string;
   icon: string;
   description: string;
+  preventsOpportunityAttacks?: boolean;
   modifiers: StatModifier[];
 }
 
@@ -106,12 +108,23 @@ export interface ClassDef {
   levelFeatures: ClassLevelFeature[];
 }
 
+export interface CustomResourceDef {
+  id: string;
+  name: string;
+  shortName: string;
+  color: string;
+  baseMax: number;
+  perLevel: number;
+  resetOn: 'short' | 'long' | 'manual';
+}
+
 export interface AbilityDef {
   id: string;
   name: string;
   category: 'Habilidade de Classe' | 'Poder Racial' | 'Magia' | 'Talento' | 'Ataque Especial';
   actionType: 'Padrão' | 'Movimento' | 'Bônus' | 'Reação' | 'Livre' | 'Passiva';
   costMp: number;
+  costResourceId?: string;
   maxUsesPerRest?: number;
   restType?: 'curto' | 'longo';
   range: string;
@@ -125,6 +138,15 @@ export interface AbilityDef {
   applyConditionId?: string;
   conditionDurationRounds?: number;
   requiresConcentration?: boolean;
+  singleTargetOnly?: boolean;
+  sfxPreset?: string;
+  aoeShape?: 'sphere' | 'cone' | 'line' | 'cube';
+  aoeSizeMeters?: number;
+  aoeColor?: string;
+  aoePersistent?: boolean;
+  aoeTargetFilter?: 'all' | 'exclude-caster' | 'exclude-allies';
+  createsSurface?: ElementalSurfaceKind;
+  imageUrl?: string;
 }
 
 export interface ItemDef {
@@ -144,6 +166,7 @@ export interface ItemDef {
   critMultiplier?: number;
   defenseBonus?: number;
   modifiers?: StatModifier[];
+  imageUrl?: string;
 }
 
 export interface MonsterAttack {
@@ -153,28 +176,45 @@ export interface MonsterAttack {
   damageType: string;
   range?: string;
   notes?: string;
+  sourceAbilityId?: string;
+  sourceItemId?: string;
+  applyConditionId?: string;
+  conditionDurationRounds?: number;
 }
 
 export interface MonsterDef {
   id: string;
   name: string;
   type: string;
-  size: 'Pequeno' | 'Médio' | 'Grande' | 'Enorme';
+  size: 'Pequeno' | 'Médio' | 'Grande' | 'Enorme' | 'Colossal';
+  gridSize?: number;
   cr: string;
   maxHp: number;
   defense: number;
   speed: number;
   initiativeBonus: number;
   attributes: Record<string, number>;
-  saves: { fort: number; ref: number; von: number };
+  saves: { fort: number; ref: number; von: number; for?: number; int?: number; car?: number };
   attacks: MonsterAttack[];
   abilities: string[];
   damageResistances?: string[];
   damageImmunities?: string[];
   damageVulnerabilities?: string[];
+  skills?: string[];
+  loot?: string;
+  secretNotes?: string;
   description: string;
   tokenColor: string;
   imageUrl?: string;
+  hideAcFromPlayers?: boolean;
+  lightSource?: 'none' | 'torch' | 'lantern' | 'darkvision';
+  lightRadiusMeters?: number;
+  isBoss?: boolean;
+  bossTitle?: string;
+  bossPhase2HpPct?: number;
+  bossPhase2Title?: string;
+  legendaryActionsMax?: number;
+  legendaryResistancesMax?: number;
 }
 
 export interface InventoryEntry {
@@ -195,6 +235,7 @@ export interface CharacterCustomAttack {
   range: string;
   rarity: CardRarity;
   notes?: string;
+  imageUrl?: string;
 }
 
 export interface CharacterCustomAbility {
@@ -202,12 +243,25 @@ export interface CharacterCustomAbility {
   name: string;
   actionType: 'Padrão' | 'Movimento' | 'Bônus' | 'Reação' | 'Livre' | 'Passiva';
   costMp: number;
+  costResourceId?: string;
   attackFormula?: string;
   damageFormula?: string;
   damageType?: string;
   range: string;
   rarity: CardRarity;
   description: string;
+  imageUrl?: string;
+}
+
+export interface ActiveTrackedAbilityEffect {
+  abilityKey: string;
+  abilityName: string;
+  conditionId?: string;
+  targetTokenIds: string[];
+  targetCharacterIds: string[];
+  targetNames: string[];
+  isConcentration?: boolean;
+  singleTargetOnly?: boolean;
 }
 
 export interface Character {
@@ -225,12 +279,16 @@ export interface Character {
   damageImmunities?: string[];
   damageVulnerabilities?: string[];
   concentratingSpell?: string | null;
+  activeTrackedEffects?: ActiveTrackedAbilityEffect[];
   themeMusicUrl?: string;
   themeMusicTitle?: string;
   name: string;
   raceId: string;
   classId: string;
   level: number;
+  xp?: number;
+  hasInspiration?: boolean;
+  unspentAttributePoints?: number;
   attributes: Record<string, number>;
   trainedSkillIds: string[];
   hp: number;
@@ -238,10 +296,18 @@ export interface Character {
   tempHp: number;
   mp: number;
   maxMpOverride?: number;
+  customResourceValues?: Record<string, { current: number; maxOverride?: number }>;
   knownAbilityIds: string[];
   customAttacks: CharacterCustomAttack[];
   customAbilities: CharacterCustomAbility[];
   abilityUsesRemaining: Record<string, number>;
+  resourceTrackers?: Array<{
+    id: string;
+    name: string;
+    current: number;
+    max: number;
+    resetOn: 'short' | 'long' | 'manual';
+  }>;
   activeConditionIds: string[];
   inventory: InventoryEntry[];
   gold: number;
@@ -274,6 +340,18 @@ export interface MapToken {
   color: string;
   frameStyle?: TokenFrameStyle;
   imageUrl?: string;
+  hideAcFromPlayers?: boolean;
+  lightSource?: 'none' | 'torch' | 'lantern' | 'darkvision';
+  lightRadiusMeters?: number;
+  isBoss?: boolean;
+  bossTitle?: string;
+  bossPhase?: number;
+  bossPhase2HpPct?: number;
+  bossPhase2Title?: string;
+  legendaryActionsMax?: number;
+  legendaryActionsRemaining?: number;
+  legendaryResistancesMax?: number;
+  legendaryResistancesRemaining?: number;
 }
 
 export interface AoETemplate {
@@ -289,6 +367,7 @@ export interface AoETemplate {
 
 export type GmMarkerKind = 'chest' | 'item' | 'trap' | 'secret';
 export type TerrainCellKind = 'wall' | 'cover' | 'difficult';
+export type ElementalSurfaceKind = 'fire' | 'ice' | 'acid' | 'water';
 
 export interface GmMapMarker {
   id: string;
@@ -305,6 +384,20 @@ export interface GmMapMarker {
   trapDamageFormula?: string;
   trapDamageType?: string;
   trapTriggered?: boolean;
+  targetMapId?: string;
+}
+
+export interface SecretPassageAlert {
+  id: string;
+  markerId: string;
+  markerTitle: string;
+  markerDescription?: string;
+  sourceMapId: string;
+  targetMapId?: string;
+  targetMapName?: string;
+  tokenId?: string;
+  tokenName?: string;
+  revealed: boolean;
 }
 
 export interface TacticalMap {
@@ -321,6 +414,7 @@ export interface TacticalMap {
   fogEnabled: boolean;
   revealedCells: string[];
   terrainCells?: Record<string, TerrainCellKind>;
+  elementalSurfaces?: Record<string, ElementalSurfaceKind>;
   weather: 'none' | 'rain' | 'embers' | 'snow' | 'mist';
   sceneNpcIds: string[];
   tokens: MapToken[];
@@ -403,6 +497,21 @@ export interface PendingAttackChoice {
   range?: string;
   actionCost?: ActionEconomyCost;
   costMp?: number;
+  costResourceId?: string;
+  applyConditionId?: string;
+  conditionDurationRounds?: number;
+  requiresConcentration?: boolean;
+  singleTargetOnly?: boolean;
+  sfxPreset?: string;
+  isShoveManeuver?: boolean;
+  saveSkillId?: string;
+  saveDcFormula?: string;
+  aoeShape?: 'sphere' | 'cone' | 'line' | 'cube';
+  aoeSizeMeters?: number;
+  aoeColor?: string;
+  aoePersistent?: boolean;
+  aoeTargetFilter?: 'all' | 'exclude-caster' | 'exclude-allies';
+  createsSurface?: ElementalSurfaceKind;
 }
 
 export interface OpportunityAttackPrompt {
@@ -450,6 +559,10 @@ export interface CombatDuelState {
   damageApplied?: boolean;
   situationalModifiers?: string[];
   effectiveAdvantageMode?: 'normal' | 'advantage' | 'disadvantage';
+  defenderCanShieldReaction?: boolean;
+  reactionShieldApplied?: boolean;
+  applyConditionId?: string;
+  sfxPreset?: string;
   autoCritOnHit?: boolean;
   phase: 'ready-attack' | 'rolling-attack' | 'attack-result' | 'rolling-damage' | 'damage-result';
 }
@@ -535,10 +648,21 @@ export interface NpcEntry {
   revealedToPlayers: boolean;
   disposition: 'Aliado' | 'Neutro' | 'Hostil' | 'Desconhecido';
   combatEnabled?: boolean;
+  level?: number;
   maxHp?: number;
   defense?: number;
   speed?: number;
+  initiativeBonus?: number;
+  attributes?: Record<string, number>;
+  saves?: { fort: number; ref: number; von: number; for?: number; int?: number; car?: number };
+  skills?: string[];
+  abilities?: string[];
   attacks?: MonsterAttack[];
+  damageResistances?: string[];
+  damageImmunities?: string[];
+  damageVulnerabilities?: string[];
+  loot?: string;
+  personality?: string;
 }
 
 export interface GmNote {
@@ -569,7 +693,7 @@ export interface CustomMusicTrack {
   id: string;
   title: string;
   url: string;
-  category: 'ambient' | 'theme' | 'boss';
+  category: 'ambient' | 'theme' | 'boss' | 'combat' | 'tavern' | 'drama';
 }
 
 export interface BossBannerState {
@@ -657,6 +781,12 @@ export interface TacticalSavePrompt {
   damageType?: string;
   halfOnSuccess?: boolean;
   rolledRawDamage?: number;
+  applyConditionId?: string;
+  conditionDurationRounds?: number;
+  casterCharacterId?: string;
+  casterName?: string;
+  requiresConcentration?: boolean;
+  singleTargetOnly?: boolean;
   targets: TacticalSaveTargetEntry[];
 }
 
@@ -702,6 +832,115 @@ export interface Compendium {
   abilities: AbilityDef[];
   items: ItemDef[];
   monsters: MonsterDef[];
+  customDamageTypes?: string[];
+  customResources?: CustomResourceDef[];
+}
+
+export type ProjectileVfxKind =
+  | 'arrow'
+  | 'fireball'
+  | 'lightning'
+  | 'frost'
+  | 'arcane'
+  | 'heal'
+  | 'curse'
+  | 'blessing'
+  | 'slash';
+
+export interface MapProjectileVfx {
+  id: string;
+  mapId: string;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  kind: ProjectileVfxKind;
+  color?: string;
+  isCrit?: boolean;
+  label?: string;
+}
+
+export interface QuestObjective {
+  id: string;
+  text: string;
+  completed: boolean;
+}
+
+export interface QuestEntry {
+  id: string;
+  title: string;
+  giver?: string;
+  category: 'principal' | 'secundaria' | 'guilda';
+  status: 'active' | 'completed' | 'failed';
+  description: string;
+  objectives: QuestObjective[];
+  rewardXp?: number;
+  rewardGold?: number;
+  rewardsDelivered?: boolean;
+  createdAt: string;
+}
+
+export interface CombatMvpSummary {
+  id: string;
+  rounds: number;
+  totalDamageDealt: number;
+  totalHealingDone: number;
+  enemiesDefeated: number;
+  topDamageDealer?: { name: string; color: string; value: number };
+  topHealer?: { name: string; color: string; value: number };
+  topCrits?: { name: string; color: string; value: number };
+  participants: Array<{
+    name: string;
+    color: string;
+    damage: number;
+    healing: number;
+    crits: number;
+  }>;
+}
+
+export interface CombatLogEntry {
+  id: string;
+  timestamp: string;
+  category:
+    | 'attack'
+    | 'damage'
+    | 'heal'
+    | 'condition'
+    | 'death'
+    | 'revive'
+    | 'xp'
+    | 'levelup'
+    | 'spell'
+    | 'system';
+  actorName: string;
+  actorKind: 'hero' | 'monster' | 'npc' | 'system';
+  actorColor?: string;
+  targetName?: string;
+  targetKind?: 'hero' | 'monster' | 'npc' | 'system';
+  targetColor?: string;
+  summary: string;
+  detail?: string;
+}
+
+export interface SavedEncounter {
+  id: string;
+  name: string;
+  description?: string;
+  entries: Array<{ monsterId: string; count: number }>;
+}
+
+export interface ActiveLootChest {
+  id: string;
+  title: string;
+  gold: number;
+  goldClaimedBy?: string;
+  items: Array<{
+    id: string;
+    itemId: string;
+    quantity: number;
+    claimedBy?: string;
+  }>;
+  open: boolean;
 }
 
 export interface CampaignState {
@@ -719,7 +958,11 @@ export interface CampaignState {
   combat: CombatState;
   rollLog: RollLogEntry[];
   chatLog?: ChatMessageEntry[];
+  combatLog?: CombatLogEntry[];
+  savedEncounters?: SavedEncounter[];
+  activeLootChest?: ActiveLootChest | null;
   quests: Quest[];
+  questLog?: QuestEntry[];
   npcs: NpcEntry[];
   gmNotes: GmNote[];
   customMusicTracks: CustomMusicTrack[];

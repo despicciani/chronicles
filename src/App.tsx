@@ -6,9 +6,13 @@ import { InitiativeBar } from './components/InitiativeBar';
 import { StageCanvas } from './components/StageCanvas';
 import { RightSidebar } from './components/RightSidebar';
 import { CharacterSheetModal } from './components/CharacterSheetModal';
+import { CombatLogWidget } from './components/CombatLogWidget';
+import { InspectEntityModal } from './components/InspectEntityModal';
+import { LootChestModal } from './components/LootChestModal';
 import { CompendiumModal } from './components/CompendiumModal';
 import { GMShieldModal } from './components/GMShieldModal';
 import { DiaryModal } from './components/DiaryModal';
+import { QuestLogModal } from './components/QuestLogModal';
 import { SoundboardModal } from './components/SoundboardModal';
 import { LobbyScreen } from './components/LobbyScreen';
 import { PlayerCharacterSetupModal } from './components/PlayerCharacterSetupModal';
@@ -17,6 +21,8 @@ import { CinematicOverlays } from './components/CinematicOverlays';
 import { CombatDuelOverlay } from './components/CombatDuelOverlay';
 import { InitiativeCeremonyOverlay } from './components/InitiativeCeremonyOverlay';
 import { PlayerActionHUD } from './components/PlayerActionHUD';
+import { EntitySheetHost } from './components/EntitySheetModal';
+import { PromptDialogHost } from './components/PromptDialog';
 
 const HandoutOverlay: React.FC = () => {
   const { activeHandout, dismissHandout, resolveAssetUrl } = useCampaign();
@@ -116,18 +122,30 @@ const TabletopWorkspace: React.FC = () => {
         diceDrawerOpen={diceDrawerOpen}
         onToggleDiceDrawer={() => setDiceDrawerOpen((v) => !v)}
       />
+      <CombatLogWidget />
+      <LootChestModal />
+      <InspectEntityModal />
 
       {activeModal === 'sheet' && (
         <CharacterSheetModal onClose={() => setActiveModal(null)} />
       )}
       {activeModal === 'compendium' && (
-        <CompendiumModal onClose={() => setActiveModal(null)} />
+        <CompendiumModal mode="rules" onClose={() => setActiveModal(null)} />
+      )}
+      {activeModal === 'bestiary' && (
+        <CompendiumModal mode="bestiary" onClose={() => setActiveModal(null)} />
+      )}
+      {activeModal === 'npcs' && (
+        <DiaryModal mode="npcs" onClose={() => setActiveModal(null)} />
       )}
       {activeModal === 'gm-shield' && (
         <GMShieldModal onClose={() => setActiveModal(null)} />
       )}
       {activeModal === 'diary' && (
-        <DiaryModal onClose={() => setActiveModal(null)} />
+        <DiaryModal mode="diary" onClose={() => setActiveModal(null)} />
+      )}
+      {activeModal === 'quests' && (
+        <QuestLogModal onClose={() => setActiveModal(null)} />
       )}
       {activeModal === 'soundboard' && (
         <SoundboardModal onClose={() => setActiveModal(null)} />
@@ -152,6 +170,8 @@ export function App() {
   return (
     <CampaignProvider>
       <TabletopWorkspace />
+      <EntitySheetHost />
+      <PromptDialogHost />
     </CampaignProvider>
   );
 }

@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   Download,
@@ -10,6 +10,7 @@ import {
   Upload,
   UserCheck,
   Users,
+  X,
 } from 'lucide-react';
 import { triggerHeroJsonDownload, useCampaign } from '../context/CampaignContext';
 import {
@@ -22,11 +23,13 @@ import {
 import { Character, DiceSkin, TokenFrameStyle } from '../shared/types';
 import { FileUploadButton } from './FileUploadButton';
 import { OrnateDivider, OrnateFrame } from './OrnateFrame';
+import { openConfirmDialog } from './PromptDialog';
 import { TokenPortrait } from './TokenPortrait';
 
 export const PlayerCharacterSetupModal: React.FC = () => {
   const {
     campaign,
+    setInLobby,
     myPlayerId,
     myPlayerName,
     myPlayerColor,
@@ -34,6 +37,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
     updateCampaign,
     setActiveCharacterId,
     savedHeroes,
+    refreshSavedHeroes,
     saveCharacterToVault,
     deleteSavedHero,
     importSavedHeroIntoCampaign,
@@ -45,11 +49,53 @@ export const PlayerCharacterSetupModal: React.FC = () => {
     cancelHeroJoinRequest,
   } = useCampaign();
 
-  const [setupMode, setSetupMode] = useState<'create' | 'vault' | 'claim'>(() =>
-    savedHeroes.length > 0 ? 'vault' : campaign.characters.length > 0 ? 'claim' : 'create'
+  // Unified playable heroes list: combines current campaign heroes + GM's Hero Vault (deduplicated)
+  const unifiedHeroes = React.useMemo(() => {
+    const byKey = new Map<
+      string,
+      {
+        source: 'campaign' | 'vault';
+        hero: Character;
+        vaultEntryId?: string;
+        originLabel: string;
+      }
+    >();
+
+    campaign.characters.forEach((ch) => {
+      const key = ch.vaultId || ch.id;
+      byKey.set(key, {
+        source: 'campaign',
+        hero: ch,
+        originLabel: `Nesta campanha (${campaign.name})`,
+      });
+    });
+
+    savedHeroes.forEach((entry) => {
+      // Only include Vault heroes that belong to THIS campaign (avoid leaking heroes from unrelated campaigns!)
+      if (entry.originCampaignId && entry.originCampaignId !== campaign.id) return;
+      const key = entry.character.vaultId || entry.character.id || entry.id;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          source: 'vault',
+          hero: entry.character,
+          vaultEntryId: entry.id,
+          originLabel: entry.originCampaignName || campaign.name,
+        });
+      }
+    });
+
+    return Array.from(byKey.values());
+  }, [campaign.characters, campaign.id, campaign.name, savedHeroes]);
+
+  const [setupMode, setSetupMode] = useState<'create' | 'vault'>(() =>
+    campaign.characters.length > 0 || savedHeroes.length > 0 ? 'vault' : 'create'
   );
   const jsonInputRef = useRef<HTMLInputElement | null>(null);
   const [importError, setImportError] = useState('');
+
+  useEffect(() => {
+    refreshSavedHeroes().catch(() => {});
+  }, [refreshSavedHeroes]);
 
   const attrBudget = campaign.settings.attributePointBudget ?? 15;
   const maxSkills = campaign.settings.maxTrainedSkills ?? 4;
@@ -125,6 +171,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
       classId,
       level: 1,
       attributes,
+      unspentAttributePoints: pointsRemaining,
       trainedSkillIds,
       hp: startHp,
       tempHp: 0,
@@ -208,7 +255,18 @@ export const PlayerCharacterSetupModal: React.FC = () => {
 
   return (
     <div className="fixed inset-0 z-[65] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-      <OrnateFrame className="rpg-glass-panel rounded-lg max-w-4xl w-full p-6 my-auto animate-modal-unfurl">
+      <OrnateFrame className="rpg-glass-panel rounded-lg max-w-4xl w-full p-6 my-auto animate-modal-unfurl relative">
+        <button
+          type="button"
+          onClick={() => {
+            if (pendingHeroJoinRequest) cancelHeroJoinRequest();
+            setInLobby(true);
+          }}
+          className="absolute top-4 right-4 z-20 rpg-card p-1.5 rounded-md text-amber-200/80 hover:text-amber-100 hover:border-amber-400/70 cursor-pointer transition"
+          title="Voltar ao Lobby"
+        >
+          <X className="w-4 h-4" />
+        </button>
         <div className="text-center space-y-1">
           <div className="inline-flex items-center gap-1.5 text-amber-300 font-display font-bold uppercase tracking-widest text-[11px]">
             <Sparkles className="w-3.5 h-3.5" />
@@ -268,8 +326,19 @@ export const PlayerCharacterSetupModal: React.FC = () => {
           </div>
         )}
 
-        {/* Mode Switch Tabs */}
-        <div className="grid grid-cols-3 gap-2 my-4 text-xs">
+        {/* Mode Switch Tabs (Unified Playable Heroes + Create New) */}
+        <div className="grid grid-cols-2 gap-2 my-4 text-xs">
+          <button
+            type="button"
+            onClick={() => setSetupMode('vault')}
+            className={`px-3 py-2 rounded-md font-display font-bold flex items-center justify-center gap-1.5 cursor-pointer transition ${
+              setupMode === 'vault' ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
+            }`}
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>Heróis Disponíveis ({unifiedHeroes.length})</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setSetupMode('create')}
@@ -278,29 +347,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Forjar Novo Herói</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setSetupMode('vault')}
-            className={`px-3 py-2 rounded-md font-display font-bold flex items-center justify-center gap-1.5 cursor-pointer transition ${
-              setupMode === 'vault' ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
-            }`}
-          >
-            <BookOpen className="w-3.5 h-3.5" />
-            <span>Heróis Salvos ({savedHeroes.length})</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setSetupMode('claim')}
-            className={`px-3 py-2 rounded-md font-display font-bold flex items-center justify-center gap-1.5 cursor-pointer transition ${
-              setupMode === 'claim' ? 'rpg-btn-primary' : 'rpg-card hover:border-amber-400/60'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span>Já Tenho Herói na Mesa ({campaign.characters.length})</span>
+            <span>Criar Novo Personagem</span>
           </button>
         </div>
 
@@ -310,20 +357,20 @@ export const PlayerCharacterSetupModal: React.FC = () => {
               <div>
                 <div className="font-display font-bold text-sm text-amber-200 flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <span>Cofre de Heróis (Sincronizado Desktop + Online)</span>
+                  <span>Personagens Salvos na Mesa / Cofre do Mestre</span>
                 </div>
                 <p className="text-[11px] opacity-75">
-                  Selecione um herói já salvo ou carregue um arquivo <code>.hero.json</code> do seu computador.
+                  Escolha um personagem abaixo para pedir permissão ao Mestre para entrar com ele, ou crie um novo personagem.
                 </p>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => jsonInputRef.current?.click()}
-                  className="rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold flex items-center gap-1.5 cursor-pointer"
+                  className="rpg-card px-3 py-1.5 rounded-md font-display font-bold flex items-center gap-1.5 cursor-pointer hover:border-amber-400/60"
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  <span>Carregar Ficha (.json)</span>
+                  <span>Importar (.json)</span>
                 </button>
                 <input
                   ref={jsonInputRef}
@@ -341,13 +388,13 @@ export const PlayerCharacterSetupModal: React.FC = () => {
               </div>
             )}
 
-            {savedHeroes.length === 0 ? (
+            {unifiedHeroes.length === 0 ? (
               <div className="rpg-card rounded-lg p-6 text-center space-y-2">
                 <div className="font-display font-bold text-sm text-amber-200">
-                  Seu Cofre ainda está vazio
+                  Nenhum herói salvo encontrado ainda
                 </div>
                 <p className="font-lore text-sm opacity-75">
-                  Forje um novo herói ou clique em &ldquo;Salvar Herói&rdquo; dentro de uma ficha para tê-lo sempre disponível em qualquer sessão Desktop ou Online.
+                  Crie seu personagem agora ou importe uma ficha <code>.hero.json</code>.
                 </p>
                 <button
                   type="button"
@@ -359,16 +406,24 @@ export const PlayerCharacterSetupModal: React.FC = () => {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[54vh] overflow-y-auto pr-1">
-                {savedHeroes.map((entry) => {
-                  const h = entry.character;
+                {unifiedHeroes.map((item) => {
+                  const h = item.hero;
                   const clsName =
                     campaign.compendium.classes.find((c) => c.id === h.classId)?.name || 'Aventureiro';
                   const raceName =
                     campaign.compendium.races.find((r) => r.id === h.raceId)?.name || '';
+                  const activeHolder = connectedPlayers.find(
+                    (p) => p.role === 'player' && p.characterId === h.id && p.playerId !== myPlayerId
+                  );
+                  const isOccupied = Boolean(activeHolder);
                   return (
                     <div
-                      key={entry.id}
-                      className="rpg-card rounded-lg p-3 flex items-center justify-between gap-3 border hover:border-amber-400/70 transition"
+                      key={`${item.source}-${h.id}`}
+                      className={`rpg-card rounded-lg p-3 flex items-center justify-between gap-3 border transition ${
+                        isOccupied
+                          ? 'opacity-65 border-red-500/30'
+                          : 'hover:border-amber-400/70'
+                      }`}
                     >
                       <div className="flex items-center gap-3 min-w-0">
                         <TokenPortrait
@@ -385,22 +440,36 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                           <div className="text-[11px] text-amber-300/85 truncate">
                             Nível {h.level} • {clsName} {raceName ? `(${raceName})` : ''}
                           </div>
-                          <div className="text-[10px] opacity-70 truncate">
-                            Salvo em: {entry.originCampaignName || 'Cofre Local'}
-                          </div>
+                          {isOccupied ? (
+                            <div className="text-[10px] text-red-300 font-semibold truncate">
+                              Em uso agora por {activeHolder?.playerName}
+                            </div>
+                          ) : (
+                            <div className="text-[10px] opacity-70 truncate">
+                              {item.originLabel}
+                            </div>
+                          )}
                         </div>
                       </div>
 
                       <div className="flex flex-col items-end gap-1.5 shrink-0">
                         <button
                           type="button"
-                          disabled={Boolean(pendingHeroJoinRequest)}
-                          onClick={() => importSavedHeroIntoCampaign(h)}
+                          disabled={Boolean(pendingHeroJoinRequest) || isOccupied}
+                          onClick={() => {
+                            if (item.source === 'campaign') {
+                              claimCampaignCharacter(h.id);
+                            } else {
+                              importSavedHeroIntoCampaign(h);
+                            }
+                          }}
                           className="rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-[11px] cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
                         >
-                          {pendingHeroJoinRequest?.characterId === h.id
-                            ? 'Aguardando Mestre...'
-                            : 'Pedir para Entrar'}
+                          {isOccupied
+                            ? 'Em Uso'
+                            : pendingHeroJoinRequest?.characterId === h.id
+                              ? 'Aguardando Mestre...'
+                              : 'Pedir para Entrar'}
                         </button>
                         <div className="flex items-center gap-1">
                           <button
@@ -411,88 +480,27 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                           >
                             <Download className="w-3 h-3" /> .json
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (window.confirm(`Remover "${h.name}" do Cofre de Heróis salvos?`)) {
-                                deleteSavedHero(entry.id);
-                              }
-                            }}
-                            className="p-1 rounded bg-red-950/60 border border-red-500/40 text-red-200 hover:bg-red-900 cursor-pointer"
-                            title="Excluir do Cofre"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
-        {setupMode === 'claim' && (
-          <div className="space-y-3 text-xs">
-            <div className="rpg-card rounded-lg p-3">
-              <div className="font-display font-bold text-sm text-amber-200">
-                Reconectar a um Herói desta Campanha
-              </div>
-              <p className="text-[11px] opacity-75">
-                Entrou por um novo link online e perdeu o vínculo automático? Escolha o seu personagem abaixo para retomar de onde parou.
-              </p>
-            </div>
-
-            {campaign.characters.length === 0 ? (
-              <div className="rpg-card rounded-lg p-6 text-center opacity-75">
-                Ainda não há heróis nesta mesa. Crie um novo ou carregue do seu Cofre!
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[52vh] overflow-y-auto pr-1">
-                {campaign.characters.map((ch) => {
-                  const clsName =
-                    campaign.compendium.classes.find((c) => c.id === ch.classId)?.name || 'Herói';
-                  const activeHolder = connectedPlayers.find(
-                    (p) => p.role === 'player' && p.characterId === ch.id && p.playerId !== myPlayerId
-                  );
-                  return (
-                    <div
-                      key={ch.id}
-                      className="rpg-card rounded-lg p-3 flex items-center justify-between gap-3 border hover:border-amber-400/70 transition"
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <TokenPortrait
-                          name={ch.name}
-                          imageUrl={ch.portraitUrl}
-                          playerColor={ch.playerColor || '#38bdf8'}
-                          frameStyle={ch.tokenFrameStyle || 'gold'}
-                          sizePx={50}
-                        />
-                        <div className="min-w-0">
-                          <div className="font-display font-bold text-sm text-amber-100 truncate">
-                            {ch.name}
-                          </div>
-                          <div className="text-[11px] text-amber-300/85 truncate">
-                            Nv {ch.level} • {clsName} • Jogador: {ch.playerName}
-                          </div>
-                          {activeHolder && (
-                            <div className="text-[10px] text-emerald-300 font-semibold">
-                              Online agora ({activeHolder.playerName})
-                            </div>
+                          {item.vaultEntryId && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                if (
+                                  await openConfirmDialog(
+                                    `Remover "${h.name}" do Cofre de Heróis salvos?`,
+                                    'Remover do Cofre'
+                                  )
+                                ) {
+                                  deleteSavedHero(item.vaultEntryId!);
+                                }
+                              }}
+                              className="p-1 rounded bg-red-950/60 border border-red-500/40 text-red-200 hover:bg-red-900 cursor-pointer"
+                              title="Excluir do Cofre"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
                           )}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        disabled={Boolean(pendingHeroJoinRequest)}
-                        onClick={() => claimCampaignCharacter(ch.id)}
-                        className="rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-[11px] shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
-                      >
-                        {pendingHeroJoinRequest?.characterId === ch.id
-                          ? 'Aguardando Mestre...'
-                          : 'Pedir para Assumir'}
-                      </button>
                     </div>
                   );
                 })}
@@ -577,6 +585,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                 <label className="font-display font-bold block mb-1">Nome do Personagem *</label>
                 <input
                   required
+                  maxLength={28}
                   value={charName}
                   onChange={(e) => setCharName(e.target.value)}
                   placeholder="Ex: Arthas Lâmina-Alva"

@@ -8,13 +8,23 @@ release/
 Chronicles.exe
 *.tsbuildinfo
 
-# Local runtime uploads & saves
-server/data/uploads/
-server/data/campaigns/
+# AI / Agent local metadata
+GEMINI.md
+.agents/
+
+# Local runtime uploads & saves (keep folders empty in git via .gitkeep)
+server/data/uploads/*
+!server/data/uploads/.gitkeep
+server/data/campaigns/*
+!server/data/campaigns/.gitkeep
+server/data/characters/*
+!server/data/characters/.gitkeep
 server/data/active-campaign.txt
 server/data/campaign-state.json
 
-# Logs & OS files
+# Environment, logs & OS files
+.env
+.env.local
 *.log
 .DS_Store
 Thumbs.db
