@@ -14,7 +14,15 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
-import { getMonsterWoundStatus } from '../shared/rulesEngine';
+import {
+  computeCharacterStats,
+  ensureSurfaceCondition,
+  evaluateFormula,
+  getCombatantActionsRemaining,
+  getCombatantBonusActionsRemaining,
+  getConditionExtraEconomy,
+  getMonsterWoundStatus,
+} from '../shared/rulesEngine';
 import { SculptedHealthBar } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
 
@@ -28,6 +36,10 @@ export const InitiativeBar: React.FC = () => {
     setActiveCharacterId,
     updateCampaign,
     sendRoll,
+    applyDamage,
+    pushCombatLog,
+    triggerSlashVfx,
+    startTacticalSavePrompt,
     playCharacterTheme,
     triggerOpportunityPrompt,
     startCombatFromMap,
@@ -65,7 +77,12 @@ export const InitiativeBar: React.FC = () => {
       const activeCb = combat.combatants[combat.currentTurnIndex];
       const canPass =
         role === 'gm' ||
-        Boolean(activeCb && myCharacter && activeCb.referenceId === myCharacter.id);
+        Boolean(
+          activeCb &&
+            myCharacter &&
+            (activeCb.referenceId === myCharacter.id ||
+              activeCb.controlledByCharacterId === myCharacter.id)
+        );
       if (!canPass) return;
       e.preventDefault();
       changeTurn(1);
@@ -114,11 +131,30 @@ export const InitiativeBar: React.FC = () => {
             return true;
           });
         const speed = cb.speedMeters ?? 9;
+        const removedSet = new Set(
+          expiredCondIdsToRemove
+            .filter(
+              (item) =>
+                (item.tokenId && item.tokenId === cb.tokenId) ||
+                (item.charId && cb.referenceId === item.charId)
+            )
+            .map((item) => item.condId)
+        );
+        const curCondIds = (
+          cb.type === 'character'
+            ? characters.find((c) => c.id === cb.referenceId)?.activeConditionIds || []
+            : activeMap?.tokens.find((t) => t.id === cb.tokenId)?.activeConditionIds || []
+        ).filter((cid) => !removedSet.has(cid));
+        const extraEcon = getConditionExtraEconomy(curCondIds, campaign);
+        const maxActs = 1 + extraEcon.extraActions;
+        const maxBon = 1 + extraEcon.extraBonusActions;
         return {
           ...cb,
           remainingMoveMeters: speed,
-          actionAvailable: true,
-          bonusActionAvailable: true,
+          actionsRemaining: maxActs,
+          actionAvailable: maxActs > 0,
+          bonusActionsRemaining: maxBon,
+          bonusActionAvailable: maxBon > 0,
           reactionAvailable: true,
           disengaged: false,
           dodging: false,
@@ -188,6 +224,196 @@ export const InitiativeBar: React.FC = () => {
         details: `Terminou: ${expiredLabels.join(', ')}. Turno de ${activeCombatant.name}.`,
       });
     }
+
+    if (direction === 1 && activeMap) {
+      const prevCombatant = combat.combatants[combat.currentTurnIndex];
+
+      // 1. Outgoing combatant: END-OF-TURN Condition Tick (DoT/HoT) + End-of-Turn Save to shake off condition
+      if (prevCombatant && prevCombatant.hp > 0) {
+        const prevTok = activeMap.tokens.find(
+          (t) =>
+            t.id === prevCombatant.tokenId ||
+            (prevCombatant.referenceId &&
+              t.type === 'character' &&
+              t.referenceId === prevCombatant.referenceId)
+        );
+        const prevCondIds =
+          prevCombatant.type === 'character'
+            ? characters.find((c) => c.id === prevCombatant.referenceId)?.activeConditionIds || []
+            : prevTok?.activeConditionIds || [];
+
+        if (prevTok) {
+          const prevHero =
+            prevCombatant.type === 'character' && prevCombatant.referenceId
+              ? characters.find((c) => c.id === prevCombatant.referenceId)
+              : undefined;
+          const prevStats = prevHero ? computeCharacterStats(prevHero, campaign) : undefined;
+          let promptedEndSave = false;
+          for (const cid of prevCondIds) {
+            const cond = compendium.conditions.find((c) => c.id === cid);
+            if (!cond) continue;
+            if (cond.tickEffect && cond.tickEffect.trigger === 'end' && cond.tickEffect.formula.trim()) {
+              const res = evaluateFormula(cond.tickEffect.formula, prevStats, prevHero);
+              const val = Math.max(1, res.total);
+              const isHeal = cond.tickEffect.mode === 'heal';
+              const dmgType = isHeal ? 'Cura' : cond.tickEffect.damageType || 'Dano';
+              window.setTimeout(() => {
+                applyDamage(prevTok.id, val, isHeal, undefined, dmgType);
+                triggerSlashVfx(prevTok.id, isHeal ? 'heal' : 'hit');
+              }, 140);
+              window.setTimeout(() => {
+                pushCombatLog({
+                  category: isHeal ? 'heal' : 'damage',
+                  actorName: prevCombatant.name,
+                  actorKind: prevCombatant.type === 'character' ? 'hero' : 'monster',
+                  actorColor: prevCombatant.color,
+                  summary: isHeal
+                    ? `recuperou +${val} PV por ${cond.icon} ${cond.name} (Fim do Turno)`
+                    : `sofreu -${val} de ${dmgType} por ${cond.icon} ${cond.name} (Fim do Turno)`,
+                });
+              }, 420);
+            }
+            if (!promptedEndSave && cond.endOfTurnSave?.skillId) {
+              promptedEndSave = true;
+              const sk = compendium.skills.find((s) => s.id === cond.endOfTurnSave!.skillId);
+              const saveDc = cond.endOfTurnSave.dc || 12;
+              window.setTimeout(() => {
+                startTacticalSavePrompt({
+                  kind: 'condition-save',
+                  title: `Resistir: ${cond.icon} ${cond.name}`,
+                  subtitle: `Fim do turno de ${prevCombatant.name} — se passar, encerra a condição!`,
+                  saveSkillId: cond.endOfTurnSave!.skillId,
+                  saveLabel: sk?.name || 'Salvaguarda',
+                  dc: saveDc,
+                  removeConditionOnPassId: cond.id,
+                  tokens: [prevTok],
+                });
+              }, 220);
+            }
+          }
+        }
+      }
+
+      // 2. Incoming combatant: START-OF-TURN Condition Tick (DoT/HoT) + Elemental Surface hazard check
+      if (activeCombatant && activeCombatant.hp > 0) {
+        const nextTok = activeMap.tokens.find(
+          (t) =>
+            t.id === activeCombatant.tokenId ||
+            (activeCombatant.referenceId &&
+              t.type === 'character' &&
+              t.referenceId === activeCombatant.referenceId)
+        );
+        const removedOnNext = new Set(
+          expiredCondIdsToRemove
+            .filter(
+              (item) =>
+                (item.tokenId && item.tokenId === activeCombatant.tokenId) ||
+                (item.charId && activeCombatant.referenceId === item.charId)
+            )
+            .map((item) => item.condId)
+        );
+        const nextCondIds = (
+          activeCombatant.type === 'character'
+            ? characters.find((c) => c.id === activeCombatant.referenceId)?.activeConditionIds || []
+            : nextTok?.activeConditionIds || []
+        ).filter((cid) => !removedOnNext.has(cid));
+
+        if (nextTok) {
+          const nextHero =
+            activeCombatant.type === 'character' && activeCombatant.referenceId
+              ? characters.find((c) => c.id === activeCombatant.referenceId)
+              : undefined;
+          const nextStats = nextHero ? computeCharacterStats(nextHero, campaign) : undefined;
+          for (const cid of nextCondIds) {
+            const cond = compendium.conditions.find((c) => c.id === cid);
+            if (!cond?.tickEffect || cond.tickEffect.trigger !== 'start' || !cond.tickEffect.formula.trim()) {
+              continue;
+            }
+            const res = evaluateFormula(cond.tickEffect.formula, nextStats, nextHero);
+            const val = Math.max(1, res.total);
+            const isHeal = cond.tickEffect.mode === 'heal';
+            const dmgType = isHeal ? 'Cura' : cond.tickEffect.damageType || 'Dano';
+            window.setTimeout(() => {
+              applyDamage(nextTok.id, val, isHeal, undefined, dmgType);
+              triggerSlashVfx(nextTok.id, isHeal ? 'heal' : 'hit');
+            }, 180);
+            window.setTimeout(() => {
+              pushCombatLog({
+                category: isHeal ? 'heal' : 'damage',
+                actorName: activeCombatant.name,
+                actorKind: activeCombatant.type === 'character' ? 'hero' : 'monster',
+                actorColor: activeCombatant.color,
+                summary: isHeal
+                  ? `recuperou +${val} PV por ${cond.icon} ${cond.name} (Início do Turno)`
+                  : `sofreu -${val} de ${dmgType} por ${cond.icon} ${cond.name} (Início do Turno)`,
+              });
+            }, 460);
+          }
+
+          // Elemental Surface start-of-turn damage (Fire / Acid)
+          const standingSurf = activeMap.elementalSurfaces?.[`${nextTok.x},${nextTok.y}`];
+          if (standingSurf === 'fire' || standingSurf === 'acid') {
+            const surfFormula =
+              standingSurf === 'fire'
+                ? activeMap.surfaceConfig?.fireDamageFormula || '1d6'
+                : activeMap.surfaceConfig?.acidDamageFormula || '1d4';
+            const surfDmg = Math.max(1, evaluateFormula(surfFormula).total);
+            const surfDmgType = standingSurf === 'fire' ? 'Fogo' : 'Ácido';
+            window.setTimeout(() => {
+              applyDamage(nextTok.id, surfDmg, false, undefined, surfDmgType);
+              triggerSlashVfx(nextTok.id, 'hit');
+            }, 240);
+            window.setTimeout(() => {
+              pushCombatLog({
+                category: 'damage',
+                actorName: activeCombatant.name,
+                actorKind: activeCombatant.type === 'character' ? 'hero' : 'monster',
+                actorColor: activeCombatant.color,
+                summary: `iniciou o turno sobre ${surfDmgType} e sofreu -${surfDmg} de dano (${surfFormula})!`,
+              });
+            }, 520);
+          }
+
+          // Tactical Weather: Rain applies Molhado on turn start when weatherEffectsEnabled is active (staggered after damage to avoid Socket.IO patch race!)
+          if (activeMap.weatherEffectsEnabled && activeMap.weather === 'rain') {
+            const wetId =
+              compendium.conditions.find((c) => /molhad/i.test(c.name) || c.id === 'cond-molhado')
+                ?.id || 'cond-molhado';
+            if (!nextCondIds.includes(wetId)) {
+              window.setTimeout(() => {
+                updateCampaign((prev) => ({
+                  ...prev,
+                  compendium: {
+                    ...prev.compendium,
+                    conditions: ensureSurfaceCondition(prev.compendium.conditions, 'cond-molhado'),
+                  },
+                  characters:
+                    activeCombatant.type === 'character' && activeCombatant.referenceId
+                      ? prev.characters.map((c) =>
+                          c.id === activeCombatant.referenceId && !c.activeConditionIds.includes(wetId)
+                            ? { ...c, activeConditionIds: [...c.activeConditionIds, wetId] }
+                            : c
+                        )
+                      : prev.characters,
+                  maps: prev.maps.map((m) =>
+                    m.id !== activeMap.id
+                      ? m
+                      : {
+                          ...m,
+                          tokens: m.tokens.map((t) =>
+                            t.id === nextTok.id && !(t.activeConditionIds || []).includes(wetId)
+                              ? { ...t, activeConditionIds: [...(t.activeConditionIds || []), wetId] }
+                              : t
+                          ),
+                        }
+                  ),
+                }));
+              }, 580);
+            }
+          }
+        }
+      }
+    }
   };
 
   const updateCombatantInit = (id: string, value: number) => {
@@ -226,25 +452,36 @@ export const InitiativeBar: React.FC = () => {
   };
 
   const resetCombatantEconomy = (id: string) => {
-    updateCampaign((prev) => ({
-      ...prev,
-      combat: {
-        ...prev.combat,
-        combatants: prev.combat.combatants.map((c) =>
-          c.id !== id
-            ? c
-            : {
-                ...c,
-                remainingMoveMeters: c.speedMeters ?? 9,
-                actionAvailable: true,
-                bonusActionAvailable: true,
-                reactionAvailable: true,
-                disengaged: false,
-                dodging: false,
-              }
-        ),
-      },
-    }));
+    updateCampaign((prev) => {
+      const aMap = prev.maps.find((m) => m.id === prev.activeMapId);
+      return {
+        ...prev,
+        combat: {
+          ...prev.combat,
+          combatants: prev.combat.combatants.map((c) => {
+            if (c.id !== id) return c;
+            const curCondIds =
+              c.type === 'character'
+                ? prev.characters.find((ch) => ch.id === c.referenceId)?.activeConditionIds || []
+                : aMap?.tokens.find((t) => t.id === c.tokenId)?.activeConditionIds || [];
+            const extraEcon = getConditionExtraEconomy(curCondIds, prev);
+            const maxActs = 1 + extraEcon.extraActions;
+            const maxBon = 1 + extraEcon.extraBonusActions;
+            return {
+              ...c,
+              remainingMoveMeters: c.speedMeters ?? 9,
+              actionsRemaining: maxActs,
+              actionAvailable: maxActs > 0,
+              bonusActionsRemaining: maxBon,
+              bonusActionAvailable: maxBon > 0,
+              reactionAvailable: true,
+              disengaged: false,
+              dodging: false,
+            };
+          }),
+        },
+      };
+    });
   };
 
   if (!combat.active) {
@@ -252,13 +489,19 @@ export const InitiativeBar: React.FC = () => {
     return null;
   }
 
-  const visibleCombatants = combat.combatants.filter((c) => role === 'gm' || !c.isHidden);
+  const visibleCombatants = combat.combatants.filter((c) => {
+    if (role === 'gm' || !c.isHidden) return true;
+    if (!myCharacter) return false;
+    const tok = activeMap?.tokens.find((t) => t.id === c.tokenId);
+    return Boolean(tok?.visibleToCharacterIds?.includes(myCharacter.id));
+  });
   const currentActive = combat.combatants[combat.currentTurnIndex];
   const currentActiveId = currentActive?.id;
   const isMyTurn =
     role === 'player' &&
     myCharacter &&
-    currentActive?.referenceId === myCharacter.id;
+    (currentActive?.referenceId === myCharacter.id ||
+      currentActive?.controlledByCharacterId === myCharacter.id);
 
   return (
     <div
@@ -348,6 +591,12 @@ export const InitiativeBar: React.FC = () => {
           const isTurn = cb.id === currentActiveId;
           const isSelectedOnMap = Boolean(cb.tokenId && targetTokenId === cb.tokenId);
 
+          const mapTok = cb.tokenId
+            ? activeMap?.tokens.find((t) => t.id === cb.tokenId)
+            : undefined;
+          const displayCbName =
+            role !== 'gm' && mapTok?.hideNameFromPlayers ? '???' : cb.name;
+
           if (compactMode) {
             return (
               <button
@@ -361,7 +610,7 @@ export const InitiativeBar: React.FC = () => {
                     setActiveCharacterId(cb.referenceId);
                   }
                 }}
-                title={`${cb.name} • Init ${cb.initiative}${role === 'gm' || cb.type === 'character' ? ` • PV ${cb.hp}/${cb.maxHp}` : ''}`}
+                title={`${displayCbName} • Init ${cb.initiative}${role === 'gm' || cb.type === 'character' ? ` • PV ${cb.hp}/${cb.maxHp}` : ''}`}
                 className={`px-2.5 py-1 rounded-md text-xs font-display font-bold flex items-center gap-1.5 shrink-0 transition cursor-pointer border ${
                   isTurn
                     ? 'bg-amber-500/20 border-amber-400 text-amber-100 shadow-[0_0_12px_rgba(245,158,11,0.35)]'
@@ -375,7 +624,7 @@ export const InitiativeBar: React.FC = () => {
                   className="w-2 h-2 rounded-full shrink-0"
                   style={{ backgroundColor: cb.hp <= 0 ? '#ef4444' : cb.color }}
                 />
-                <span className="max-w-[125px] truncate">{cb.name}</span>
+                <span className="max-w-[125px] truncate">{displayCbName}</span>
                 {isTurn && <span className="text-[9px] text-amber-300">◀</span>}
               </button>
             );
@@ -389,9 +638,6 @@ export const InitiativeBar: React.FC = () => {
             cb.type === 'monster' && cb.referenceId
               ? compendium.monsters.find((m) => m.id === cb.referenceId)
               : undefined;
-          const mapTok = cb.tokenId
-            ? activeMap?.tokens.find((t) => t.id === cb.tokenId)
-            : undefined;
           const portraitImg = linkedChar?.portraitUrl || mapTok?.imageUrl;
           const frameStyle =
             linkedChar?.tokenFrameStyle ||
@@ -428,7 +674,7 @@ export const InitiativeBar: React.FC = () => {
                     {idx + 1}º
                   </span>
                   <TokenPortrait
-                    name={cb.name}
+                    name={displayCbName}
                     imageUrl={portraitImg}
                     playerColor={linkedChar?.playerColor || cb.color}
                     frameStyle={frameStyle}
@@ -436,7 +682,7 @@ export const InitiativeBar: React.FC = () => {
                     isDead={cb.hp <= 0}
                     iconHint={linkedMon?.type || linkedChar?.classId}
                   />
-                  <span className="text-xs font-display font-bold truncate">{cb.name}</span>
+                  <span className="text-xs font-display font-bold truncate">{displayCbName}</span>
                 </div>
                 {role === 'gm' ? (
                   <input
@@ -492,27 +738,31 @@ export const InitiativeBar: React.FC = () => {
               )}
 
               {/* Faceted Diamond Action Economy Gems */}
+              {(() => {
+                const actsLeft = getCombatantActionsRemaining(cb);
+                const bonLeft = getCombatantBonusActionsRemaining(cb);
+                return (
               <div className="flex items-center justify-between gap-1 mt-1 text-[9px] font-display">
                 <div className="flex items-center gap-1">
                   <span
                     className={`px-1 py-0.2 rounded-xs border flex items-center gap-0.5 ${
-                      cb.actionAvailable !== false
+                      actsLeft > 0
                         ? 'bg-amber-950/70 border-amber-400/60 text-amber-200'
                         : 'bg-black/40 border-white/10 opacity-35 line-through'
                     }`}
-                    title="Ação Padrão"
+                    title={`Ação Padrão (${actsLeft} restante(s))`}
                   >
-                    ♦ A
+                    ♦ A{actsLeft > 1 ? ` ×${actsLeft}` : ''}
                   </span>
                   <span
                     className={`px-1 py-0.2 rounded-xs border flex items-center gap-0.5 ${
-                      cb.bonusActionAvailable !== false
+                      bonLeft > 0
                         ? 'bg-sky-950/70 border-sky-400/50 text-sky-200'
                         : 'bg-black/40 border-white/10 opacity-35 line-through'
                     }`}
-                    title="Ação Bônus"
+                    title={`Ação Bônus (${bonLeft} restante(s))`}
                   >
-                    ♦ B
+                    ♦ B{bonLeft > 1 ? ` ×${bonLeft}` : ''}
                   </span>
                   <span
                     className={`px-1 py-0.2 rounded-xs border flex items-center gap-0.5 ${
@@ -529,6 +779,8 @@ export const InitiativeBar: React.FC = () => {
                   {cb.remainingMoveMeters ?? cb.speedMeters ?? 9}m
                 </span>
               </div>
+                );
+              })()}
 
               {/* Active Effects & Conditions (Synced for Heroes, Monsters & NPCs!) */}
               {(() => {

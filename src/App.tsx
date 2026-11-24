@@ -39,9 +39,12 @@ const HandoutOverlay: React.FC = () => {
       >
         <div className="flex items-start justify-between gap-3">
           <div>
-            {activeHandout.targetPlayerName && (
-              <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40">
-                Sussurro Privado ({activeHandout.targetPlayerName})
+            {(activeHandout.targetPlayerName ||
+              (activeHandout.recipientCharacterIds &&
+                activeHandout.recipientCharacterIds.length > 0)) && (
+              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-purple-500/25 text-purple-200 border border-purple-400/50 font-display font-bold">
+                👁️ Sussurro Secreto — Somente você percebeu isso
+                {activeHandout.targetPlayerName ? ` (${activeHandout.targetPlayerName})` : ''}
               </span>
             )}
             <h3 className="font-display font-bold text-xl mt-1" style={{ color: 'var(--accent-primary)' }}>

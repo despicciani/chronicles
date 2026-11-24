@@ -605,3 +605,130 @@ body {
 .animate-banner-drain {
   animation: bannerDrain 2.8s linear forwards;
 }
+
+/* =========================================================
+   AAA DARK-FANTASY TOKEN AURAS & CINEMATIC VIGNETTES
+   ========================================================= */
+@keyframes auraSpinSlow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes auraSpinReverse {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
+}
+
+@keyframes auraPulseSoft {
+  0%, 100% { opacity: 0.58; transform: scale(0.98); }
+  50% { opacity: 0.96; transform: scale(1.06); }
+}
+
+@keyframes critEdgeFlash {
+  0% { opacity: 0; }
+  18% { opacity: 0.85; }
+  100% { opacity: 0; }
+}
+
+@keyframes downedEdgeFlash {
+  0% { opacity: 0; }
+  25% { opacity: 0.9; }
+  100% { opacity: 0; }
+}
+
+.animate-aura-spin {
+  animation: auraSpinSlow 9s linear infinite;
+}
+
+.animate-aura-spin-rev {
+  animation: auraSpinReverse 12s linear infinite;
+}
+
+.animate-aura-pulse {
+  animation: auraPulseSoft 2.1s ease-in-out infinite;
+}
+
+.animate-crit-edge-flash {
+  animation: critEdgeFlash 0.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-downed-edge-flash {
+  animation: downedEdgeFlash 1.2s ease-out forwards;
+}
+
+@keyframes mapShakeLight {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  20% { transform: translate3d(-3px, 2px, 0); }
+  40% { transform: translate3d(3px, -2px, 0); }
+  60% { transform: translate3d(-2px, -1px, 0); }
+  80% { transform: translate3d(2px, 1px, 0); }
+}
+
+@keyframes mapShakeHeavy {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  12% { transform: translate3d(-7px, 4px, 0); }
+  25% { transform: translate3d(7px, -5px, 0); }
+  38% { transform: translate3d(-6px, -4px, 0); }
+  52% { transform: translate3d(6px, 4px, 0); }
+  68% { transform: translate3d(-4px, 2px, 0); }
+  84% { transform: translate3d(3px, -2px, 0); }
+}
+
+@keyframes shockwaveRingExpand {
+  0% {
+    transform: translate(-50%, -50%) scale(0.18);
+    opacity: 0.95;
+  }
+  70% {
+    opacity: 0.55;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2.85);
+    opacity: 0;
+  }
+}
+
+@keyframes damageEdgeFlash {
+  0% { opacity: 0; }
+  20% { opacity: 0.78; }
+  100% { opacity: 0; }
+}
+
+@keyframes turnBannerSlide {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -18px) scale(0.95);
+  }
+  16% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  82% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(0.98);
+  }
+}
+
+.animate-map-shake-light {
+  animation: mapShakeLight 0.28s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+.animate-map-shake-heavy {
+  animation: mapShakeHeavy 0.48s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+.animate-shockwave-ring {
+  animation: shockwaveRingExpand 0.72s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-damage-edge-flash {
+  animation: damageEdgeFlash 0.44s ease-out forwards;
+}
+
+.animate-turn-banner {
+  animation: turnBannerSlide 1.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

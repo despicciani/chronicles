@@ -49,6 +49,9 @@ export const CinematicOverlays: React.FC = () => {
     dismissMapBanner,
     announceBoss,
     resolveAssetUrl,
+    screenShakeActive,
+    cinematicEnabled,
+    triggerScreenShake,
   } = useCampaign();
 
   const activeChar =
@@ -71,21 +74,24 @@ export const CinematicOverlays: React.FC = () => {
       : attr
       ? stats.attributes[attr.id]?.mod ?? 0
       : 0;
-    const formulaStr = `1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}`;
+    const extraDice = skill ? stats.skills[skill.id]?.diceBonuses || [] : [];
+    const formulaStr = `1d20 ${bonus >= 0 ? `+ ${bonus}` : `- ${Math.abs(bonus)}`}${
+      extraDice.length > 0 ? ` + ${extraDice.join(' + ')}` : ''
+    }`;
 
     openManualRoll({
       title: `Teste Pedido: ${activeSkillCheck.label}`,
       subtitle: `Dificuldade: CD ${activeSkillCheck.dc}`,
       formula: formulaStr,
       displayFormula: formulaStr,
-      previewDice: buildPreviewDiceForFormula('1d20', 'normal'),
+      previewDice: buildPreviewDiceForFormula(formulaStr, 'normal'),
       rollerName: activeChar.name,
       rollerColor: activeChar.playerColor || activeChar.tokenColor,
       diceSkin: activeChar.diceSkin || 'gold',
       allowAdvantageToggle: true,
       advantageMode: 'normal',
       onExecute: (chosenMode) => {
-        const res = evaluateFormula(`1d20 + ${bonus}`, stats, activeChar, {
+        const res = evaluateFormula(formulaStr, stats, activeChar, {
           advantageMode: chosenMode,
         });
         const passed = res.isCrit || (!res.isFumble && res.total >= activeSkillCheck.dc);
@@ -126,6 +132,12 @@ export const CinematicOverlays: React.FC = () => {
 
   const activeBoss = campaign.activeBoss;
   const [bossMinimized, setBossMinimized] = useState(false);
+  const [mvpXpInput, setMvpXpInput] = useState('150');
+  const [mvpXpDelivered, setMvpXpDelivered] = useState(false);
+
+  useEffect(() => {
+    setMvpXpDelivered(false);
+  }, [activeMvpSummary?.id]);
 
   // Automatic "É O SEU TURNO!" Banner + Turn Herald SFX when combat turn changes
   const [turnBanner, setTurnBanner] = useState<{
@@ -152,10 +164,15 @@ export const CinematicOverlays: React.FC = () => {
 
     const isMyTurn =
       role === 'player' &&
-      Boolean(myCharacter && activeCb.referenceId && activeCb.referenceId === myCharacter.id);
+      Boolean(
+        myCharacter &&
+          ((activeCb.referenceId && activeCb.referenceId === myCharacter.id) ||
+            activeCb.controlledByCharacterId === myCharacter.id)
+      );
     if (isMyTurn) {
       soundEngine.playSfxPreset('turn');
     }
+    if (!cinematicEnabled) return;
     if (isMyTurn || role === 'gm') {
       const id = `turn-${Date.now()}`;
       setTurnBanner({
@@ -172,10 +189,136 @@ export const CinematicOverlays: React.FC = () => {
     }
   }, [campaign.combat, myCharacter, role]);
 
+  // Boss Phase Transition Cinematic Banner (auto-triggers when any visible Boss enters Phase 2, 3, ...)
+  const [bossPhaseBanner, setBossPhaseBanner] = useState<{
+    id: string;
+    bossName: string;
+    phase: number;
+    phaseTitle?: string;
+  } | null>(null);
+  const bossPhaseMapRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    const activeMap = campaign.maps.find((m) => m.id === campaign.activeMapId);
+    if (!activeMap) return;
+    for (const tok of activeMap.tokens) {
+      if (!tok.isBoss || (tok.isHidden && role !== 'gm')) continue;
+      const curPhase = tok.bossPhase || 1;
+      const prevPhase = bossPhaseMapRef.current[tok.id];
+      bossPhaseMapRef.current[tok.id] = curPhase;
+      if (prevPhase !== undefined && curPhase > prevPhase && curPhase >= 2) {
+        if (cinematicEnabled) {
+          const bid = `bphase-${Date.now()}`;
+          const displayName =
+            role !== 'gm' && tok.hideNameFromPlayers ? '???' : tok.name;
+          setBossPhaseBanner({
+            id: bid,
+            bossName: displayName,
+            phase: curPhase,
+            phaseTitle: tok.bossPhase2Title,
+          });
+          triggerScreenShake('heavy');
+          window.setTimeout(() => {
+            setBossPhaseBanner((curr) => (curr?.id === bid ? null : curr));
+          }, 3800);
+        }
+        soundEngine.playSfxPreset('crit');
+      }
+    }
+  }, [campaign.activeMapId, campaign.maps, cinematicEnabled, role, triggerScreenShake]);
+
+  // Downed (0 PV) & Damage Taken Crimson Edge Vignette Pulse for Player
+  const [downedFlashKey, setDownedFlashKey] = useState<number | null>(null);
+  const [damageFlashKey, setDamageFlashKey] = useState<number | null>(null);
+  const prevMyHpRef = useRef<number | undefined>(myCharacter?.hp);
+  useEffect(() => {
+    const curHp = myCharacter?.hp;
+    const prevHp = prevMyHpRef.current;
+    prevMyHpRef.current = curHp;
+    if (!cinematicEnabled || role !== 'player' || prevHp === undefined || curHp === undefined) return;
+    if (prevHp > 0 && curHp <= 0) {
+      const k = Date.now();
+      setDownedFlashKey(k);
+      triggerScreenShake('heavy');
+      const t = window.setTimeout(() => {
+        setDownedFlashKey((c) => (c === k ? null : c));
+      }, 1250);
+      return () => window.clearTimeout(t);
+    }
+    if (curHp < prevHp && curHp > 0) {
+      const k = Date.now();
+      setDamageFlashKey(k);
+      if (prevHp - curHp >= 10) {
+        triggerScreenShake('light');
+      }
+      const t = window.setTimeout(() => {
+        setDamageFlashKey((c) => (c === k ? null : c));
+      }, 460);
+      return () => window.clearTimeout(t);
+    }
+  }, [cinematicEnabled, myCharacter?.hp, role, triggerScreenShake]);
+
   return (
     <>
+      {/* 0. CRITICAL HIT & DOWNED CINEMATIC EDGE VIGNETTES */}
+      {/* 0. CRIT & DAMAGE EDGE FLASHES (gated by Cinematic toggle) */}
+      {cinematicEnabled && damageFlashKey && (
+        <div
+          key={`dmg-flash-${damageFlashKey}`}
+          className="fixed inset-0 pointer-events-none z-[58] animate-damage-edge-flash"
+          style={{
+            boxShadow: 'inset 0 0 90px 24px rgba(220, 38, 38, 0.72)',
+          }}
+        />
+      )}
+      {cinematicEnabled && screenShakeActive && (
+        <div
+          className="fixed inset-0 z-40 pointer-events-none animate-crit-edge-flash"
+          style={{
+            boxShadow: 'inset 0 0 95px 24px rgba(245, 158, 11, 0.55), inset 0 0 42px 8px rgba(220, 38, 38, 0.45)',
+          }}
+        />
+      )}
+      {cinematicEnabled && downedFlashKey !== null && (
+        <div
+          key={downedFlashKey}
+          className="fixed inset-0 z-40 pointer-events-none animate-downed-edge-flash"
+          style={{
+            boxShadow: 'inset 0 0 130px 42px rgba(185, 28, 28, 0.78)',
+          }}
+        />
+      )}
+
+      {/* 0Z. BOSS PHASE TRANSITION CINEMATIC BANNER */}
+      {cinematicEnabled && bossPhaseBanner && (
+        <div
+          onClick={() => setBossPhaseBanner(null)}
+          className="fixed top-24 left-1/2 -translate-x-1/2 z-50 pointer-events-auto cursor-pointer animate-modal-unfurl"
+        >
+          <OrnateFrame
+            accentColor="#dc2626"
+            cornerSize={18}
+            className="rpg-glass-panel rounded-xl px-8 py-3.5 text-center shadow-[0_24px_75px_rgba(0,0,0,0.95)] border-red-500/80"
+          >
+            <div className="text-[10px] font-display font-bold uppercase tracking-[0.28em] text-red-400 flex items-center justify-center gap-2">
+              <Crown className="w-3.5 h-3.5 text-amber-400" />
+              <span>Fase {bossPhaseBanner.phase} Despertada</span>
+              <Crown className="w-3.5 h-3.5 text-amber-400" />
+            </div>
+            <div className="font-chronicle font-black text-lg sm:text-xl tracking-[0.14em] uppercase chronicle-gold-text mt-0.5">
+              {bossPhaseBanner.bossName}
+            </div>
+            {bossPhaseBanner.phaseTitle && (
+              <div className="text-xs font-lore italic text-red-200/90 mt-0.5">
+                “{bossPhaseBanner.phaseTitle}”
+              </div>
+            )}
+          </OrnateFrame>
+        </div>
+      )}
+
       {/* 0A. "É O SEU TURNO!" / Turn Herald Banner */}
-      {turnBanner && (
+      {cinematicEnabled && turnBanner && (
         <div
           onClick={() => setTurnBanner(null)}
           className="fixed top-20 left-1/2 -translate-x-1/2 z-45 pointer-events-auto cursor-pointer animate-modal-unfurl"
@@ -348,28 +491,33 @@ export const CinematicOverlays: React.FC = () => {
               )}
 
               {/* Footer */}
-              <div className="flex items-center justify-between gap-2 pt-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                 {role === 'gm' ? (
                   <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={0}
+                      step={25}
+                      value={mvpXpInput}
+                      onChange={(e) => setMvpXpInput(e.target.value)}
+                      disabled={mvpXpDelivered}
+                      className="rpg-input w-20 py-1 px-2 text-xs font-mono-dice text-center"
+                      placeholder="XP"
+                      title="Quantidade de XP para entregar ao grupo"
+                    />
                     <button
                       type="button"
+                      disabled={mvpXpDelivered || Math.max(0, Number(mvpXpInput) || 0) <= 0}
                       onClick={() => {
-                        awardXp('all', 100);
-                        dismissMvpSummary();
+                        const amount = Math.max(0, Math.floor(Number(mvpXpInput) || 0));
+                        if (amount > 0) {
+                          awardXp('all', amount);
+                          setMvpXpDelivered(true);
+                        }
                       }}
-                      className="rpg-card px-2.5 py-1.5 rounded-md text-[11px] font-display font-bold text-amber-200 hover:border-amber-400 cursor-pointer"
+                      className="rpg-card px-2.5 py-1.5 rounded-md text-[11px] font-display font-bold text-amber-200 hover:border-amber-400 cursor-pointer disabled:opacity-45"
                     >
-                      +100 XP Grupo
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        awardXp('all', 250);
-                        dismissMvpSummary();
-                      }}
-                      className="rpg-card px-2.5 py-1.5 rounded-md text-[11px] font-display font-bold text-amber-200 hover:border-amber-400 cursor-pointer"
-                    >
-                      +250 XP Grupo
+                      {mvpXpDelivered ? '✓ XP Entregue' : 'Entregar XP ao Grupo'}
                     </button>
                   </div>
                 ) : (

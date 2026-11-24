@@ -25,6 +25,8 @@ export interface CampaignSettings {
   gridSquareMeters: number;
   attributePointBudget: number;
   maxTrainedSkills: number;
+  attributePointsPerGain?: number;
+  attributePointsEveryLevels?: number;
   showEnemyAcToPlayers?: boolean;
   enableFlanking?: boolean;
   xpThresholds?: number[];
@@ -64,13 +66,49 @@ export interface StatModifier {
   label?: string;
 }
 
+export type LightEmissionMode = 'none' | 'shared' | 'personal-darkvision';
+
+export type ConditionAuraVfx =
+  | 'auto'
+  | 'none'
+  | 'fire'
+  | 'blood'
+  | 'holy'
+  | 'poison'
+  | 'frost'
+  | 'shadow'
+  | 'arcane'
+  | 'lightning';
+
 export interface ConditionDef {
   id: string;
   name: string;
   color: string;
   icon: string;
   description: string;
+  publicToPlayers?: boolean;
   preventsOpportunityAttacks?: boolean;
+  lightMode?: LightEmissionMode;
+  lightRadiusMeters?: number;
+  auraVfx?: ConditionAuraVfx;
+  grantedAbilityIds?: string[];
+  extraActions?: number;
+  extraBonusActions?: number;
+  tickEffect?: {
+    mode: 'damage' | 'heal';
+    formula: string;
+    damageType?: string;
+    trigger: 'start' | 'end';
+  };
+  endOfTurnSave?: {
+    skillId: string;
+    dc: number;
+  };
+  resistances?: string[];
+  vulnerabilities?: string[];
+  immunities?: string[];
+  transformImageUrl?: string;
+  transformSize?: number;
   modifiers: StatModifier[];
 }
 
@@ -78,6 +116,7 @@ export interface RaceDef {
   id: string;
   name: string;
   description: string;
+  publicToPlayers?: boolean;
   speed: number;
   size: 'Pequeno' | 'Médio' | 'Grande';
   vision: string;
@@ -97,6 +136,7 @@ export interface ClassDef {
   id: string;
   name: string;
   description: string;
+  publicToPlayers?: boolean;
   hitDie: number;
   hpPerLevel: number;
   mpPerLevel: number;
@@ -137,35 +177,55 @@ export interface AbilityDef {
   saveDcFormula?: string;
   applyConditionId?: string;
   conditionDurationRounds?: number;
+  conditionDurationFormula?: string;
   requiresConcentration?: boolean;
   singleTargetOnly?: boolean;
   sfxPreset?: string;
+  vfxKind?: ProjectileVfxKind;
   aoeShape?: 'sphere' | 'cone' | 'line' | 'cube';
   aoeSizeMeters?: number;
   aoeColor?: string;
   aoePersistent?: boolean;
   aoeTargetFilter?: 'all' | 'exclude-caster' | 'exclude-allies';
   createsSurface?: ElementalSurfaceKind;
+  publicToPlayers?: boolean;
+  lightMode?: LightEmissionMode;
+  lightRadiusMeters?: number;
   imageUrl?: string;
+}
+
+export interface BossPhaseDef {
+  id: string;
+  hpThresholdPct: number;
+  title: string;
+  description?: string;
+  restoreLegendaryActions?: boolean;
 }
 
 export interface ItemDef {
   id: string;
   name: string;
-  type: 'Arma' | 'Armadura' | 'Escudo' | 'Consumível' | 'Item Mágico' | 'Equipamento';
+  type: 'Arma' | 'Armadura' | 'Escudo' | 'Consumível' | 'Item Mágico' | 'Equipamento' | 'Carta';
   slot?: EquipSlot;
   rarity?: CardRarity;
   weight: number;
   valueGold: number;
   description: string;
+  letterText?: string;
   attackFormula?: string;
   damageFormula?: string;
   damageType?: string;
   range?: string;
   critRange?: number;
   critMultiplier?: number;
+  grantedAbilityId?: string;
+  maxCharges?: number;
+  rechargeType?: 'long-rest' | 'short-rest' | 'consumable';
   defenseBonus?: number;
   modifiers?: StatModifier[];
+  publicToPlayers?: boolean;
+  lightMode?: LightEmissionMode;
+  lightRadiusMeters?: number;
   imageUrl?: string;
 }
 
@@ -202,17 +262,24 @@ export interface MonsterDef {
   damageVulnerabilities?: string[];
   skills?: string[];
   loot?: string;
+  lootGoldFormula?: string;
+  lootItems?: Array<{ itemId: string; quantity: number }>;
   secretNotes?: string;
   description: string;
   tokenColor: string;
   imageUrl?: string;
   hideAcFromPlayers?: boolean;
-  lightSource?: 'none' | 'torch' | 'lantern' | 'darkvision';
+  hideNameFromPlayers?: boolean;
+  lightSource?: string;
+  lightMode?: LightEmissionMode;
   lightRadiusMeters?: number;
+  lightLabel?: string;
   isBoss?: boolean;
   bossTitle?: string;
   bossPhase2HpPct?: number;
   bossPhase2Title?: string;
+  bossPhases?: BossPhaseDef[];
+  triggeredBossPhaseIds?: string[];
   legendaryActionsMax?: number;
   legendaryResistancesMax?: number;
 }
@@ -223,6 +290,7 @@ export interface InventoryEntry {
   quantity: number;
   equipped: boolean;
   equippedSlot?: EquipSlot;
+  chargesRemaining?: number;
   customNotes?: string;
 }
 
@@ -288,6 +356,7 @@ export interface Character {
   level: number;
   xp?: number;
   hasInspiration?: boolean;
+  inspirationPoints?: number;
   unspentAttributePoints?: number;
   attributes: Record<string, number>;
   trainedSkillIds: string[];
@@ -296,6 +365,8 @@ export interface Character {
   tempHp: number;
   mp: number;
   maxMpOverride?: number;
+  defenseOverride?: number;
+  speedOverride?: number;
   customResourceValues?: Record<string, { current: number; maxOverride?: number }>;
   knownAbilityIds: string[];
   customAttacks: CharacterCustomAttack[];
@@ -337,17 +408,25 @@ export interface MapToken {
   defense: number;
   activeConditionIds: string[];
   isHidden: boolean;
+  visibleToCharacterIds?: string[];
+  controlledByCharacterId?: string;
+  lootDropped?: boolean;
   color: string;
   frameStyle?: TokenFrameStyle;
   imageUrl?: string;
   hideAcFromPlayers?: boolean;
-  lightSource?: 'none' | 'torch' | 'lantern' | 'darkvision';
+  hideNameFromPlayers?: boolean;
+  lightSource?: string;
+  lightMode?: LightEmissionMode;
   lightRadiusMeters?: number;
+  lightLabel?: string;
   isBoss?: boolean;
   bossTitle?: string;
   bossPhase?: number;
   bossPhase2HpPct?: number;
   bossPhase2Title?: string;
+  bossPhases?: BossPhaseDef[];
+  triggeredBossPhaseIds?: string[];
   legendaryActionsMax?: number;
   legendaryActionsRemaining?: number;
   legendaryResistancesMax?: number;
@@ -365,9 +444,15 @@ export interface AoETemplate {
   label: string;
 }
 
-export type GmMarkerKind = 'chest' | 'item' | 'trap' | 'secret';
+export type GmMarkerKind = 'chest' | 'item' | 'trap' | 'secret' | 'door';
 export type TerrainCellKind = 'wall' | 'cover' | 'difficult';
 export type ElementalSurfaceKind = 'fire' | 'ice' | 'acid' | 'water';
+
+export interface ElementalSurfaceConfig {
+  fireDamageFormula?: string;
+  acidDamageFormula?: string;
+  iceSaveDc?: number;
+}
 
 export interface GmMapMarker {
   id: string;
@@ -377,6 +462,10 @@ export interface GmMapMarker {
   title: string;
   description?: string;
   revealed: boolean;
+  visibleToCharacterIds?: string[];
+  perceptionDc?: number;
+  doorState?: 'open' | 'closed' | 'locked';
+  lockDc?: number;
   lootItems?: Array<{ itemId: string; quantity: number }>;
   lootGold?: number;
   trapDc?: number;
@@ -385,6 +474,7 @@ export interface GmMapMarker {
   trapDamageType?: string;
   trapTriggered?: boolean;
   targetMapId?: string;
+  targetMarkerId?: string;
 }
 
 export interface SecretPassageAlert {
@@ -395,6 +485,8 @@ export interface SecretPassageAlert {
   sourceMapId: string;
   targetMapId?: string;
   targetMapName?: string;
+  targetMarkerId?: string;
+  targetMarkerTitle?: string;
   tokenId?: string;
   tokenName?: string;
   revealed: boolean;
@@ -412,10 +504,14 @@ export interface TacticalMap {
   gridHeight: number;
   gridSizePx: number;
   fogEnabled: boolean;
+  darknessEnabled?: boolean;
   revealedCells: string[];
   terrainCells?: Record<string, TerrainCellKind>;
   elementalSurfaces?: Record<string, ElementalSurfaceKind>;
+  surfaceConfig?: ElementalSurfaceConfig;
   weather: 'none' | 'rain' | 'embers' | 'snow' | 'mist';
+  weatherEffectsEnabled?: boolean;
+  timeOfDay?: 'none' | 'day' | 'dusk' | 'night';
   sceneNpcIds: string[];
   tokens: MapToken[];
   templates: AoETemplate[];
@@ -434,6 +530,7 @@ export interface Combatant {
   id: string;
   tokenId?: string;
   referenceId?: string;
+  controlledByCharacterId?: string;
   type: 'character' | 'monster';
   name: string;
   initiative: number;
@@ -443,7 +540,9 @@ export interface Combatant {
   speedMeters: number;
   remainingMoveMeters: number;
   actionAvailable: boolean;
+  actionsRemaining?: number;
   bonusActionAvailable: boolean;
+  bonusActionsRemaining?: number;
   reactionAvailable: boolean;
   disengaged?: boolean;
   dodging?: boolean;
@@ -498,11 +597,14 @@ export interface PendingAttackChoice {
   actionCost?: ActionEconomyCost;
   costMp?: number;
   costResourceId?: string;
+  chargedInventoryEntryId?: string;
   applyConditionId?: string;
   conditionDurationRounds?: number;
+  conditionDurationFormula?: string;
   requiresConcentration?: boolean;
   singleTargetOnly?: boolean;
   sfxPreset?: string;
+  vfxKind?: ProjectileVfxKind;
   isShoveManeuver?: boolean;
   saveSkillId?: string;
   saveDcFormula?: string;
@@ -528,6 +630,7 @@ export interface OpportunityAttackPrompt {
 
 export interface CombatDuelState {
   id: string;
+  attackerTokenId?: string;
   attackerCharacterId?: string;
   attackerName: string;
   attackerColor: string;
@@ -562,7 +665,10 @@ export interface CombatDuelState {
   defenderCanShieldReaction?: boolean;
   reactionShieldApplied?: boolean;
   applyConditionId?: string;
+  conditionDurationRounds?: number;
+  conditionDurationFormula?: string;
   sfxPreset?: string;
+  vfxKind?: ProjectileVfxKind;
   autoCritOnHit?: boolean;
   phase: 'ready-attack' | 'rolling-attack' | 'attack-result' | 'rolling-damage' | 'damage-result';
 }
@@ -580,6 +686,7 @@ export interface PendingManualRoll {
   allowAdvantageToggle?: boolean;
   advantageMode: 'normal' | 'advantage' | 'disadvantage';
   onExecute: (chosenMode: 'normal' | 'advantage' | 'disadvantage') => void;
+  onCancel?: () => void;
 }
 
 export interface InitiativeCeremonyEntry {
@@ -686,6 +793,7 @@ export interface HandoutPayload {
   imageUrl?: string;
   text?: string;
   targetPlayerName?: string;
+  recipientCharacterIds?: string[];
   sentAt: string;
 }
 
@@ -771,7 +879,7 @@ export interface TacticalSaveTargetEntry {
 
 export interface TacticalSavePrompt {
   id: string;
-  kind: 'trap' | 'aoe' | 'concentration';
+  kind: 'trap' | 'aoe' | 'concentration' | 'condition-save';
   title: string;
   subtitle?: string;
   saveSkillId: string;
@@ -782,6 +890,7 @@ export interface TacticalSavePrompt {
   halfOnSuccess?: boolean;
   rolledRawDamage?: number;
   applyConditionId?: string;
+  removeConditionOnPassId?: string;
   conditionDurationRounds?: number;
   casterCharacterId?: string;
   casterName?: string;
@@ -845,7 +954,12 @@ export type ProjectileVfxKind =
   | 'heal'
   | 'curse'
   | 'blessing'
-  | 'slash';
+  | 'slash'
+  | 'radiant'
+  | 'necrotic'
+  | 'poison'
+  | 'blood'
+  | 'thunder';
 
 export interface MapProjectileVfx {
   id: string;

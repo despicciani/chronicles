@@ -34,11 +34,17 @@ import { useCampaign } from '../context/CampaignContext';
 import {
   buildPreviewDiceForFormula,
   computeCharacterStats,
+  consumeCombatantEconomy,
   evaluateFormula,
   findNearestFreeGridCell,
   formatFormulaForDisplay,
   formatSigned,
+  getCombatantActionsRemaining,
+  getCombatantBonusActionsRemaining,
   getCharacterCustomResourceState,
+  getConditionGrantedAbilities,
+  getHeroInspirationPoints,
+  getInventoryChargedAbilities,
 } from '../shared/rulesEngine';
 import { ActionEconomyCost, NpcEntry } from '../shared/types';
 import { DraggablePanel, DragGripBadge } from './DraggablePanel';
@@ -70,7 +76,11 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     awardXp,
     pushCombatLog,
     toggleHeroInspiration,
+    adjustHeroInspiration,
     spendHeroInspiration,
+    useChargedItemAbility,
+    rerollSaveWithInspiration,
+    acceptFailedSaveTarget,
     quickRollFormula,
     sendPlayerRequest,
     pendingRequests,
@@ -86,6 +96,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
     activeSecretPassage,
     dismissSecretPassage,
     moveTokensToMap,
+    useBossLegendaryResistance,
     resolveAssetUrl,
     sendRoll,
     triggerSlashVfx,
@@ -147,14 +158,18 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
   const passiveCustomAbilities = (hero?.customAbilities || []).filter(
     (a) => a.actionType === 'Passiva',
   );
-  const compendiumAbilities = (hero?.knownAbilityIds || [])
+  const orderedKnownAbilities = (hero?.knownAbilityIds || [])
     .map((id) => campaign.compendium.abilities.find((a) => a.id === id))
-    .filter((a): a is NonNullable<typeof a> => Boolean(a))
-    .filter((a) => a.actionType !== 'Passiva');
-  const passiveCompendiumAbilities = (hero?.knownAbilityIds || [])
-    .map((id) => campaign.compendium.abilities.find((a) => a.id === id))
-    .filter((a): a is NonNullable<typeof a> => Boolean(a))
-    .filter((a) => a.actionType === 'Passiva');
+    .filter((a): a is NonNullable<typeof a> => Boolean(a));
+  const compendiumAbilities = orderedKnownAbilities.filter((a) => a.actionType !== 'Passiva');
+  const passiveCompendiumAbilities = orderedKnownAbilities.filter(
+    (a) => a.actionType === 'Passiva'
+  );
+  const conditionGrantedAbilities = getConditionGrantedAbilities(
+    hero?.activeConditionIds,
+    campaign
+  ).filter(({ ability }) => !compendiumAbilities.some((a) => a.id === ability.id));
+  const chargedItemAbilities = getInventoryChargedAbilities(hero, campaign);
 
   const toEconomyCost = (actionType: string): ActionEconomyCost =>
     actionType === 'Bônus'
@@ -243,6 +258,27 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
             })
           ),
           ...compendiumAbilities.map((ab) => () =>
+            rollCharacterAction({
+              characterId: hero.id,
+              title: ab.name,
+              attackFormula: ab.attackFormula,
+              damageFormula: ab.damageFormula,
+              damageType: ab.damageType,
+              range: ab.range,
+              actionCost: toEconomyCost(ab.actionType),
+              saveSkillId: ab.saveSkillId,
+              saveDcFormula: ab.saveDcFormula,
+              costMp: ab.costMp,
+              costResourceId: ab.costResourceId,
+              applyConditionId: ab.applyConditionId,
+              conditionDurationRounds: ab.conditionDurationRounds,
+              aoeShape: ab.aoeShape,
+              aoeSizeMeters: ab.aoeSizeMeters,
+              aoeColor: ab.aoeColor,
+              aoePersistent: ab.aoePersistent,
+            })
+          ),
+          ...conditionGrantedAbilities.map(({ ability: ab }) => () =>
             rollCharacterAction({
               characterId: hero.id,
               title: ab.name,
@@ -368,15 +404,14 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
           ),
           combat: {
             ...prev.combat,
-            combatants: prev.combat.combatants.map((c) =>
-              c.type === 'character' && c.referenceId === hero.id
-                ? {
-                    ...c,
-                    ...(isMp ? {} : { hp: nextHp, maxHp: stats.maxHp }),
-                    ...(prev.combat.active ? { bonusActionAvailable: false } : {}),
-                  }
-                : c
-            ),
+            combatants: prev.combat.combatants.map((c) => {
+              if (!(c.type === 'character' && c.referenceId === hero.id)) return c;
+              const updated = {
+                ...c,
+                ...(isMp ? {} : { hp: nextHp, maxHp: stats.maxHp }),
+              };
+              return prev.combat.active ? consumeCombatantEconomy(updated, 'Bônus') : updated;
+            }),
           },
         }));
 
@@ -742,9 +777,18 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     )}
                   </div>
                   <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                    <strong>{opportunityPrompt.targetName}</strong> saiu do alcance corpo a corpo de{' '}
+                    <strong>
+                      {role !== 'gm' && opportunityTargetToken?.hideNameFromPlayers
+                        ? '???'
+                        : opportunityPrompt.targetName}
+                    </strong>{' '}
+                    saiu do alcance corpo a corpo de{' '}
                     <strong style={{ color: opportunityPrompt.reactorColor }}>
-                      {opportunityPrompt.reactorName}
+                      {role !== 'gm' &&
+                      activeMap?.tokens.find((x) => x.id === opportunityPrompt.reactorTokenId)
+                        ?.hideNameFromPlayers
+                        ? '???'
+                        : opportunityPrompt.reactorName}
                     </strong>
                     . Movimentação travada até resolver.
                   </div>
@@ -794,7 +838,21 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 Reação em Andamento — Movimento Travado
               </div>
               <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                Aguarde <strong style={{ color: opportunityPrompt.reactorColor }}>{opportunityPrompt.reactorName}</strong> resolver ou passar o Ataque de Oportunidade contra <strong>{opportunityPrompt.targetName}</strong>.
+                Aguarde{' '}
+                <strong style={{ color: opportunityPrompt.reactorColor }}>
+                  {role !== 'gm' &&
+                  activeMap?.tokens.find((x) => x.id === opportunityPrompt.reactorTokenId)
+                    ?.hideNameFromPlayers
+                    ? '???'
+                    : opportunityPrompt.reactorName}
+                </strong>{' '}
+                resolver ou passar o Ataque de Oportunidade contra{' '}
+                <strong>
+                  {role !== 'gm' && opportunityTargetToken?.hideNameFromPlayers
+                    ? '???'
+                    : opportunityPrompt.targetName}
+                </strong>
+                .
               </div>
             </div>
           </OrnateFrame>
@@ -849,7 +907,12 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 <button
                   onClick={dismissSavePrompt}
                   className="rpg-card p-1 rounded cursor-pointer"
-                  title="Fechar painel"
+                  title={
+                    activeSavePrompt.kind === 'concentration' &&
+                    activeSavePrompt.targets.some((t) => t.status === 'pending')
+                      ? 'Fechar sem rolar (perde a Concentração automaticamente)'
+                      : 'Fechar painel'
+                  }
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -873,6 +936,9 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 const canPlayerRoll =
                   t.status === 'pending' &&
                   (role === 'gm' || (myCharacter && t.characterId === myCharacter.id));
+                const saveTok = activeMap?.tokens.find((x) => x.id === t.tokenId);
+                const displaySaveName =
+                  role !== 'gm' && saveTok?.hideNameFromPlayers ? '???' : t.name;
                 return (
                   <div
                     key={t.tokenId}
@@ -880,14 +946,14 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <TokenPortrait
-                        name={t.name}
+                        name={displaySaveName}
                         imageUrl={t.imageUrl}
                         playerColor={t.color}
                         sizePx={32}
                       />
                       <div className="min-w-0">
                         <div className="font-display font-bold text-xs text-amber-100 truncate">
-                          {t.name}
+                          {displaySaveName}
                         </div>
                         {t.status === 'pending' ? (
                           <div className="text-[10px] text-amber-300/80">
@@ -928,13 +994,69 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                               ? t.status === 'passed'
                                 ? 'Manteve ✓'
                                 : 'Perdeu!'
-                              : t.status === 'passed'
-                                ? `Passou${t.damageToApply > 0 ? ` (-${t.damageToApply})` : ' (0)'}`
-                                : `Falhou (-${t.damageToApply})`}
+                              : activeSavePrompt.kind === 'condition-save'
+                                ? t.status === 'passed'
+                                  ? 'Livrou-se ✓'
+                                  : 'Continua!'
+                                : t.status === 'passed'
+                                  ? `Passou${t.damageToApply > 0 ? ` (-${t.damageToApply})` : ' (0)'}`
+                                  : `Falhou (-${t.damageToApply})`}
                           </div>
                           {t.applied && (
                             <div className="text-[9px] text-emerald-300 mt-0.5">Aplicado ✓</div>
                           )}
+                          {t.status === 'failed' &&
+                            !t.applied &&
+                            t.characterId &&
+                            (role === 'gm' || myCharacter?.id === t.characterId) &&
+                            (() => {
+                              const saveHero = campaign.characters.find((c) => c.id === t.characterId);
+                              const inspPts = getHeroInspirationPoints(saveHero);
+                              if (!saveHero || inspPts <= 0) return null;
+                              return (
+                                <div className="mt-1 flex items-center justify-end gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => rerollSaveWithInspiration(t.tokenId)}
+                                    className="px-2 py-0.5 rounded bg-amber-950/90 border border-amber-400/70 text-[9px] font-display font-bold text-amber-200 hover:bg-amber-900 cursor-pointer"
+                                    title="Gasta 1 Ponto de Inspiração Heroica para re-rolar esta salvaguarda!"
+                                  >
+                                    ★ Re-rolar ({inspPts}/3)
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => acceptFailedSaveTarget(t.tokenId)}
+                                    className="px-2 py-0.5 rounded bg-black/50 border border-white/20 text-[9px] font-display font-semibold text-slate-200 hover:border-red-400/60 cursor-pointer"
+                                    title="Aceitar o resultado da falha sem gastar Inspiração"
+                                  >
+                                    Aceitar
+                                  </button>
+                                </div>
+                              );
+                            })()}
+                          {role === 'gm' &&
+                            t.status === 'failed' &&
+                            activeSavePrompt.kind !== 'concentration' &&
+                            (() => {
+                              const bossTok = activeMap?.tokens.find((x) => x.id === t.tokenId);
+                              const legRem =
+                                bossTok?.isBoss
+                                  ? bossTok.legendaryResistancesRemaining ??
+                                    bossTok.legendaryResistancesMax ??
+                                    0
+                                  : 0;
+                              if (legRem <= 0) return null;
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => useBossLegendaryResistance(t.tokenId)}
+                                  className="mt-1 px-2 py-0.5 rounded bg-sky-950/90 border border-sky-400/70 text-[9px] font-display font-bold text-sky-200 hover:bg-sky-900 cursor-pointer"
+                                  title="Gasta 1 Resistência Lendária para transformar esta falha em SUCESSO automático!"
+                                >
+                                  ⚡ Resist. Lendária ({legRem})
+                                </button>
+                              );
+                            })()}
                         </div>
                       )}
                     </div>
@@ -1000,7 +1122,13 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 </p>
                 {activeSecretPassage.targetMapName && (
                   <div className="text-[11px] text-purple-200 font-semibold mt-1">
-                    Destino vinculado: <span className="text-amber-300">{activeSecretPassage.targetMapName}</span>
+                    Destino vinculado:{' '}
+                    <span className="text-amber-300">
+                      {activeSecretPassage.targetMapName}
+                      {activeSecretPassage.targetMarkerTitle
+                        ? ` → 🌀 ${activeSecretPassage.targetMarkerTitle}`
+                        : ''}
+                    </span>
                   </div>
                 )}
               </div>
@@ -1032,7 +1160,8 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                         moveTokensToMap(
                           activeSecretPassage.sourceMapId,
                           activeSecretPassage.targetMapId!,
-                          [myTokId]
+                          [myTokId],
+                          activeSecretPassage.targetMarkerId
                         );
                       } else {
                         updateCampaign((prev) => ({
@@ -1082,7 +1211,8 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                       moveTokensToMap(
                         activeSecretPassage.sourceMapId,
                         activeSecretPassage.targetMapId!,
-                        [activeSecretPassage.tokenId!]
+                        [activeSecretPassage.tokenId!],
+                        activeSecretPassage.targetMarkerId
                       )
                     }
                     className="rpg-btn-primary px-3 py-1.5 rounded text-xs font-display font-bold cursor-pointer"
@@ -1097,7 +1227,8 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                       moveTokensToMap(
                         activeSecretPassage.sourceMapId,
                         activeSecretPassage.targetMapId!,
-                        'all-heroes'
+                        'all-heroes',
+                        activeSecretPassage.targetMarkerId
                       )
                     }
                     className="rpg-card px-3 py-1.5 rounded text-xs font-display font-bold text-amber-200 border border-amber-400/50 cursor-pointer"
@@ -1594,21 +1725,39 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                             >
                               +XP
                             </button>
-                            <button
-                              onClick={() => toggleHeroInspiration(ch.id)}
-                              className={`px-1.5 py-0.5 rounded font-display font-bold border cursor-pointer transition ${
-                                ch.hasInspiration
-                                  ? 'bg-amber-500/30 border-amber-300 text-amber-200 shadow-[0_0_8px_rgba(251,191,36,0.5)]'
-                                  : 'rpg-card text-amber-300/70 hover:border-amber-400'
-                              }`}
-                              title={
-                                ch.hasInspiration
-                                  ? `${ch.name} possui ★ Inspiração Heroica (clique para remover)`
-                                  : `Conceder ★ Inspiração Heroica para ${ch.name}`
-                              }
-                            >
-                              ★
-                            </button>
+                            {(() => {
+                              const inspPts = getHeroInspirationPoints(ch);
+                              return (
+                                <div
+                                  className={`inline-flex items-center rounded border text-[10px] font-display font-bold ${
+                                    inspPts > 0
+                                      ? 'bg-amber-500/25 border-amber-300/80 text-amber-200 shadow-[0_0_8px_rgba(251,191,36,0.35)]'
+                                      : 'rpg-card text-amber-300/70'
+                                  }`}
+                                  title={`Pontos de Inspiração Heroica de ${ch.name} (${inspPts}/3)`}
+                                >
+                                  <button
+                                    type="button"
+                                    disabled={inspPts <= 0}
+                                    onClick={() => adjustHeroInspiration(ch.id, -1)}
+                                    className="px-1 py-0.5 hover:bg-black/30 disabled:opacity-30 cursor-pointer"
+                                    title="Remover 1 Ponto de Inspiração"
+                                  >
+                                    −
+                                  </button>
+                                  <span className="px-1">★{inspPts}</span>
+                                  <button
+                                    type="button"
+                                    disabled={inspPts >= 3}
+                                    onClick={() => adjustHeroInspiration(ch.id, 1)}
+                                    className="px-1 py-0.5 hover:bg-black/30 disabled:opacity-30 cursor-pointer"
+                                    title="Conceder +1 Ponto de Inspiração (máx. 3)"
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                              );
+                            })()}
                           </div>
 
                           {/* Card Footer Actions */}
@@ -1748,6 +1897,80 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                                   </button>
                                 );
                               })}
+
+                              {getInventoryChargedAbilities(ch, campaign).map(
+                                ({ inventoryEntryId, itemDef, ability: ab, maxCharges, chargesRemaining }) => {
+                                  const outOfCharges = maxCharges > 0 && chargesRemaining <= 0;
+                                  return (
+                                    <button
+                                      key={`gm-item-chg-${inventoryEntryId}`}
+                                      disabled={isDead || outOfCharges}
+                                      onClick={() => useChargedItemAbility(ch.id, inventoryEntryId)}
+                                      className="w-full rpg-card px-2 py-1 rounded flex items-center justify-between text-[10px] border cursor-pointer disabled:opacity-40 hover:brightness-110"
+                                      style={{
+                                        borderColor: '#a855f7',
+                                        backgroundColor: 'rgba(168, 85, 247, 0.14)',
+                                      }}
+                                    >
+                                      <span className="truncate font-display font-bold text-purple-100">
+                                        ⚡ {ab.name} ({itemDef.name})
+                                      </span>
+                                      <span className="font-mono-dice text-purple-200 shrink-0 ml-1">
+                                        {maxCharges > 0 ? `${chargesRemaining}/${maxCharges}` : '∞'}
+                                      </span>
+                                    </button>
+                                  );
+                                }
+                              )}
+
+                              {getConditionGrantedAbilities(ch.activeConditionIds, campaign).map(
+                                ({ ability: ab, condition: cond }) => {
+                                  const cost = toEconomyCost(ab.actionType);
+                                  const isSkillSel = Boolean(
+                                    pendingAttackChoice &&
+                                      pendingAttackChoice.attackerCharacterId === ch.id &&
+                                      pendingAttackChoice.actionTitle === ab.name
+                                  );
+                                  return (
+                                    <button
+                                      key={`gm-cond-${cond.id}-${ab.id}`}
+                                      disabled={isDead}
+                                      onClick={() =>
+                                        rollCharacterAction({
+                                          characterId: ch.id,
+                                          title: ab.name,
+                                          attackFormula: ab.attackFormula,
+                                          damageFormula: ab.damageFormula,
+                                          damageType: ab.damageType,
+                                          range: ab.range,
+                                          actionCost: cost,
+                                          saveSkillId: ab.saveSkillId,
+                                          saveDcFormula: ab.saveDcFormula,
+                                          costMp: ab.costMp,
+                                          costResourceId: ab.costResourceId,
+                                          applyConditionId: ab.applyConditionId,
+                                          conditionDurationRounds: ab.conditionDurationRounds,
+                                          aoeShape: ab.aoeShape,
+                                          aoeSizeMeters: ab.aoeSizeMeters,
+                                          aoeColor: ab.aoeColor,
+                                          aoePersistent: ab.aoePersistent,
+                                        })
+                                      }
+                                      style={{ borderColor: cond.color || '#f59e0b' }}
+                                      className={`w-full rpg-card px-2 py-1 rounded flex items-center justify-between text-[10px] cursor-pointer border disabled:opacity-40 ${
+                                        isSkillSel ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                                      }`}
+                                    >
+                                      <span className="truncate font-display font-bold text-amber-100">
+                                        {cond.icon} {ab.name}
+                                      </span>
+                                      <span className="font-mono-dice text-amber-300 shrink-0 ml-1">
+                                        {isSkillSel ? '✕ Cancelar' : cond.name}
+                                      </span>
+                                    </button>
+                                  );
+                                }
+                              )}
 
                               {heroAbilities.slice(0, 4).map((ab) => {
                                 const cost = toEconomyCost(ab.actionType);
@@ -2956,24 +3179,34 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 className="flex items-center gap-1.5 pr-2 border-r"
                 style={{ borderColor: 'var(--border-subtle)' }}
               >
-                <span
-                  className={`px-2 py-0.5 rounded font-semibold border flex items-center gap-1 ${
-                    heroCombatant.actionAvailable !== false
-                      ? 'bg-amber-500/20 border-amber-400/60 text-amber-200'
-                      : 'bg-black/40 border-white/10 opacity-40 line-through'
-                  }`}
-                >
-                  <Swords className="w-3 h-3" /> Ação
-                </span>
-                <span
-                  className={`px-2 py-0.5 rounded font-semibold border flex items-center gap-1 ${
-                    heroCombatant.bonusActionAvailable !== false
-                      ? 'bg-sky-500/20 border-sky-400/60 text-sky-200'
-                      : 'bg-black/40 border-white/10 opacity-40 line-through'
-                  }`}
-                >
-                  <Flame className="w-3 h-3" /> Bônus
-                </span>
+                {(() => {
+                  const actsLeft = getCombatantActionsRemaining(heroCombatant);
+                  const bonLeft = getCombatantBonusActionsRemaining(heroCombatant);
+                  return (
+                    <>
+                      <span
+                        className={`px-2 py-0.5 rounded font-semibold border flex items-center gap-1 ${
+                          actsLeft > 0
+                            ? 'bg-amber-500/20 border-amber-400/60 text-amber-200'
+                            : 'bg-black/40 border-white/10 opacity-40 line-through'
+                        }`}
+                        title={`Ação Padrão (${actsLeft} restante(s))`}
+                      >
+                        <Swords className="w-3 h-3" /> Ação{actsLeft > 1 ? ` (${actsLeft})` : ''}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded font-semibold border flex items-center gap-1 ${
+                          bonLeft > 0
+                            ? 'bg-sky-500/20 border-sky-400/60 text-sky-200'
+                            : 'bg-black/40 border-white/10 opacity-40 line-through'
+                        }`}
+                        title={`Ação Bônus (${bonLeft} restante(s))`}
+                      >
+                        <Flame className="w-3 h-3" /> Bônus{bonLeft > 1 ? ` (${bonLeft})` : ''}
+                      </span>
+                    </>
+                  );
+                })()}
                 <span
                   className={`px-2 py-0.5 rounded font-semibold border flex items-center gap-1 ${
                     heroCombatant.reactionAvailable !== false
@@ -3094,18 +3327,25 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
             </div>
           )}
 
-          {/* Classic D&D 5e Heroic Inspiration Medallion (1 star) */}
-          {hero.hasInspiration && (
-            <button
-              type="button"
-              onClick={() => spendHeroInspiration(hero.id)}
-              className="rpg-glass-panel rounded-full px-3.5 py-1 text-[11px] font-display font-bold flex items-center gap-1.5 border border-amber-400 text-amber-200 bg-amber-950/85 shadow-[0_0_18px_rgba(251,191,36,0.45)] hover:brightness-115 cursor-pointer transition"
-              title="Clique para gastar sua Inspiração Heroica e ganhar Vantagem na próxima rolagem!"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-              <span>★ Inspiração Heroica Disponível — Clique para usar (+Vantagem)</span>
-            </button>
-          )}
+          {/* Accumulable Heroic Inspiration Medallion (0..3 stars) */}
+          {(() => {
+            const inspPts = getHeroInspirationPoints(hero);
+            if (inspPts <= 0) return null;
+            return (
+              <button
+                type="button"
+                onClick={() => spendHeroInspiration(hero.id, 'advantage')}
+                className="rpg-glass-panel rounded-full px-3.5 py-1 text-[11px] font-display font-bold flex items-center gap-1.5 border border-amber-400 text-amber-200 bg-amber-950/85 shadow-[0_0_18px_rgba(251,191,36,0.45)] hover:brightness-115 cursor-pointer transition"
+                title="Clique para gastar 1 Ponto de Inspiração e ganhar Vantagem na próxima rolagem (ou guarde para re-rolar um d20 ruim no Duelo/Teste)!"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                <span>
+                  {'★'.repeat(inspPts)}
+                  {'☆'.repeat(3 - inspPts)} Inspiração ({inspPts}/3) — Clique p/ +Vantagem
+                </span>
+              </button>
+            );
+          })()}
 
           {/* GM Next-Attack Advantage/Disadvantage Banner for Player */}
           {hero.nextAttackRollOverride && (
@@ -3288,11 +3528,130 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     className="rpg-input w-full py-1 text-xs"
                   />
                   <div className="flex flex-wrap gap-1.5">
+              {chargedItemAbilities
+                .filter(
+                  ({ ability: ab, itemDef }) =>
+                    !actionSearch.trim() ||
+                    ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase()) ||
+                    itemDef.name.toLowerCase().includes(actionSearch.trim().toLowerCase())
+                )
+                .map(({ inventoryEntryId, itemDef, ability: ab, maxCharges, chargesRemaining }) => {
+                  const cost = toEconomyCost(ab.actionType);
+                  const outOfCharges = maxCharges > 0 && chargesRemaining <= 0;
+                  const disabled = isActionSlotSpent(cost) || outOfCharges;
+                  return (
+                    <button
+                      key={`hud-item-chg-${inventoryEntryId}`}
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => useChargedItemAbility(hero.id, inventoryEntryId)}
+                      className="rpg-card px-2.5 py-1.5 rounded-lg text-left border-2 transition cursor-pointer disabled:opacity-35 hover:brightness-110"
+                      style={{
+                        borderColor: '#a855f7',
+                        backgroundColor: 'rgba(168, 85, 247, 0.14)',
+                      }}
+                      title={`${itemDef.name}: ${ab.name}${maxCharges > 0 ? ` (${chargesRemaining}/${maxCharges} cargas)` : ' (Ilimitado)'} — Não gasta PM`}
+                    >
+                      <div className="text-[11px] font-display font-bold text-purple-100 flex items-center gap-1 leading-tight">
+                        <span>⚡</span>
+                        <span className="truncate max-w-[125px]">{ab.name}</span>
+                        {maxCharges > 0 && (
+                          <span className="px-1 rounded bg-purple-950/90 border border-purple-400/50 text-[9px] font-mono-dice text-purple-200">
+                            {chargesRemaining}/{maxCharges}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[9px] text-purple-200/80 truncate max-w-[150px]">
+                        {itemDef.name} • {ab.actionType}
+                      </div>
+                    </button>
+                  );
+                })}
+              {conditionGrantedAbilities
+                .map((entry, origIdx) => ({ ...entry, origIdx }))
+                .filter(
+                  ({ ability: ab }) =>
+                    !actionSearch.trim() ||
+                    ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase())
+                )
+                .map(({ ability: ab, condition: cond, origIdx }) => {
+                  const hotkeyNum =
+                    quickAttacks.length +
+                    quickWeapons.length +
+                    quickAbilities.length +
+                    compendiumAbilities.length +
+                    origIdx +
+                    1;
+                  const cost = toEconomyCost(ab.actionType);
+                  const spent = isActionSlotSpent(cost);
+                  const isDead = hero.hp <= 0;
+                  const isSelected = Boolean(
+                    pendingAttackChoice &&
+                      pendingAttackChoice.attackerCharacterId === hero.id &&
+                      pendingAttackChoice.actionTitle === ab.name
+                  );
+                  return (
+                    <button
+                      key={`cond-ab-${cond.id}-${ab.id}`}
+                      disabled={(spent && !isSelected) || isDead}
+                      onClick={() => {
+                        setShowPlayerActions(false);
+                        rollCharacterAction({
+                          characterId: hero.id,
+                          title: ab.name,
+                          attackFormula: ab.attackFormula,
+                          damageFormula: ab.damageFormula,
+                          damageType: ab.damageType,
+                          range: ab.range,
+                          actionCost: cost,
+                          saveSkillId: ab.saveSkillId,
+                          saveDcFormula: ab.saveDcFormula,
+                          costMp: ab.costMp,
+                          costResourceId: ab.costResourceId,
+                          applyConditionId: ab.applyConditionId,
+                          conditionDurationRounds: ab.conditionDurationRounds,
+                          aoeShape: ab.aoeShape,
+                          aoeSizeMeters: ab.aoeSizeMeters,
+                          aoeColor: ab.aoeColor,
+                          aoePersistent: ab.aoePersistent,
+                        });
+                      }}
+                      style={{
+                        borderColor: cond.color || '#f59e0b',
+                        boxShadow: `0 0 12px ${cond.color || '#f59e0b'}44`,
+                      }}
+                      className={`relative rpg-card px-2.5 py-1.5 rounded-md flex items-center gap-1.5 shrink-0 cursor-pointer text-left border disabled:opacity-40 disabled:cursor-not-allowed ${
+                        isSelected ? 'ring-2 ring-amber-400 bg-amber-500/20' : ''
+                      }`}
+                      title={`[${cond.icon} Liberado por ${cond.name}] ${ab.actionType} • ${ab.range} • ${ab.description}`}
+                    >
+                      {hotkeyNum <= 9 && (
+                        <span className="px-1 py-0.5 rounded bg-[#0c0e15] border border-amber-500/50 text-[9px] font-mono-dice font-bold text-amber-300 leading-none shrink-0">
+                          {hotkeyNum}
+                        </span>
+                      )}
+                      <span className="text-sm leading-none shrink-0">{cond.icon}</span>
+                      <div className="leading-tight">
+                        <div className="text-[11px] font-display font-bold max-w-[110px] truncate text-amber-100">
+                          {ab.name}
+                        </div>
+                        <div className="text-[9px] font-mono-dice text-amber-200/85">
+                          {isSelected
+                            ? '✕ Cancelar'
+                            : ab.damageFormula
+                              ? formatFormulaForDisplay(ab.damageFormula, stats, hero)
+                              : `${cond.name}`}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
 
               {quickAttacks
-                .filter((atk) => !actionSearch.trim() || atk.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
-                .map((atk, idx) => {
-                const hotkeyNum = idx + 1;
+                .map((atk, origIdx) => ({ atk, origIdx }))
+                .filter(({ atk }) => !actionSearch.trim() || atk.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map(({ atk, origIdx }) => {
+                const hotkeyNum = origIdx + 1;
                 const spent = isActionSlotSpent('Padrão');
                 const isDead = hero.hp <= 0;
                 const isSelected = Boolean(
@@ -3327,7 +3686,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     }
                   >
                     {hotkeyNum <= 9 && (
-                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-[#0c0e15] border border-amber-500/50 text-[8px] font-mono-dice font-bold text-amber-300 leading-tight">
+                      <span className="px-1 py-0.5 rounded bg-[#0c0e15] border border-amber-500/50 text-[9px] font-mono-dice font-bold text-amber-300 leading-none shrink-0">
                         {hotkeyNum}
                       </span>
                     )}
@@ -3356,9 +3715,10 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               })}
 
               {quickWeapons
-                .filter((wp) => !actionSearch.trim() || wp.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
-                .map((wp, idx) => {
-                const hotkeyNum = quickAttacks.length + idx + 1;
+                .map((wp, origIdx) => ({ wp, origIdx }))
+                .filter(({ wp }) => !actionSearch.trim() || wp.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map(({ wp, origIdx }) => {
+                const hotkeyNum = quickAttacks.length + origIdx + 1;
                 const spent = isActionSlotSpent('Padrão');
                 const isDead = hero.hp <= 0;
                 const isSelected = Boolean(
@@ -3393,7 +3753,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     }
                   >
                     {hotkeyNum <= 9 && (
-                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-[#0c0e15] border border-amber-500/50 text-[8px] font-mono-dice font-bold text-amber-300 leading-tight">
+                      <span className="px-1 py-0.5 rounded bg-[#0c0e15] border border-amber-500/50 text-[9px] font-mono-dice font-bold text-amber-300 leading-none shrink-0">
                         {hotkeyNum}
                       </span>
                     )}
@@ -3411,9 +3771,10 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               })}
 
               {quickAbilities
-                .filter((ab) => !actionSearch.trim() || ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
-                .map((ab, idx) => {
-                const hotkeyNum = quickAttacks.length + quickWeapons.length + idx + 1;
+                .map((ab, origIdx) => ({ ab, origIdx }))
+                .filter(({ ab }) => !actionSearch.trim() || ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map(({ ab, origIdx }) => {
+                const hotkeyNum = quickAttacks.length + quickWeapons.length + origIdx + 1;
                 const cost = toEconomyCost(ab.actionType);
                 const spent = isActionSlotSpent(cost);
                 const isDead = hero.hp <= 0;
@@ -3450,7 +3811,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     }
                   >
                     {hotkeyNum <= 9 && (
-                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-[#0c0e15] border border-amber-500/50 text-[8px] font-mono-dice font-bold text-amber-300 leading-tight">
+                      <span className="px-1 py-0.5 rounded bg-[#0c0e15] border border-amber-500/50 text-[9px] font-mono-dice font-bold text-amber-300 leading-none shrink-0">
                         {hotkeyNum}
                       </span>
                     )}
@@ -3472,10 +3833,11 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
               })}
 
               {compendiumAbilities
-                .filter((ab) => !actionSearch.trim() || ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
-                .map((ab, idx) => {
+                .map((ab, origIdx) => ({ ab, origIdx }))
+                .filter(({ ab }) => !actionSearch.trim() || ab.name.toLowerCase().includes(actionSearch.trim().toLowerCase()))
+                .map(({ ab, origIdx }) => {
                 const hotkeyNum =
-                  quickAttacks.length + quickWeapons.length + quickAbilities.length + idx + 1;
+                  quickAttacks.length + quickWeapons.length + quickAbilities.length + origIdx + 1;
                 const cost = toEconomyCost(ab.actionType);
                 const spent = isActionSlotSpent(cost);
                 const isDead = hero.hp <= 0;
@@ -3532,7 +3894,7 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                     }
                   >
                     {hotkeyNum <= 9 && (
-                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-[#0c0e15] border border-amber-500/50 text-[8px] font-mono-dice font-bold text-amber-300 leading-tight">
+                      <span className="px-1 py-0.5 rounded bg-[#0c0e15] border border-amber-500/50 text-[9px] font-mono-dice font-bold text-amber-300 leading-none shrink-0">
                         {hotkeyNum}
                       </span>
                     )}
@@ -3715,70 +4077,22 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                 )}
               </div>
 
-              {/* Structured Concentration Selector (pick from character's spells/abilities — no free typing!) */}
-              <div className="relative">
+              {/* Active Concentration Indicator (Players can voluntarily drop concentration; activates automatically via concentration spells) */}
+              {hero.concentratingSpell && (
                 <button
                   onClick={() => {
-                    if (hero.concentratingSpell) {
-                      setCharacterConcentration(hero.id, null);
-                      setShowConcMenu(false);
-                    } else {
-                      setShowRestMenu(false);
-                      setShowConcMenu((v) => !v);
-                    }
+                    setCharacterConcentration(hero.id, null);
+                    setShowConcMenu(false);
                   }}
-                  className={`px-2 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer transition border ${
-                    hero.concentratingSpell
-                      ? 'bg-purple-950/90 border-purple-400/80 text-purple-200'
-                      : 'rpg-card hover:border-purple-400/60'
-                  }`}
-                  title={
-                    hero.concentratingSpell
-                      ? `Concentrando em: ${hero.concentratingSpell} (Clique para encerrar)`
-                      : 'Selecionar magia/habilidade para manter em Concentração'
-                  }
+                  className="px-2 py-1.5 rounded-md text-xs font-display font-semibold flex items-center gap-1 cursor-pointer transition border bg-purple-950/90 border-purple-400/80 text-purple-200 hover:border-red-400/70"
+                  title={`Concentrando em: ${hero.concentratingSpell} (Clique para encerrar)`}
                 >
                   <Sparkles className="w-3.5 h-3.5 text-purple-300 shrink-0" />
                   <span className="hidden xl:inline max-w-[95px] truncate">
-                    {hero.concentratingSpell ? `Conc: ${hero.concentratingSpell}` : 'Concentrar'}
+                    Conc: {hero.concentratingSpell}
                   </span>
                 </button>
-
-                {showConcMenu && !hero.concentratingSpell && (() => {
-                  const concOptions = Array.from(
-                    new Set([
-                      ...compendiumAbilities.map((a) => a.name),
-                      ...quickAbilities.map((a) => a.name),
-                    ])
-                  );
-                  return (
-                    <div className="absolute bottom-12 right-0 w-56 max-h-60 overflow-y-auto rpg-glass-panel rounded-lg p-2 space-y-1 shadow-2xl text-xs">
-                      <div className="text-[10px] font-display uppercase tracking-wider opacity-70 px-1.5 pb-1">
-                        Escolher Magia / Habilidade
-                      </div>
-                      {concOptions.length === 0 ? (
-                        <div className="text-[11px] opacity-70 px-1.5 py-2">
-                          Nenhuma magia/habilidade cadastrada na ficha.
-                        </div>
-                      ) : (
-                        concOptions.map((spellName) => (
-                          <button
-                            key={spellName}
-                            type="button"
-                            onClick={() => {
-                              setCharacterConcentration(hero.id, spellName);
-                              setShowConcMenu(false);
-                            }}
-                            className="w-full text-left px-2.5 py-1.5 rounded-md rpg-card hover:border-purple-400/70 truncate cursor-pointer"
-                          >
-                            {spellName}
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
+              )}
 
               <button
                 onClick={onOpenSheet}
@@ -3984,13 +4298,18 @@ export const PlayerActionHUD: React.FC<PlayerActionHUDProps> = ({
                           key={skId}
                           type="button"
                           onClick={() =>
-                            quickRollFormula(`Perícia: ${sk.name}`, `1d20 + ${comp.total}`, hero.name)
+                            quickRollFormula(
+                              `Perícia: ${sk.name}`,
+                              `1d20 + ${comp.total}${comp.diceBonuses.length > 0 ? ` + ${comp.diceBonuses.join(' + ')}` : ''}`,
+                              hero.name
+                            )
                           }
                           className="w-full rpg-card px-2 py-1 rounded flex items-center justify-between text-[10px] hover:border-amber-400/60 cursor-pointer"
                         >
                           <span className="truncate">{sk.name}</span>
                           <span className="font-mono-dice font-bold text-amber-300">
                             {formatSigned(comp.total)}
+                            {comp.diceBonuses.length > 0 ? ` +${comp.diceBonuses.join('+')}` : ''}
                           </span>
                         </button>
                       );

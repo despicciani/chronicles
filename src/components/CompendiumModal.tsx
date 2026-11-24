@@ -129,6 +129,101 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
     }));
   };
 
+  // Visibility filtering: GM sees everything and controls Public/Private; Players see ONLY entries marked Public!
+  const visibleRaces = canEdit
+    ? campaign.compendium.races
+    : campaign.compendium.races.filter((r) => Boolean(r.publicToPlayers));
+  const visibleClasses = canEdit
+    ? campaign.compendium.classes
+    : campaign.compendium.classes.filter((c) => Boolean(c.publicToPlayers));
+  const visibleAbilities = canEdit
+    ? campaign.compendium.abilities
+    : campaign.compendium.abilities.filter((a) => Boolean(a.publicToPlayers));
+  const visibleItems = canEdit
+    ? campaign.compendium.items
+    : campaign.compendium.items.filter((i) => Boolean(i.publicToPlayers));
+  const visibleConditions = canEdit
+    ? campaign.compendium.conditions
+    : campaign.compendium.conditions.filter((c) => Boolean(c.publicToPlayers));
+
+  const toggleEntryPublic = (
+    key: 'races' | 'classes' | 'abilities' | 'items' | 'conditions',
+    id: string,
+    e?: React.MouseEvent
+  ) => {
+    if (e) e.stopPropagation();
+    if (!canEdit) return;
+    if (key === 'races') {
+      updateCompendium(
+        'races',
+        campaign.compendium.races.map((x) =>
+          x.id === id ? { ...x, publicToPlayers: !x.publicToPlayers } : x
+        )
+      );
+    } else if (key === 'classes') {
+      updateCompendium(
+        'classes',
+        campaign.compendium.classes.map((x) =>
+          x.id === id ? { ...x, publicToPlayers: !x.publicToPlayers } : x
+        )
+      );
+    } else if (key === 'abilities') {
+      updateCompendium(
+        'abilities',
+        campaign.compendium.abilities.map((x) =>
+          x.id === id ? { ...x, publicToPlayers: !x.publicToPlayers } : x
+        )
+      );
+    } else if (key === 'items') {
+      updateCompendium(
+        'items',
+        campaign.compendium.items.map((x) =>
+          x.id === id ? { ...x, publicToPlayers: !x.publicToPlayers } : x
+        )
+      );
+    } else if (key === 'conditions') {
+      updateCompendium(
+        'conditions',
+        campaign.compendium.conditions.map((x) =>
+          x.id === id ? { ...x, publicToPlayers: !x.publicToPlayers } : x
+        )
+      );
+    }
+  };
+
+  const setAllSectionPublic = (
+    key: 'races' | 'classes' | 'abilities' | 'items' | 'conditions',
+    isPublic: boolean
+  ) => {
+    if (!canEdit) return;
+    if (key === 'races') {
+      updateCompendium(
+        'races',
+        campaign.compendium.races.map((x) => ({ ...x, publicToPlayers: isPublic }))
+      );
+    } else if (key === 'classes') {
+      updateCompendium(
+        'classes',
+        campaign.compendium.classes.map((x) => ({ ...x, publicToPlayers: isPublic }))
+      );
+    } else if (key === 'abilities') {
+      updateCompendium(
+        'abilities',
+        campaign.compendium.abilities.map((x) => ({ ...x, publicToPlayers: isPublic }))
+      );
+    } else if (key === 'items') {
+      updateCompendium(
+        'items',
+        campaign.compendium.items.map((x) => ({ ...x, publicToPlayers: isPublic }))
+      );
+    } else if (key === 'conditions') {
+      updateCompendium(
+        'conditions',
+        campaign.compendium.conditions.map((x) => ({ ...x, publicToPlayers: isPublic }))
+      );
+    }
+  };
+
   // Creation handlers
   const handleCreateNew = () => {
     const uid = Date.now();
@@ -295,8 +390,10 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               isBoss: mon.isBoss,
               bossTitle: mon.bossTitle,
               bossPhase: mon.isBoss ? 1 : undefined,
-              bossPhase2HpPct: mon.bossPhase2HpPct ?? 50,
+              bossPhase2HpPct: mon.bossPhase2HpPct,
               bossPhase2Title: mon.bossPhase2Title,
+              bossPhases: mon.bossPhases ? mon.bossPhases.map((p) => ({ ...p })) : undefined,
+              triggeredBossPhaseIds: [],
               legendaryActionsMax: mon.isBoss ? (mon.legendaryActionsMax ?? 3) : undefined,
               legendaryActionsRemaining: mon.isBoss ? (mon.legendaryActionsMax ?? 3) : undefined,
               legendaryResistancesMax: mon.isBoss ? (mon.legendaryResistancesMax ?? 3) : undefined,
@@ -360,8 +457,10 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               isBoss: mon.isBoss,
               bossTitle: mon.bossTitle,
               bossPhase: mon.isBoss ? 1 : undefined,
-              bossPhase2HpPct: mon.bossPhase2HpPct ?? 50,
+              bossPhase2HpPct: mon.bossPhase2HpPct,
               bossPhase2Title: mon.bossPhase2Title,
+              bossPhases: mon.bossPhases ? mon.bossPhases.map((p) => ({ ...p })) : undefined,
+              triggeredBossPhaseIds: [],
               legendaryActionsMax: mon.isBoss ? (mon.legendaryActionsMax ?? 3) : undefined,
               legendaryActionsRemaining: mon.isBoss ? (mon.legendaryActionsMax ?? 3) : undefined,
               legendaryResistancesMax: mon.isBoss ? (mon.legendaryResistancesMax ?? 3) : undefined,
@@ -441,6 +540,13 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
           </button>
         )}
       </div>
+      {modifiers.length > 0 && (
+        <div className="grid grid-cols-12 gap-1.5 text-[10px] opacity-65 px-0.5">
+          <span className="col-span-4">Alvo</span>
+          <span className="col-span-2">Fixo (+N)</span>
+          <span className="col-span-2">Dado (+1d4)</span>
+        </div>
+      )}
       {modifiers.map((mod, idx) => (
         <div key={idx} className="grid grid-cols-12 gap-1.5 items-center text-xs">
           <select
@@ -963,6 +1069,109 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               </div>
             </div>
 
+            {/* Character Creation & Level-Up Progression Rules (Editable anytime by GM!) */}
+            <div className="rpg-card rounded-xl p-4 space-y-3">
+              <div>
+                <h3 className="font-display font-bold text-sm text-amber-300">
+                  Criação de Personagens &amp; Progressão de Atributos
+                </h3>
+                <p className="text-[11px] opacity-75">
+                  Configure quantos pontos iniciais de atributo (base 10, faixa 0–20), quantas perícias treinadas e quantos pontos de atributo os heróis ganham ao subir de nível. Pode ser alterado a qualquer momento.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <label className="space-y-1">
+                  <span className="block text-[11px] opacity-80">Pontos Iniciais de Atributo</span>
+                  <input
+                    disabled={!canEdit}
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={campaign.settings.attributePointBudget ?? 15}
+                    onChange={(e) =>
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...prev.settings,
+                          attributePointBudget: Math.max(0, Math.min(100, Number(e.target.value) || 0)),
+                        },
+                      }))
+                    }
+                    className="rpg-input w-full font-mono-dice"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="block text-[11px] opacity-80">Máx. Perícias Treinadas</span>
+                  <input
+                    disabled={!canEdit}
+                    type="number"
+                    min={0}
+                    max={30}
+                    value={campaign.settings.maxTrainedSkills ?? 4}
+                    onChange={(e) =>
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...prev.settings,
+                          maxTrainedSkills: Math.max(0, Math.min(30, Number(e.target.value) || 0)),
+                        },
+                      }))
+                    }
+                    className="rpg-input w-full font-mono-dice"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="block text-[11px] opacity-80">Pontos de Atributo Ganhos</span>
+                  <input
+                    disabled={!canEdit}
+                    type="number"
+                    min={0}
+                    max={20}
+                    value={campaign.settings.attributePointsPerGain ?? 2}
+                    onChange={(e) =>
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...prev.settings,
+                          attributePointsPerGain: Math.max(0, Math.min(20, Number(e.target.value) || 0)),
+                          attributePointsEveryLevels: prev.settings.attributePointsEveryLevels ?? 4,
+                        },
+                      }))
+                    }
+                    className="rpg-input w-full font-mono-dice"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="block text-[11px] opacity-80">A Cada Quantos Níveis</span>
+                  <input
+                    disabled={!canEdit}
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={campaign.settings.attributePointsEveryLevels ?? 4}
+                    onChange={(e) =>
+                      updateCampaign((prev) => ({
+                        ...prev,
+                        settings: {
+                          ...prev.settings,
+                          attributePointsPerGain: prev.settings.attributePointsPerGain ?? 2,
+                          attributePointsEveryLevels: Math.max(1, Math.min(20, Number(e.target.value) || 1)),
+                        },
+                      }))
+                    }
+                    className="rpg-input w-full font-mono-dice"
+                  />
+                </label>
+              </div>
+              <div className="text-[11px] text-amber-200/80">
+                {(campaign.settings.attributePointsPerGain ?? 2) <= 0
+                  ? 'Ganho automático de pontos de atributo ao subir de nível está desativado (0 pts).'
+                  : (campaign.settings.attributePointsEveryLevels ?? 4) === 1
+                    ? `Heróis ganham +${campaign.settings.attributePointsPerGain ?? 2} ponto(s) de atributo em TODOS os níveis (Nv 2, 3, 4...).`
+                    : `Heróis ganham +${campaign.settings.attributePointsPerGain ?? 2} ponto(s) de atributo a cada ${campaign.settings.attributePointsEveryLevels ?? 4} níveis.`}
+              </div>
+            </div>
+
             {/* Custom Resource Bars (Vida, Mana, Estamina, Ki, Sanidade, Sangue, etc.) */}
             <div className="rpg-card rounded-xl p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1181,109 +1390,298 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                 )}
               </div>
 
+              {canEdit &&
+                (section === 'races' ||
+                  section === 'classes' ||
+                  section === 'abilities' ||
+                  section === 'items' ||
+                  section === 'conditions') && (
+                  <div className="flex items-center justify-between gap-1 text-[10px]">
+                    <span className="opacity-70">Visibilidade p/ Jogadores:</span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setAllSectionPublic(section, true)}
+                        className="rpg-card px-1.5 py-0.5 rounded text-emerald-300 hover:border-emerald-400 cursor-pointer"
+                        title="Tornar todos os itens desta aba públicos para os jogadores"
+                      >
+                        👁 Todos Públicos
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAllSectionPublic(section, false)}
+                        className="rpg-card px-1.5 py-0.5 rounded text-amber-300 hover:border-amber-400 cursor-pointer"
+                        title="Ocultar todos os itens desta aba dos jogadores"
+                      >
+                        🔒 Todos Privados
+                      </button>
+                    </div>
+                  </div>
+                )}
+
               <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
-                {section === 'races' &&
-                  campaign.compendium.races
-                    .filter((r) => r.name.toLowerCase().includes(q))
-                    .map((r) => (
-                      <button
-                        key={r.id}
-                        onClick={() => setSelectedId(r.id)}
-                        className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition ${
-                          selectedId === r.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
-                        }`}
-                      >
-                        <div className="font-bold">{r.name}</div>
-                        <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                          Desloc. {r.speed}m • {r.size}
-                        </div>
-                      </button>
-                    ))}
-
-                {section === 'classes' &&
-                  campaign.compendium.classes
-                    .filter((c) => c.name.toLowerCase().includes(q))
-                    .map((c) => (
-                      <button
-                        key={c.id}
-                        onClick={() => setSelectedId(c.id)}
-                        className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition ${
-                          selectedId === c.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
-                        }`}
-                      >
-                        <div className="font-bold flex items-center gap-2">
-                          <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: c.color }} />
-                          <span>{c.name}</span>
-                        </div>
-                        <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                          DV d{c.hitDie} • +{c.hpPerLevel} PV / +{c.mpPerLevel} {campaign.settings.resourceShort}
-                        </div>
-                      </button>
-                    ))}
-
-                {section === 'abilities' &&
-                  campaign.compendium.abilities
-                    .filter((a) => a.name.toLowerCase().includes(q))
-                    .map((a) => (
-                      <button
-                        key={a.id}
-                        onClick={() => setSelectedId(a.id)}
-                        className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition ${
-                          selectedId === a.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
-                        }`}
-                      >
-                        <div className="font-bold flex items-center justify-between">
-                          <span>{a.name}</span>
-                          {a.costMp > 0 && (
-                            <span className="text-[10px] text-sky-400">
-                              {a.costMp} {campaign.settings.resourceShort}
-                            </span>
+                {section === 'races' && (
+                  <>
+                    {visibleRaces
+                      .filter((r) => r.name.toLowerCase().includes(q))
+                      .map((r) => (
+                        <div
+                          key={r.id}
+                          onClick={() => setSelectedId(r.id)}
+                          className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition flex items-center justify-between gap-2 ${
+                            selectedId === r.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-bold truncate">{r.name}</div>
+                            <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                              Desloc. {r.speed}m • {r.size}
+                            </div>
+                          </div>
+                          {canEdit && (
+                            <button
+                              type="button"
+                              onClick={(e) => toggleEntryPublic('races', r.id, e)}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-display font-bold border shrink-0 cursor-pointer ${
+                                r.publicToPlayers
+                                  ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
+                                  : 'bg-slate-900/80 border-white/15 text-slate-400'
+                              }`}
+                              title={r.publicToPlayers ? 'Visível para jogadores (clique para ocultar)' : 'Privado do Mestre (clique para tornar público)'}
+                            >
+                              {r.publicToPlayers ? '👁 Público' : '🔒 Privado'}
+                            </button>
                           )}
                         </div>
-                        <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                          {a.category} • {a.actionType}
-                        </div>
-                      </button>
-                    ))}
+                      ))}
+                    {!canEdit && visibleRaces.length === 0 && (
+                      <div className="rpg-card rounded-lg p-3 text-center text-[11px] opacity-70">
+                        Nenhuma raça pública no Compêndio. O Mestre define o que fica visível.
+                      </div>
+                    )}
+                  </>
+                )}
 
-                {section === 'items' &&
-                  campaign.compendium.items
-                    .filter((i) => i.name.toLowerCase().includes(q))
-                    .map((i) => (
-                      <button
-                        key={i.id}
-                        onClick={() => setSelectedId(i.id)}
-                        className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition ${
-                          selectedId === i.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
-                        }`}
-                      >
-                        <div className="font-bold">{i.name}</div>
-                        <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                          {i.type} • {i.valueGold} PO
+                {section === 'classes' && (
+                  <>
+                    {visibleClasses
+                      .filter((c) => c.name.toLowerCase().includes(q))
+                      .map((c) => (
+                        <div
+                          key={c.id}
+                          onClick={() => setSelectedId(c.id)}
+                          className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition flex items-center justify-between gap-2 ${
+                            selectedId === c.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-bold flex items-center gap-2">
+                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: c.color }} />
+                              <span className="truncate">{c.name}</span>
+                            </div>
+                            <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                              DV d{c.hitDie} • +{c.hpPerLevel} PV / +{c.mpPerLevel} {campaign.settings.resourceShort}
+                            </div>
+                          </div>
+                          {canEdit && (
+                            <button
+                              type="button"
+                              onClick={(e) => toggleEntryPublic('classes', c.id, e)}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-display font-bold border shrink-0 cursor-pointer ${
+                                c.publicToPlayers
+                                  ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
+                                  : 'bg-slate-900/80 border-white/15 text-slate-400'
+                              }`}
+                              title={c.publicToPlayers ? 'Visível para jogadores (clique para ocultar)' : 'Privado do Mestre (clique para tornar público)'}
+                            >
+                              {c.publicToPlayers ? '👁 Público' : '🔒 Privado'}
+                            </button>
+                          )}
                         </div>
-                      </button>
-                    ))}
+                      ))}
+                    {!canEdit && visibleClasses.length === 0 && (
+                      <div className="rpg-card rounded-lg p-3 text-center text-[11px] opacity-70">
+                        Nenhuma classe pública no Compêndio. O Mestre define o que fica visível.
+                      </div>
+                    )}
+                  </>
+                )}
 
-                {section === 'conditions' &&
-                  campaign.compendium.conditions
-                    .filter((c) => c.name.toLowerCase().includes(q))
-                    .map((c) => (
-                      <button
-                        key={c.id}
-                        onClick={() => setSelectedId(c.id)}
-                        className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition ${
-                          selectedId === c.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
-                        }`}
-                      >
-                        <div className="font-bold flex items-center gap-1.5">
-                          <span>{c.icon}</span>
-                          <span>{c.name}</span>
+                {section === 'abilities' && (
+                  <>
+                    {visibleAbilities
+                      .filter((a) => a.name.toLowerCase().includes(q))
+                      .map((a) => {
+                        const fullIdx = campaign.compendium.abilities.findIndex((x) => x.id === a.id);
+                        const moveAbility = (dir: -1 | 1, e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          const nextIdx = fullIdx + dir;
+                          if (fullIdx < 0 || nextIdx < 0 || nextIdx >= campaign.compendium.abilities.length) return;
+                          const arr = [...campaign.compendium.abilities];
+                          const [moved] = arr.splice(fullIdx, 1);
+                          arr.splice(nextIdx, 0, moved);
+                          updateCompendium('abilities', arr);
+                        };
+                        return (
+                          <div
+                            key={a.id}
+                            onClick={() => setSelectedId(a.id)}
+                            className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition flex items-center justify-between gap-2 ${
+                              selectedId === a.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="font-bold flex items-center justify-between gap-1">
+                                <span className="truncate">{a.name}</span>
+                                {a.costMp > 0 && (
+                                  <span className="text-[10px] text-sky-400 shrink-0">
+                                    {a.costMp} {campaign.settings.resourceShort}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                                {a.category} • {a.actionType}
+                                {a.lightMode && a.lightMode !== 'none'
+                                  ? ` • ${a.lightMode === 'personal-darkvision' ? '👁' : '🔥'} ${a.lightRadiusMeters || 6}m`
+                                  : ''}
+                              </div>
+                            </div>
+                            {canEdit && (
+                              <button
+                                type="button"
+                                onClick={(e) => toggleEntryPublic('abilities', a.id, e)}
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-display font-bold border shrink-0 cursor-pointer ${
+                                  a.publicToPlayers
+                                    ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
+                                    : 'bg-slate-900/80 border-white/15 text-slate-400'
+                                }`}
+                                title={a.publicToPlayers ? 'Visível para jogadores (clique para ocultar)' : 'Privado do Mestre (clique para tornar público)'}
+                              >
+                                {a.publicToPlayers ? '👁' : '🔒'}
+                              </button>
+                            )}
+                            {canEdit && !q && (
+                              <div className="flex flex-col gap-0.5 shrink-0">
+                                <button
+                                  type="button"
+                                  disabled={fullIdx <= 0}
+                                  onClick={(e) => moveAbility(-1, e)}
+                                  title="Mover habilidade para cima"
+                                  className="px-1 py-0.2 rounded bg-black/40 border border-white/10 hover:border-amber-400/70 text-[10px] leading-none cursor-pointer disabled:opacity-25"
+                                >
+                                  ↑
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={fullIdx >= campaign.compendium.abilities.length - 1}
+                                  onClick={(e) => moveAbility(1, e)}
+                                  title="Mover habilidade para baixo"
+                                  className="px-1 py-0.2 rounded bg-black/40 border border-white/10 hover:border-amber-400/70 text-[10px] leading-none cursor-pointer disabled:opacity-25"
+                                >
+                                  ↓
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    {!canEdit && visibleAbilities.length === 0 && (
+                      <div className="rpg-card rounded-lg p-3 text-center text-[11px] opacity-70">
+                        Nenhuma habilidade pública no Compêndio. Você ainda vê suas próprias habilidades na sua ficha.
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {section === 'items' && (
+                  <>
+                    {visibleItems
+                      .filter((i) => i.name.toLowerCase().includes(q))
+                      .map((i) => (
+                        <div
+                          key={i.id}
+                          onClick={() => setSelectedId(i.id)}
+                          className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition flex items-center justify-between gap-2 ${
+                            selectedId === i.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-bold truncate">{i.name}</div>
+                            <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                              {i.type} • {i.valueGold} PO
+                              {i.lightMode && i.lightMode !== 'none'
+                                ? ` • ${i.lightMode === 'personal-darkvision' ? '👁' : '🔥'} ${i.lightRadiusMeters || 6}m`
+                                : ''}
+                            </div>
+                          </div>
+                          {canEdit && (
+                            <button
+                              type="button"
+                              onClick={(e) => toggleEntryPublic('items', i.id, e)}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-display font-bold border shrink-0 cursor-pointer ${
+                                i.publicToPlayers
+                                  ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
+                                  : 'bg-slate-900/80 border-white/15 text-slate-400'
+                              }`}
+                              title={i.publicToPlayers ? 'Visível para jogadores (clique para ocultar)' : 'Privado do Mestre (clique para tornar público)'}
+                            >
+                              {i.publicToPlayers ? '👁 Público' : '🔒 Privado'}
+                            </button>
+                          )}
                         </div>
-                        <div className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
-                          {c.description}
+                      ))}
+                    {!canEdit && visibleItems.length === 0 && (
+                      <div className="rpg-card rounded-lg p-3 text-center text-[11px] opacity-70">
+                        Nenhum item público no Compêndio. Você ainda vê seus itens na sua mochila.
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {section === 'conditions' && (
+                  <>
+                    {visibleConditions
+                      .filter((c) => c.name.toLowerCase().includes(q))
+                      .map((c) => (
+                        <div
+                          key={c.id}
+                          onClick={() => setSelectedId(c.id)}
+                          className={`w-full text-left p-2.5 rounded-lg border text-xs cursor-pointer transition flex items-center justify-between gap-2 ${
+                            selectedId === c.id ? 'rpg-ornate-border bg-amber-500/10' : 'rpg-card'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-bold flex items-center gap-1.5">
+                              <span>{c.icon}</span>
+                              <span className="truncate">{c.name}</span>
+                            </div>
+                            <div className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                              {c.description}
+                            </div>
+                          </div>
+                          {canEdit && (
+                            <button
+                              type="button"
+                              onClick={(e) => toggleEntryPublic('conditions', c.id, e)}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-display font-bold border shrink-0 cursor-pointer ${
+                                c.publicToPlayers
+                                  ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
+                                  : 'bg-slate-900/80 border-white/15 text-slate-400'
+                              }`}
+                              title={c.publicToPlayers ? 'Visível para jogadores (clique para ocultar)' : 'Privado do Mestre (clique para tornar público)'}
+                            >
+                              {c.publicToPlayers ? '👁 Público' : '🔒 Privado'}
+                            </button>
+                          )}
                         </div>
-                      </button>
-                    ))}
+                      ))}
+                    {!canEdit && visibleConditions.length === 0 && (
+                      <div className="rpg-card rounded-lg p-3 text-center text-[11px] opacity-70">
+                        Nenhuma condição pública no Compêndio.
+                      </div>
+                    )}
+                  </>
+                )}
 
                 {activeSection === 'monsters' &&
                   role === 'gm' &&
@@ -1344,8 +1742,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               {section === 'races' &&
                 (() => {
                   const item =
-                    campaign.compendium.races.find((r) => r.id === selectedId) ||
-                    campaign.compendium.races[0];
+                    visibleRaces.find((r) => r.id === selectedId) || visibleRaces[0];
                   if (!item) return null;
                   const patch = (next: Partial<RaceDef>) =>
                     updateCompendium(
@@ -1467,8 +1864,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               {section === 'classes' &&
                 (() => {
                   const item =
-                    campaign.compendium.classes.find((c) => c.id === selectedId) ||
-                    campaign.compendium.classes[0];
+                    visibleClasses.find((c) => c.id === selectedId) || visibleClasses[0];
                   if (!item) return null;
                   const patch = (next: Partial<ClassDef>) =>
                     updateCompendium(
@@ -1705,8 +2101,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               {section === 'abilities' &&
                 (() => {
                   const item =
-                    campaign.compendium.abilities.find((a) => a.id === selectedId) ||
-                    campaign.compendium.abilities[0];
+                    visibleAbilities.find((a) => a.id === selectedId) || visibleAbilities[0];
                   if (!item) return null;
                   const patch = (next: Partial<AbilityDef>) => {
                     const updatedAbility: AbilityDef = { ...item, ...next };
@@ -1896,12 +2291,28 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                           </select>
                         </div>
                         <div>
-                          <label className="block mb-1">Duração</label>
+                          <label className="block mb-1" title="Turnos completos do alvo (ex: 5) ou dado para rolar a duração (ex: 1d4)">
+                            Duração (Turnos ou Dado)
+                          </label>
                           <input
                             disabled={!canEdit}
                             value={item.duration}
-                            onChange={(e) => patch({ duration: e.target.value })}
-                            className="rpg-input w-full"
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              const isDice = /\d*d\d+/i.test(val);
+                              const numMatch = !isDice ? val.match(/(\d+)/) : null;
+                              const parsedStatic = numMatch
+                                ? val.toLowerCase().includes('minuto')
+                                  ? Math.max(1, parseInt(numMatch[1], 10)) * 10
+                                  : Math.max(1, parseInt(numMatch[1], 10))
+                                : undefined;
+                              patch({
+                                duration: val,
+                                conditionDurationRounds: isDice ? undefined : parsedStatic,
+                              });
+                            }}
+                            placeholder="Ex: 5, 1d4, 1d6+1"
+                            className="rpg-input w-full font-mono-dice"
                           />
                         </div>
                       </div>
@@ -1978,6 +2389,35 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                                 🔊
                               </button>
                             </div>
+                          </div>
+                          <div>
+                            <label className="block mb-1">Efeito Visual (VFX no Mapa)</label>
+                            <select
+                              disabled={!canEdit}
+                              value={item.vfxKind || ''}
+                              onChange={(e) =>
+                                patch({
+                                  vfxKind: (e.target.value || undefined) as AbilityDef['vfxKind'],
+                                })
+                              }
+                              className="rpg-input w-full"
+                            >
+                              <option value="">✨ Automático (Inteligente)</option>
+                              <option value="fireball">🔥 Bola de Fogo / Explosão</option>
+                              <option value="lightning">⚡ Relâmpago Ramificado</option>
+                              <option value="frost">❄️ Gelo / Estilhaços Cristalinos</option>
+                              <option value="radiant">☀️ Pilar de Luz Radiante</option>
+                              <option value="necrotic">💀 Sombrio / Necrótico</option>
+                              <option value="poison">🧪 Veneno / Ácido Borbulhante</option>
+                              <option value="blood">🩸 Sangue / Runas Infernais</option>
+                              <option value="thunder">💥 Onda de Trovão / Choque</option>
+                              <option value="heal">💚 Espiral de Cura</option>
+                              <option value="blessing">✨ Halo de Bênção Dourada</option>
+                              <option value="arcane">🔮 Raio / Runa Arcana</option>
+                              <option value="curse">🟣 Maldição / Hex</option>
+                              <option value="arrow">🏹 Flecha / Disparo</option>
+                              <option value="slash">⚔️ Corte de Lâmina</option>
+                            </select>
                           </div>
                         </div>
                       </div>
@@ -2217,6 +2657,48 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                             Ao conjurar a habilidade no mapa, ela pinta automaticamente o chão com essa superfície elemental.
                           </div>
                         </div>
+
+                        {/* Light Emission / Darkvision on Darkness Map */}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-white/10">
+                          <div className="sm:col-span-2">
+                            <label className="block mb-1">Iluminação na Escuridão</label>
+                            <select
+                              disabled={!canEdit}
+                              value={item.lightMode || 'none'}
+                              onChange={(e) => {
+                                const mode = e.target.value as 'none' | 'shared' | 'personal-darkvision';
+                                patch({
+                                  lightMode: mode,
+                                  lightRadiusMeters:
+                                    mode === 'none'
+                                      ? undefined
+                                      : item.lightRadiusMeters || (mode === 'personal-darkvision' ? 18 : 9),
+                                });
+                              }}
+                              className="rpg-input w-full"
+                            >
+                              <option value="none">Não emite luz</option>
+                              <option value="shared">🔥 Luz Compartilhada (ilumina para todos os jogadores)</option>
+                              <option value="personal-darkvision">👁 Visão Pessoal no Escuro (apenas o próprio jogador vê)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block mb-1">Raio de Luz (m)</label>
+                            <input
+                              disabled={!canEdit || !item.lightMode || item.lightMode === 'none'}
+                              type="number"
+                              min={1.5}
+                              max={60}
+                              step={1.5}
+                              value={item.lightRadiusMeters || ''}
+                              onChange={(e) =>
+                                patch({ lightRadiusMeters: Math.max(1.5, Number(e.target.value) || 6) })
+                              }
+                              placeholder="Ex: 9 ou 18"
+                              className="rpg-input w-full font-mono-dice disabled:opacity-45"
+                            />
+                          </div>
+                        </div>
                       </div>
                     </div>
                   );
@@ -2226,8 +2708,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               {section === 'items' &&
                 (() => {
                   const item =
-                    campaign.compendium.items.find((i) => i.id === selectedId) ||
-                    campaign.compendium.items[0];
+                    visibleItems.find((i) => i.id === selectedId) || visibleItems[0];
                   if (!item) return null;
                   const patch = (next: Partial<ItemDef>) =>
                     updateCompendium(
@@ -2294,6 +2775,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                             <option value="Consumível">Consumível</option>
                             <option value="Item Mágico">Item Mágico</option>
                             <option value="Equipamento">Equipamento</option>
+                            <option value="Carta">📜 Carta / Pergaminho (Pista Pessoal)</option>
                           </select>
                         </div>
                         <div>
@@ -2307,6 +2789,21 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                           />
                         </div>
                       </div>
+                      {item.type === 'Carta' && (
+                        <div className="p-3 rounded-lg bg-amber-950/25 border border-amber-500/40 space-y-1.5">
+                          <label className="block text-[11px] font-display font-bold text-amber-300">
+                            📜 Conteúdo da Carta / Pergaminho (Lido apenas pelo dono do item)
+                          </label>
+                          <textarea
+                            disabled={!canEdit}
+                            rows={5}
+                            value={item.letterText || ''}
+                            onChange={(e) => patch({ letterText: e.target.value })}
+                            placeholder="Escreva o conteúdo secreto desta carta, diário, mapa ou bilhete..."
+                            className="rpg-input w-full leading-relaxed font-lore"
+                          />
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                         <div>
                           <label className="block mb-1">Peso (kg)</label>
@@ -2419,6 +2916,135 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                         />
                       </div>
 
+                      {/* Light Emission / Darkvision on Darkness Map */}
+                      <div className="rpg-card p-3 rounded-lg grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div className="sm:col-span-2">
+                          <label className="block mb-1 text-amber-300 font-semibold">
+                            Iluminação na Escuridão (Tocha, Lanterna, Item Luminoso)
+                          </label>
+                          <select
+                            disabled={!canEdit}
+                            value={item.lightMode || 'none'}
+                            onChange={(e) => {
+                              const mode = e.target.value as 'none' | 'shared' | 'personal-darkvision';
+                              patch({
+                                lightMode: mode,
+                                lightRadiusMeters:
+                                  mode === 'none'
+                                    ? undefined
+                                    : item.lightRadiusMeters || (mode === 'personal-darkvision' ? 18 : 6),
+                              });
+                            }}
+                            className="rpg-input w-full"
+                          >
+                            <option value="none">Não emite luz</option>
+                            <option value="shared">🔥 Luz Compartilhada (ilumina para todos os jogadores)</option>
+                            <option value="personal-darkvision">👁 Visão Pessoal no Escuro (apenas o portador vê)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block mb-1">Raio de Luz (m)</label>
+                          <input
+                            disabled={!canEdit || !item.lightMode || item.lightMode === 'none'}
+                            type="number"
+                            min={1.5}
+                            max={60}
+                            step={1.5}
+                            value={item.lightRadiusMeters || ''}
+                            onChange={(e) =>
+                              patch({ lightRadiusMeters: Math.max(1.5, Number(e.target.value) || 6) })
+                            }
+                            placeholder="Ex: 6 ou 9"
+                            className="rpg-input w-full font-mono-dice disabled:opacity-45"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Charged Magic Item Ability */}
+                      <div className="rpg-card p-2.5 rounded-lg space-y-2">
+                        <div>
+                          <label className="block text-purple-300 font-semibold">
+                            ⚡ Habilidade &amp; Cargas do Item Mágico (Opcional)
+                          </label>
+                          <p className="text-[10px] opacity-70">
+                            Vincule uma habilidade do Compêndio a este item. Enquanto o jogador tiver o item, ela aparece na Barra de Ações e na Ficha sem gastar PM, descontando 1 carga por uso.
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div>
+                            <label className="block text-[10px] opacity-75 mb-0.5">
+                              Habilidade Vinculada
+                            </label>
+                            <select
+                              disabled={!canEdit}
+                              value={item.grantedAbilityId || ''}
+                              onChange={(e) => {
+                                const aid = e.target.value || undefined;
+                                patch({
+                                  grantedAbilityId: aid,
+                                  maxCharges: aid ? (item.maxCharges ?? 3) : undefined,
+                                  rechargeType: aid ? (item.rechargeType || 'long-rest') : undefined,
+                                });
+                              }}
+                              className="rpg-input w-full text-xs"
+                            >
+                              <option value="">Nenhuma habilidade</option>
+                              {campaign.compendium.abilities
+                                .filter((a) => a.actionType !== 'Passiva')
+                                .map((a) => (
+                                  <option key={a.id} value={a.id}>
+                                    {a.name} ({a.category})
+                                  </option>
+                                ))}
+                            </select>
+                          </div>
+                          {item.grantedAbilityId && (
+                            <>
+                              <div>
+                                <label className="block text-[10px] opacity-75 mb-0.5">
+                                  Máx. Cargas (0 = ilimitado)
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={99}
+                                  disabled={!canEdit}
+                                  value={item.maxCharges ?? 3}
+                                  onChange={(e) =>
+                                    patch({
+                                      maxCharges: Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                                    })
+                                  }
+                                  className="rpg-input w-full text-xs font-mono-dice"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] opacity-75 mb-0.5">
+                                  Recarga das Cargas
+                                </label>
+                                <select
+                                  disabled={!canEdit}
+                                  value={item.rechargeType || 'long-rest'}
+                                  onChange={(e) =>
+                                    patch({
+                                      rechargeType: e.target.value as
+                                        | 'long-rest'
+                                        | 'short-rest'
+                                        | 'consumable',
+                                    })
+                                  }
+                                  className="rpg-input w-full text-xs"
+                                >
+                                  <option value="long-rest">Descanso Longo</option>
+                                  <option value="short-rest">Descanso Curto / Longo</option>
+                                  <option value="consumable">Consumível (não recarrega)</option>
+                                </select>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
                       {renderModifierEditor(item.modifiers || [], (mods) =>
                         patch({ modifiers: mods })
                       )}
@@ -2430,8 +3056,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               {section === 'conditions' &&
                 (() => {
                   const item =
-                    campaign.compendium.conditions.find((c) => c.id === selectedId) ||
-                    campaign.compendium.conditions[0];
+                    visibleConditions.find((c) => c.id === selectedId) || visibleConditions[0];
                   if (!item) return null;
                   const patch = (next: Partial<ConditionDef>) =>
                     updateCompendium(
@@ -2513,6 +3138,465 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                           Imune a Ataques de Oportunidade (Desengajar Natural)
                         </span>
                       </label>
+                      <div className="rpg-card p-2.5 rounded-lg grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div className="sm:col-span-2">
+                          <label className="block mb-1 text-amber-300 font-semibold">
+                            Iluminação na Escuridão enquanto ativa
+                          </label>
+                          <select
+                            disabled={!canEdit}
+                            value={item.lightMode || 'none'}
+                            onChange={(e) => {
+                              const mode = e.target.value as 'none' | 'shared' | 'personal-darkvision';
+                              patch({
+                                lightMode: mode,
+                                lightRadiusMeters:
+                                  mode === 'none'
+                                    ? undefined
+                                    : item.lightRadiusMeters || (mode === 'personal-darkvision' ? 18 : 6),
+                              });
+                            }}
+                            className="rpg-input w-full"
+                          >
+                            <option value="none">Não emite luz</option>
+                            <option value="shared">🔥 Luz Compartilhada (todos veem)</option>
+                            <option value="personal-darkvision">👁 Visão Pessoal no Escuro (só o afetado vê)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block mb-1">Raio (m)</label>
+                          <input
+                            disabled={!canEdit || !item.lightMode || item.lightMode === 'none'}
+                            type="number"
+                            min={1.5}
+                            max={60}
+                            step={1.5}
+                            value={item.lightRadiusMeters || ''}
+                            onChange={(e) =>
+                              patch({ lightRadiusMeters: Math.max(1.5, Number(e.target.value) || 6) })
+                            }
+                            placeholder="Ex: 9 ou 18"
+                            className="rpg-input w-full font-mono-dice disabled:opacity-45"
+                          />
+                        </div>
+                      </div>
+                      <div className="rpg-card p-2.5 rounded-lg">
+                        <label className="block mb-1 text-amber-300 font-semibold">
+                          Aura Visual Animada no Token (Mapa)
+                        </label>
+                        <select
+                          disabled={!canEdit}
+                          value={item.auraVfx || 'auto'}
+                          onChange={(e) =>
+                            patch({ auraVfx: e.target.value as ConditionDef['auraVfx'] })
+                          }
+                          className="rpg-input w-full"
+                        >
+                          <option value="auto">✨ Automática (pelo nome da condição)</option>
+                          <option value="none">Nenhuma aura</option>
+                          <option value="fire">🔥 Chamas / Brasas</option>
+                          <option value="blood">🩸 Infernal / Demônio / Fúria</option>
+                          <option value="holy">✨ Halo Sagrado Dourado</option>
+                          <option value="poison">🧪 Veneno / Ácido</option>
+                          <option value="frost">❄️ Cristais de Gelo</option>
+                          <option value="shadow">🌑 Névoa Sombria / Espectral</option>
+                          <option value="arcane">🔮 Runas Arcanas</option>
+                          <option value="lightning">⚡ Pulso Elétrico</option>
+                        </select>
+                      </div>
+                      <div className="rpg-card p-2.5 rounded-lg grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-amber-300 font-semibold mb-1">
+                            ⚡ +Ações Padrão extras / turno
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={5}
+                            disabled={!canEdit}
+                            value={item.extraActions ?? 0}
+                            onChange={(e) =>
+                              patch({
+                                extraActions: Math.max(
+                                  0,
+                                  Math.min(5, Math.floor(Number(e.target.value) || 0))
+                                ),
+                              })
+                            }
+                            className="rpg-input w-full text-xs"
+                          />
+                          <p className="text-[10px] opacity-65 mt-0.5">
+                            Ex: 1 permite atacar ou usar Ação Padrão 2× no mesmo turno.
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sky-300 font-semibold mb-1">
+                            🔥 +Ações Bônus extras / turno
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={5}
+                            disabled={!canEdit}
+                            value={item.extraBonusActions ?? 0}
+                            onChange={(e) =>
+                              patch({
+                                extraBonusActions: Math.max(
+                                  0,
+                                  Math.min(5, Math.floor(Number(e.target.value) || 0))
+                                ),
+                              })
+                            }
+                            className="rpg-input w-full text-xs"
+                          />
+                          <p className="text-[10px] opacity-65 mt-0.5">
+                            Ex: 1 permite usar 2 Ações Bônus no mesmo turno.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="rpg-card p-2.5 rounded-lg space-y-2">
+                        <div>
+                          <label className="block text-amber-300 font-semibold">
+                            ⚔️ Ataques / Habilidades Liberados por esta Condição
+                          </label>
+                          <p className="text-[10px] opacity-70">
+                            Enquanto o personagem estiver com esta condição ativa, essas habilidades aparecem automaticamente na barra de ações e somem quando a condição terminar.
+                          </p>
+                        </div>
+                        {(item.grantedAbilityIds || []).length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {(item.grantedAbilityIds || []).map((aid) => {
+                              const ab = campaign.compendium.abilities.find((a) => a.id === aid);
+                              if (!ab) return null;
+                              return (
+                                <span
+                                  key={aid}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-display font-bold border"
+                                  style={{
+                                    borderColor: item.color || '#f59e0b',
+                                    backgroundColor: `${item.color || '#f59e0b'}22`,
+                                  }}
+                                >
+                                  <span>{item.icon} {ab.name}</span>
+                                  {canEdit && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        patch({
+                                          grantedAbilityIds: (item.grantedAbilityIds || []).filter(
+                                            (x) => x !== aid
+                                          ),
+                                        })
+                                      }
+                                      className="text-red-300 hover:text-red-200 cursor-pointer ml-0.5"
+                                      title="Remover habilidade desta condição"
+                                    >
+                                      ✕
+                                    </button>
+                                  )}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {canEdit && (
+                          <select
+                            value=""
+                            onChange={(e) => {
+                              const aid = e.target.value;
+                              if (!aid) return;
+                              const cur = item.grantedAbilityIds || [];
+                              if (!cur.includes(aid)) {
+                                patch({ grantedAbilityIds: [...cur, aid] });
+                              }
+                            }}
+                            className="rpg-input w-full text-xs"
+                          >
+                            <option value="">+ Vincular Ataque / Habilidade do Compêndio...</option>
+                            {campaign.compendium.abilities
+                              .filter(
+                                (a) =>
+                                  a.actionType !== 'Passiva' &&
+                                  !(item.grantedAbilityIds || []).includes(a.id)
+                              )
+                              .map((a) => (
+                                <option key={a.id} value={a.id}>
+                                  {a.name} ({a.category} • {a.actionType})
+                                </option>
+                              ))}
+                          </select>
+                        )}
+                      </div>
+
+                      {/* 1. DoT / HoT (Dano ou Cura por Turno) */}
+                      <div className="rpg-card p-2.5 rounded-lg space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <label className="text-red-300 font-semibold">
+                            🩸 Dano ou Cura por Turno (DoT / HoT)
+                          </label>
+                          <select
+                            disabled={!canEdit}
+                            value={item.tickEffect?.mode || 'none'}
+                            onChange={(e) => {
+                              const mode = e.target.value as 'none' | 'damage' | 'heal';
+                              if (mode === 'none') {
+                                patch({ tickEffect: undefined });
+                              } else {
+                                patch({
+                                  tickEffect: {
+                                    mode,
+                                    formula: item.tickEffect?.formula || '1d6',
+                                    damageType:
+                                      mode === 'damage'
+                                        ? item.tickEffect?.damageType || 'Fogo'
+                                        : undefined,
+                                    trigger: item.tickEffect?.trigger || 'start',
+                                  },
+                                });
+                              }
+                            }}
+                            className="rpg-input text-xs py-0.5"
+                          >
+                            <option value="none">Desativado</option>
+                            <option value="damage">Causar Dano por Turno</option>
+                            <option value="heal">Curar PV por Turno</option>
+                          </select>
+                        </div>
+                        {item.tickEffect && (
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <div>
+                              <label className="block text-[10px] opacity-70 mb-0.5">
+                                Fórmula (ex: 1d6, 2d4+2)
+                              </label>
+                              <input
+                                disabled={!canEdit}
+                                value={item.tickEffect.formula}
+                                onChange={(e) =>
+                                  patch({
+                                    tickEffect: { ...item.tickEffect!, formula: e.target.value },
+                                  })
+                                }
+                                placeholder="1d6"
+                                className="rpg-input w-full text-xs"
+                              />
+                            </div>
+                            {item.tickEffect.mode === 'damage' && (
+                              <div>
+                                <label className="block text-[10px] opacity-70 mb-0.5">
+                                  Tipo de Dano
+                                </label>
+                                <select
+                                  disabled={!canEdit}
+                                  value={item.tickEffect.damageType || 'Fogo'}
+                                  onChange={(e) =>
+                                    patch({
+                                      tickEffect: {
+                                        ...item.tickEffect!,
+                                        damageType: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="rpg-input w-full text-xs"
+                                >
+                                  {DAMAGE_TYPE_OPTIONS.map((dt) => (
+                                    <option key={dt} value={dt}>
+                                      {dt}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
+                            <div>
+                              <label className="block text-[10px] opacity-70 mb-0.5">
+                                Quando dispara
+                              </label>
+                              <select
+                                disabled={!canEdit}
+                                value={item.tickEffect.trigger}
+                                onChange={(e) =>
+                                  patch({
+                                    tickEffect: {
+                                      ...item.tickEffect!,
+                                      trigger: e.target.value as 'start' | 'end',
+                                    },
+                                  })
+                                }
+                                className="rpg-input w-full text-xs"
+                              >
+                                <option value="start">Início do Turno do Alvo</option>
+                                <option value="end">Fim do Turno do Alvo</option>
+                              </select>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 2. Salvaguarda no Fim do Turno para se Livrar */}
+                      <div className="rpg-card p-2.5 rounded-lg space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <label className="text-sky-300 font-semibold">
+                            🎲 Salvaguarda no Fim do Turno para se Livrar
+                          </label>
+                          <select
+                            disabled={!canEdit}
+                            value={item.endOfTurnSave?.skillId || ''}
+                            onChange={(e) => {
+                              const sid = e.target.value;
+                              if (!sid) {
+                                patch({ endOfTurnSave: undefined });
+                              } else {
+                                patch({
+                                  endOfTurnSave: {
+                                    skillId: sid,
+                                    dc: item.endOfTurnSave?.dc ?? 13,
+                                  },
+                                });
+                              }
+                            }}
+                            className="rpg-input text-xs py-0.5"
+                          >
+                            <option value="">Sem teste automático</option>
+                            {campaign.compendium.skills.map((sk) => (
+                              <option key={sk.id} value={sk.id}>
+                                {sk.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {item.endOfTurnSave && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] opacity-80">Classe de Dificuldade (CD):</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={40}
+                              disabled={!canEdit}
+                              value={item.endOfTurnSave.dc}
+                              onChange={(e) =>
+                                patch({
+                                  endOfTurnSave: {
+                                    ...item.endOfTurnSave!,
+                                    dc: Math.max(1, Number(e.target.value) || 10),
+                                  },
+                                })
+                              }
+                              className="rpg-input w-20 text-xs"
+                            />
+                            <span className="text-[10px] opacity-65">
+                              Se passar no fim do turno, a condição é removida automaticamente.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 3. Resistências, Vulnerabilidades e Imunidades */}
+                      <div className="rpg-card p-2.5 rounded-lg space-y-2">
+                        <label className="block text-emerald-300 font-semibold">
+                          🛡️ Afinidades de Dano enquanto Ativa
+                        </label>
+                        {(
+                          [
+                            {
+                              key: 'resistances',
+                              label: 'Resistências (½ dano)',
+                              activeCls: 'bg-sky-600/40 border-sky-400 text-sky-100',
+                            },
+                            {
+                              key: 'vulnerabilities',
+                              label: 'Vulnerabilidades (2× dano)',
+                              activeCls: 'bg-red-600/40 border-red-400 text-red-100',
+                            },
+                            {
+                              key: 'immunities',
+                              label: 'Imunidades (0 dano)',
+                              activeCls: 'bg-emerald-600/40 border-emerald-400 text-emerald-100',
+                            },
+                          ] as const
+                        ).map((grp) => {
+                          const list = (item[grp.key] || []) as string[];
+                          return (
+                            <div key={grp.key} className="space-y-1">
+                              <div className="text-[10px] opacity-75 font-semibold">{grp.label}</div>
+                              <div className="flex flex-wrap gap-1">
+                                {DAMAGE_TYPE_OPTIONS.map((dt) => {
+                                  const active = list.includes(dt);
+                                  return (
+                                    <button
+                                      key={`${grp.key}-${dt}`}
+                                      type="button"
+                                      disabled={!canEdit}
+                                      onClick={() =>
+                                        patch({
+                                          [grp.key]: active
+                                            ? list.filter((x) => x !== dt)
+                                            : [...list, dt],
+                                        })
+                                      }
+                                      className={`px-1.5 py-0.5 rounded text-[10px] border cursor-pointer transition ${
+                                        active
+                                          ? grp.activeCls
+                                          : 'bg-black/30 border-white/10 opacity-60 hover:opacity-100'
+                                      }`}
+                                    >
+                                      {dt}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* 4. Transformação Visual do Token */}
+                      <div className="rpg-card p-2.5 rounded-lg space-y-2">
+                        <label className="block text-purple-300 font-semibold">
+                          👹 Transformação Visual do Token (Opcional)
+                        </label>
+                        <p className="text-[10px] opacity-70">
+                          Troca temporariamente a imagem e/ou o tamanho do token no mapa enquanto esta condição estiver ativa.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {item.transformImageUrl && (
+                            <img
+                              src={item.transformImageUrl}
+                              alt="Transformação"
+                              className="w-10 h-10 rounded-full object-cover border border-purple-400/70"
+                            />
+                          )}
+                          {canEdit && (
+                            <FileUploadButton
+                              accept="image/*"
+                              label={item.transformImageUrl ? 'Trocar Imagem' : '+ Imagem Transformada'}
+                              onUploaded={(url) => patch({ transformImageUrl: url })}
+                            />
+                          )}
+                          {canEdit && item.transformImageUrl && (
+                            <button
+                              type="button"
+                              onClick={() => patch({ transformImageUrl: undefined })}
+                              className="px-2 py-1 rounded text-[10px] bg-red-950/60 border border-red-400/40 text-red-200 hover:bg-red-900 cursor-pointer"
+                            >
+                              Limpar Imagem
+                            </button>
+                          )}
+                          <select
+                            disabled={!canEdit}
+                            value={item.transformSize ?? 0}
+                            onChange={(e) => {
+                              const sz = Number(e.target.value) || 0;
+                              patch({ transformSize: sz > 0 ? sz : undefined });
+                            }}
+                            className="rpg-input text-xs py-1"
+                          >
+                            <option value={0}>Tamanho: Manter Original</option>
+                            <option value={1}>Tamanho: 1×1 (Médio)</option>
+                            <option value={2}>Tamanho: 2×2 (Grande)</option>
+                            <option value={3}>Tamanho: 3×3 (Enorme)</option>
+                          </select>
+                        </div>
+                      </div>
+
                       {renderModifierEditor(item.modifiers, (mods) => patch({ modifiers: mods }))}
                     </div>
                   );
@@ -2795,35 +3879,141 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                                 className="rpg-input w-full py-1 text-center"
                               />
                             </div>
-                            <div>
-                              <label className="block text-[10px] uppercase opacity-75 mb-1">
-                                Gatilho Fase 2 (% PV)
-                              </label>
-                              <input
-                                disabled={!canEdit}
-                                type="number"
-                                min={10}
-                                max={90}
-                                value={item.bossPhase2HpPct ?? 50}
-                                onChange={(e) =>
-                                  patch({
-                                    bossPhase2HpPct: Math.max(10, Math.min(90, Number(e.target.value) || 50)),
-                                  })
-                                }
-                                className="rpg-input w-full py-1 text-center"
-                              />
-                            </div>
-                            <div className="sm:col-span-3">
-                              <label className="block text-[10px] uppercase opacity-75 mb-1">
-                                Nome da Fase 2 (ao cruzar o limiar de PV)
-                              </label>
-                              <input
-                                disabled={!canEdit}
-                                value={item.bossPhase2Title || ''}
-                                onChange={(e) => patch({ bossPhase2Title: e.target.value })}
-                                placeholder="Ex: Forma Desperta / Fúria Ancestral"
-                                className="rpg-input w-full py-1"
-                              />
+                            <div className="sm:col-span-2 lg:col-span-4 space-y-2 pt-2 border-t border-amber-500/20">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] font-display font-bold uppercase tracking-wider text-amber-300">
+                                  Fases do Chefe (Opcional — adicione quantas quiser)
+                                </span>
+                                {canEdit && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const existing = item.bossPhases || [];
+                                      const nextNum = existing.length + 2;
+                                      const suggestedPct = Math.max(10, 75 - existing.length * 25);
+                                      patch({
+                                        bossPhases: [
+                                          ...existing,
+                                          {
+                                            id: `phase-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                                            hpThresholdPct: suggestedPct,
+                                            title: `Fase ${nextNum}`,
+                                            description: '',
+                                            restoreLegendaryActions: true,
+                                          },
+                                        ],
+                                      });
+                                    }}
+                                    className="rpg-card px-2 py-0.5 rounded text-[10px] font-display font-bold text-amber-200 hover:border-amber-400 cursor-pointer"
+                                  >
+                                    + Adicionar Fase
+                                  </button>
+                                )}
+                              </div>
+                              {(item.bossPhases || []).length === 0 ? (
+                                <div className="text-[10px] opacity-65 italic">
+                                  Nenhuma fase extra configurada (o Chefe permanece na Fase 1). Clique em "+ Adicionar Fase" para criar Fase 2, Fase 3, etc.
+                                </div>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  {(item.bossPhases || []).map((ph, idx) => (
+                                    <div
+                                      key={ph.id}
+                                      className="p-2 rounded bg-black/35 border border-amber-500/25 grid grid-cols-1 sm:grid-cols-12 gap-1.5 items-center"
+                                    >
+                                      <div className="sm:col-span-2">
+                                        <label className="block text-[9px] opacity-70">Gatilho % PV</label>
+                                        <input
+                                          disabled={!canEdit}
+                                          type="number"
+                                          min={1}
+                                          max={99}
+                                          value={ph.hpThresholdPct}
+                                          onChange={(e) => {
+                                            const val = Math.max(1, Math.min(99, Number(e.target.value) || 50));
+                                            patch({
+                                              bossPhases: (item.bossPhases || []).map((x) =>
+                                                x.id === ph.id ? { ...x, hpThresholdPct: val } : x
+                                              ),
+                                            });
+                                          }}
+                                          className="rpg-input w-full py-0.5 text-center text-[11px]"
+                                        />
+                                      </div>
+                                      <div className="sm:col-span-4">
+                                        <label className="block text-[9px] opacity-70">Título (Fase {idx + 2})</label>
+                                        <input
+                                          disabled={!canEdit}
+                                          value={ph.title}
+                                          onChange={(e) =>
+                                            patch({
+                                              bossPhases: (item.bossPhases || []).map((x) =>
+                                                x.id === ph.id ? { ...x, title: e.target.value } : x
+                                              ),
+                                            })
+                                          }
+                                          placeholder="Ex: Fúria Ancestral"
+                                          className="rpg-input w-full py-0.5 text-[11px]"
+                                        />
+                                      </div>
+                                      <div className="sm:col-span-4">
+                                        <label className="block text-[9px] opacity-70">Efeito / Descrição</label>
+                                        <input
+                                          disabled={!canEdit}
+                                          value={ph.description || ''}
+                                          onChange={(e) =>
+                                            patch({
+                                              bossPhases: (item.bossPhases || []).map((x) =>
+                                                x.id === ph.id ? { ...x, description: e.target.value } : x
+                                              ),
+                                            })
+                                          }
+                                          placeholder="Ex: Aura de chamas + recarrega ações"
+                                          className="rpg-input w-full py-0.5 text-[11px]"
+                                        />
+                                      </div>
+                                      <div className="sm:col-span-2 flex items-center justify-between gap-1 pt-2 sm:pt-3">
+                                        <label
+                                          className="flex items-center gap-1 text-[9px] cursor-pointer"
+                                          title="Restaurar Ações Lendárias ao entrar nesta fase"
+                                        >
+                                          <input
+                                            disabled={!canEdit}
+                                            type="checkbox"
+                                            checked={Boolean(ph.restoreLegendaryActions)}
+                                            onChange={(e) =>
+                                              patch({
+                                                bossPhases: (item.bossPhases || []).map((x) =>
+                                                  x.id === ph.id
+                                                    ? { ...x, restoreLegendaryActions: e.target.checked }
+                                                    : x
+                                                ),
+                                              })
+                                            }
+                                          />
+                                          <span>↻ Ações</span>
+                                        </label>
+                                        {canEdit && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              patch({
+                                                bossPhases: (item.bossPhases || []).filter(
+                                                  (x) => x.id !== ph.id
+                                                ),
+                                              })
+                                            }
+                                            className="text-red-400 hover:text-red-300 cursor-pointer"
+                                            title="Remover fase"
+                                          >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           </div>
                         )}
@@ -2976,6 +4166,96 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                             </button>
                           </div>
                         ))}
+                      </div>
+
+                      {/* Monster Loot Drop Table (auto-drops chest when reduced to 0 HP!) */}
+                      <div className="rpg-card p-2.5 rounded-lg space-y-2">
+                        <div>
+                          <label className="block text-amber-300 font-semibold">
+                            💰 Tabela de Espólio (Drop Automático ao cair a 0 PV)
+                          </label>
+                          <p className="text-[10px] opacity-70">
+                            Quando este monstro chegar a 0 PV no mapa, cria automaticamente um baú/corpo saqueável na posição dele com este ouro e itens.
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] opacity-75 mb-0.5">
+                              Ouro (número ou dado, ex: 15 ou 2d6)
+                            </label>
+                            <input
+                              disabled={!canEdit}
+                              value={item.lootGoldFormula || ''}
+                              onChange={(e) =>
+                                patch({ lootGoldFormula: e.target.value || undefined })
+                              }
+                              placeholder="Ex: 2d6 ou 25"
+                              className="rpg-input w-full text-xs font-mono-dice"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] opacity-75 mb-0.5">
+                              Adicionar Item do Compêndio
+                            </label>
+                            <select
+                              disabled={!canEdit}
+                              value=""
+                              onChange={(e) => {
+                                const iid = e.target.value;
+                                if (!iid) return;
+                                const cur = [...(item.lootItems || [])];
+                                const existing = cur.find((x) => x.itemId === iid);
+                                if (existing) {
+                                  existing.quantity += 1;
+                                } else {
+                                  cur.push({ itemId: iid, quantity: 1 });
+                                }
+                                patch({ lootItems: cur });
+                              }}
+                              className="rpg-input w-full text-xs"
+                            >
+                              <option value="">+ Adicionar item ao espólio...</option>
+                              {campaign.compendium.items.map((it) => (
+                                <option key={it.id} value={it.id}>
+                                  {it.name} ({it.type})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                        {(item.lootItems || []).length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {(item.lootItems || []).map((li) => {
+                              const def = campaign.compendium.items.find((x) => x.id === li.itemId);
+                              if (!def) return null;
+                              return (
+                                <span
+                                  key={li.itemId}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-amber-950/60 border border-amber-400/40 text-amber-200"
+                                >
+                                  <span>
+                                    {li.quantity}× {def.name}
+                                  </span>
+                                  {canEdit && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        patch({
+                                          lootItems: (item.lootItems || []).filter(
+                                            (x) => x.itemId !== li.itemId
+                                          ),
+                                        })
+                                      }
+                                      className="text-red-300 hover:text-red-200 cursor-pointer ml-0.5"
+                                    >
+                                      ✕
+                                    </button>
+                                  )}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
 
                       <div>

@@ -1,7 +1,11 @@
 import {
+  AbilityDef,
+  ActionEconomyCost,
   AoETemplate,
   CampaignState,
   Character,
+  Combatant,
+  ConditionDef,
   EquipSlot,
   ItemDef,
   MapToken,
@@ -156,6 +160,7 @@ export interface ComputedSkill {
   trained: boolean;
   isSavingThrow: boolean;
   attrShort: string;
+  diceBonuses: string[];
   breakdown: string[];
 }
 
@@ -179,13 +184,270 @@ export interface ComputedCharacterStats {
   attackDiceBonuses: string[];
   damageBonusExtra: number;
   damageBreakdown: string[];
+  damageDiceBonuses: string[];
   saveDiceBonuses: string[];
   skills: Record<string, ComputedSkill>;
   totalWeight: number;
 }
 
+export function parseAbilityDuration(
+  durationText?: string,
+  fallbackRounds?: number
+): { isDiceFormula: true; formula: string } | { isDiceFormula: false; rounds: number } {
+  const raw = (durationText || '').trim();
+  if (raw) {
+    // Check for dice formula like "1d4", "1d6 + 1", "2d4 turnos"
+    const diceMatch = raw.match(/(\d*d\d+(?:\s*[+-]\s*(?:\d+|@?[a-z_]+))*)/i);
+    if (diceMatch && diceMatch[1]) {
+      return { isDiceFormula: true, formula: diceMatch[1].trim() };
+    }
+    // Check for plain numeric duration (e.g. "5", "5 turnos", "1 minuto")
+    const numMatch = raw.match(/(\d+)/);
+    if (numMatch && numMatch[1]) {
+      const n = Math.max(1, parseInt(numMatch[1], 10));
+      const low = raw.toLowerCase();
+      if (low.includes('minuto')) return { isDiceFormula: false, rounds: n * 10 };
+      if (low.includes('hora')) return { isDiceFormula: false, rounds: n * 60 };
+      return { isDiceFormula: false, rounds: n };
+    }
+  }
+  return {
+    isDiceFormula: false,
+    rounds: fallbackRounds && fallbackRounds > 0 ? fallbackRounds : 3,
+  };
+}
+
+export function getConditionGrantedAbilities(
+  activeConditionIds: string[] | undefined,
+  campaign: Pick<CampaignState, 'compendium'>
+): Array<{ ability: AbilityDef; condition: ConditionDef }> {
+  if (!activeConditionIds || activeConditionIds.length === 0) return [];
+  const seen = new Set<string>();
+  const result: Array<{ ability: AbilityDef; condition: ConditionDef }> = [];
+  for (const cid of activeConditionIds) {
+    const cond = campaign.compendium.conditions.find((c) => c.id === cid);
+    if (!cond?.grantedAbilityIds || cond.grantedAbilityIds.length === 0) continue;
+    for (const aid of cond.grantedAbilityIds) {
+      if (seen.has(aid)) continue;
+      const ab = campaign.compendium.abilities.find((a) => a.id === aid);
+      if (!ab || ab.actionType === 'Passiva') continue;
+      seen.add(aid);
+      result.push({ ability: ab, condition: cond });
+    }
+  }
+  return result;
+}
+
+export function getConditionExtraEconomy(
+  activeConditionIds: string[] | undefined,
+  campaign: Pick<CampaignState, 'compendium'>
+): { extraActions: number; extraBonusActions: number } {
+  if (!activeConditionIds || activeConditionIds.length === 0) {
+    return { extraActions: 0, extraBonusActions: 0 };
+  }
+  let extraActions = 0;
+  let extraBonusActions = 0;
+  for (const cid of activeConditionIds) {
+    const cond = campaign.compendium.conditions.find((c) => c.id === cid);
+    if (!cond) continue;
+    if (cond.extraActions && cond.extraActions > 0) extraActions += cond.extraActions;
+    if (cond.extraBonusActions && cond.extraBonusActions > 0) {
+      extraBonusActions += cond.extraBonusActions;
+    }
+  }
+  return { extraActions, extraBonusActions };
+}
+
+export function getConditionDamageAffinities(
+  activeConditionIds: string[] | undefined,
+  campaign: Pick<CampaignState, 'compendium'>
+): { resistances: string[]; vulnerabilities: string[]; immunities: string[] } {
+  const resistances: string[] = [];
+  const vulnerabilities: string[] = [];
+  const immunities: string[] = [];
+  if (!activeConditionIds || activeConditionIds.length === 0) {
+    return { resistances, vulnerabilities, immunities };
+  }
+  for (const cid of activeConditionIds) {
+    const cond = campaign.compendium.conditions.find((c) => c.id === cid);
+    if (!cond) continue;
+    if (cond.resistances?.length) resistances.push(...cond.resistances);
+    if (cond.vulnerabilities?.length) vulnerabilities.push(...cond.vulnerabilities);
+    if (cond.immunities?.length) immunities.push(...cond.immunities);
+  }
+  return { resistances, vulnerabilities, immunities };
+}
+
+export function getConditionVisualTransform(
+  activeConditionIds: string[] | undefined,
+  campaign: Pick<CampaignState, 'compendium'>
+): { imageUrl?: string; size?: number } {
+  if (!activeConditionIds || activeConditionIds.length === 0) return {};
+  let imageUrl: string | undefined;
+  let size: number | undefined;
+  for (const cid of activeConditionIds) {
+    const cond = campaign.compendium.conditions.find((c) => c.id === cid);
+    if (!cond) continue;
+    if (cond.transformImageUrl) imageUrl = cond.transformImageUrl;
+    if (cond.transformSize && cond.transformSize >= 1) size = cond.transformSize;
+  }
+  return { imageUrl, size };
+}
+
+export function getHeroInspirationPoints(
+  ch: Pick<Character, 'hasInspiration' | 'inspirationPoints'> | undefined | null
+): number {
+  if (!ch) return 0;
+  if (typeof ch.inspirationPoints === 'number' && Number.isFinite(ch.inspirationPoints)) {
+    return Math.max(0, Math.min(3, Math.floor(ch.inspirationPoints)));
+  }
+  return ch.hasInspiration ? 1 : 0;
+}
+
+export const BUILTIN_SURFACE_CONDITIONS: Record<'cond-corroido' | 'cond-molhado', ConditionDef> = {
+  'cond-corroido': {
+    id: 'cond-corroido',
+    name: 'Corroído',
+    color: '#84cc16',
+    icon: '🧪',
+    description: 'Ácido corrói a armadura: -2 na Defesa (CA).',
+    auraVfx: 'poison',
+    modifiers: [{ target: 'defense', value: -2, label: 'Corroído' }],
+  },
+  'cond-molhado': {
+    id: 'cond-molhado',
+    name: 'Molhado',
+    color: '#38bdf8',
+    icon: '💧',
+    description: 'Encharcado: vulnerável (2× dano) a Elétrico e Gelo; apaga chamas.',
+    auraVfx: 'frost',
+    vulnerabilities: ['Elétrico', 'Gelo'],
+    modifiers: [],
+  },
+};
+
+export function ensureSurfaceCondition(
+  conditions: ConditionDef[],
+  id: 'cond-corroido' | 'cond-molhado'
+): ConditionDef[] {
+  if (conditions.some((c) => c.id === id)) return conditions;
+  return [...conditions, BUILTIN_SURFACE_CONDITIONS[id]];
+}
+
+/**
+ * Merges static map terrainCells with any closed/locked Door markers acting as walls
+ * (blocking movement, Line of Sight, and dynamic Torch/Darkvision light).
+ */
+export function getEffectiveTerrainCells(
+  map: Pick<TacticalMap, 'terrainCells' | 'gmMarkers'> | undefined | null
+): Record<string, TerrainCellKind> {
+  const merged: Record<string, TerrainCellKind> = { ...(map?.terrainCells || {}) };
+  if (map?.gmMarkers) {
+    for (const mk of map.gmMarkers) {
+      if (mk.kind === 'door' && mk.doorState !== 'open') {
+        merged[`${mk.x},${mk.y}`] = 'wall';
+      }
+    }
+  }
+  return merged;
+}
+
+export interface InventoryChargedAbility {
+  inventoryEntryId: string;
+  itemDef: ItemDef;
+  ability: AbilityDef;
+  maxCharges: number;
+  chargesRemaining: number;
+  rechargeType: 'long-rest' | 'short-rest' | 'consumable';
+  quantity: number;
+}
+
+export function getInventoryChargedAbilities(
+  character: Character | undefined | null,
+  campaign: Pick<CampaignState, 'compendium'>
+): InventoryChargedAbility[] {
+  if (!character || !character.inventory?.length) return [];
+  const results: InventoryChargedAbility[] = [];
+  for (const entry of character.inventory) {
+    if ((entry.quantity ?? 1) <= 0) continue;
+    const itemDef = campaign.compendium.items.find((i) => i.id === entry.itemId);
+    if (!itemDef?.grantedAbilityId) continue;
+    const ab = campaign.compendium.abilities.find((a) => a.id === itemDef.grantedAbilityId);
+    if (!ab || ab.actionType === 'Passiva') continue;
+    const maxCharges = Math.max(0, Math.floor(itemDef.maxCharges ?? 0));
+    const chargesRemaining =
+      maxCharges > 0
+        ? typeof entry.chargesRemaining === 'number'
+          ? Math.max(0, Math.min(maxCharges, entry.chargesRemaining))
+          : maxCharges
+        : 0;
+    results.push({
+      inventoryEntryId: entry.id,
+      itemDef,
+      ability: ab,
+      maxCharges,
+      chargesRemaining,
+      rechargeType: itemDef.rechargeType || 'long-rest',
+      quantity: entry.quantity ?? 1,
+    });
+  }
+  return results;
+}
+
+export function getCombatantActionsRemaining(cb: Pick<Combatant, 'actionAvailable' | 'actionsRemaining'>): number {
+  if (typeof cb.actionsRemaining === 'number') return Math.max(0, cb.actionsRemaining);
+  return cb.actionAvailable === false ? 0 : 1;
+}
+
+export function getCombatantBonusActionsRemaining(
+  cb: Pick<Combatant, 'bonusActionAvailable' | 'bonusActionsRemaining'>
+): number {
+  if (typeof cb.bonusActionsRemaining === 'number') return Math.max(0, cb.bonusActionsRemaining);
+  return cb.bonusActionAvailable === false ? 0 : 1;
+}
+
+export function consumeCombatantEconomy(
+  cb: Combatant,
+  cost: ActionEconomyCost | undefined
+): Combatant {
+  if (!cost || cost === 'Livre') return cb;
+  if (cost === 'Padrão') {
+    const nextRem = Math.max(0, getCombatantActionsRemaining(cb) - 1);
+    return { ...cb, actionsRemaining: nextRem, actionAvailable: nextRem > 0 };
+  }
+  if (cost === 'Bônus') {
+    const nextRem = Math.max(0, getCombatantBonusActionsRemaining(cb) - 1);
+    return { ...cb, bonusActionsRemaining: nextRem, bonusActionAvailable: nextRem > 0 };
+  }
+  if (cost === 'Reação') {
+    return { ...cb, reactionAvailable: false };
+  }
+  return cb;
+}
+
 export function getAttrMod(score: number): number {
   return Math.floor((score - 10) / 2);
+}
+
+export function getAttributePointsGainedAtLevel(
+  level: number,
+  settings?: { attributePointsPerGain?: number; attributePointsEveryLevels?: number }
+): number {
+  if (level <= 1) return 0;
+  const pts =
+    typeof settings?.attributePointsPerGain === 'number' ? settings.attributePointsPerGain : 2;
+  const every =
+    typeof settings?.attributePointsEveryLevels === 'number'
+      ? settings.attributePointsEveryLevels
+      : 4;
+  if (pts <= 0 || every <= 0) return 0;
+  if (
+    settings?.attributePointsPerGain === undefined &&
+    settings?.attributePointsEveryLevels === undefined
+  ) {
+    return [4, 8, 12, 16, 19].includes(level) ? 2 : 0;
+  }
+  return level % every === 0 ? pts : 0;
 }
 
 export function formatSigned(n: number): string {
@@ -515,37 +777,44 @@ export function computeCharacterStats(
   }
 
   // Compute Defense / CA
-  let defense = settings.baseDefense;
-  const defenseBreakdown: string[] = [`Base ${settings.baseDefense}`];
-  let hasHeavyArmor = false;
-  let armorBonus = 0;
-  let shieldBonus = 0;
+  let defense = 0;
+  const defenseBreakdown: string[] = [];
+  if (typeof character.defenseOverride === 'number' && character.defenseOverride > 0) {
+    defense = character.defenseOverride;
+    defenseBreakdown.push(`Manual: ${defense}`);
+  } else {
+    defense = settings.baseDefense;
+    defenseBreakdown.push(`Base ${settings.baseDefense}`);
+    let hasHeavyArmor = false;
+    let armorBonus = 0;
+    let shieldBonus = 0;
 
-  for (const item of effectiveEquippedItems) {
-    const defBonus = extractItemDefenseBonus(item);
-    if (!defBonus) continue;
-    if (item.type === 'Armadura') {
-      armorBonus += defBonus;
-      defenseBreakdown.push(`${item.name} +${defBonus}`);
-      if (defBonus >= 6) hasHeavyArmor = true;
-    } else if (item.type === 'Escudo') {
-      shieldBonus += defBonus;
-      defenseBreakdown.push(`${item.name} +${defBonus}`);
-    } else {
-      defense += defBonus;
-      defenseBreakdown.push(`${item.name} +${defBonus}`);
+    for (const item of effectiveEquippedItems) {
+      const defBonus = extractItemDefenseBonus(item);
+      if (!defBonus) continue;
+      if (item.type === 'Armadura') {
+        armorBonus += defBonus;
+        defenseBreakdown.push(`${item.name} +${defBonus}`);
+        if (defBonus >= 6) hasHeavyArmor = true;
+      } else if (item.type === 'Escudo') {
+        shieldBonus += defBonus;
+        defenseBreakdown.push(`${item.name} +${defBonus}`);
+      } else {
+        defense += defBonus;
+        defenseBreakdown.push(`${item.name} +${defBonus}`);
+      }
     }
-  }
 
-  defense += armorBonus + shieldBonus;
-  const effectiveDesForArmor = hasHeavyArmor ? Math.min(2, desMod) : desMod;
-  if (effectiveDesForArmor !== 0) {
-    defense += effectiveDesForArmor;
-    defenseBreakdown.push(
-      hasHeavyArmor
-        ? `Destreza (máx +2 armadura pesada) ${formatSigned(effectiveDesForArmor)}`
-        : `Destreza ${formatSigned(effectiveDesForArmor)}`
-    );
+    defense += armorBonus + shieldBonus;
+    const effectiveDesForArmor = hasHeavyArmor ? Math.min(2, desMod) : desMod;
+    if (effectiveDesForArmor !== 0) {
+      defense += effectiveDesForArmor;
+      defenseBreakdown.push(
+        hasHeavyArmor
+          ? `Destreza (máx +2 armadura pesada) ${formatSigned(effectiveDesForArmor)}`
+          : `Destreza ${formatSigned(effectiveDesForArmor)}`
+      );
+    }
   }
   for (const m of activeModifiers) {
     if (m.target === 'defense') {
@@ -555,8 +824,15 @@ export function computeCharacterStats(
   }
 
   // Compute Speed
-  let speed = race?.speed ?? 9;
-  const speedBreakdown: string[] = [`Raça ${speed}m`];
+  let speed =
+    typeof character.speedOverride === 'number' && character.speedOverride >= 0
+      ? character.speedOverride
+      : (race?.speed ?? 9);
+  const speedBreakdown: string[] = [
+    typeof character.speedOverride === 'number' && character.speedOverride >= 0
+      ? `Manual ${speed}m`
+      : `Raça ${speed}m`,
+  ];
   for (const m of activeModifiers) {
     if (m.target === 'speed') {
       speed += m.value;
@@ -581,24 +857,33 @@ export function computeCharacterStats(
   const attackDiceBonuses: string[] = [];
   let damageBonusExtra = 0;
   const damageBreakdown: string[] = [];
+  const damageDiceBonuses: string[] = [];
   const saveDiceBonuses: string[] = [];
   let saveBonusExtra = 0;
 
   for (const m of activeModifiers) {
+    const cleanDice = m.diceBonus?.trim();
     if (m.target === 'attack') {
       if (m.value !== 0) {
         attackBonusExtra += m.value;
         attackBreakdown.push(`${m.label} ${formatSigned(m.value)}`);
       }
-      if (m.diceBonus) attackDiceBonuses.push(m.diceBonus);
+      if (cleanDice && /\d*d\d+/i.test(cleanDice)) {
+        attackDiceBonuses.push(cleanDice);
+        attackBreakdown.push(`${m.label} +${cleanDice}`);
+      }
     } else if (m.target === 'damage') {
       if (m.value !== 0) {
         damageBonusExtra += m.value;
         damageBreakdown.push(`${m.label} ${formatSigned(m.value)}`);
       }
+      if (cleanDice && /\d*d\d+/i.test(cleanDice)) {
+        damageDiceBonuses.push(cleanDice);
+        damageBreakdown.push(`${m.label} +${cleanDice}`);
+      }
     } else if (m.target === 'save') {
       if (m.value !== 0) saveBonusExtra += m.value;
-      if (m.diceBonus) saveDiceBonuses.push(m.diceBonus);
+      if (cleanDice && /\d*d\d+/i.test(cleanDice)) saveDiceBonuses.push(cleanDice);
     }
   }
 
@@ -609,6 +894,7 @@ export function computeCharacterStats(
     const attrMod = attributes[skill.defaultAttributeId]?.mod ?? 0;
     const trained = character.trainedSkillIds.includes(skill.id);
     const breakdown: string[] = [`${attrDef?.shortName ?? 'ATR'} ${formatSigned(attrMod)}`];
+    const diceBonuses: string[] = [];
 
     let total = attrMod;
     if (trained && levelBonus > 0) {
@@ -620,11 +906,22 @@ export function computeCharacterStats(
       total += saveBonusExtra;
       breakdown.push(`Efeitos ${formatSigned(saveBonusExtra)}`);
     }
+    if (skill.isSavingThrow && saveDiceBonuses.length > 0) {
+      diceBonuses.push(...saveDiceBonuses);
+      breakdown.push(`Dados ${saveDiceBonuses.map((d) => `+${d}`).join(' ')}`);
+    }
 
     for (const m of activeModifiers) {
       if (m.target === 'skill' && (!m.targetId || m.targetId === skill.id)) {
-        total += m.value;
-        breakdown.push(`${m.label} ${formatSigned(m.value)}`);
+        if (m.value !== 0) {
+          total += m.value;
+          breakdown.push(`${m.label} ${formatSigned(m.value)}`);
+        }
+        const cleanDice = m.diceBonus?.trim();
+        if (cleanDice && /\d*d\d+/i.test(cleanDice)) {
+          diceBonuses.push(cleanDice);
+          breakdown.push(`${m.label} +${cleanDice}`);
+        }
       }
     }
 
@@ -633,6 +930,7 @@ export function computeCharacterStats(
       trained,
       isSavingThrow: Boolean(skill.isSavingThrow),
       attrShort: attrDef?.shortName ?? 'ATR',
+      diceBonuses,
       breakdown,
     };
   }
@@ -666,6 +964,7 @@ export function computeCharacterStats(
     attackDiceBonuses,
     damageBonusExtra,
     damageBreakdown,
+    damageDiceBonuses,
     saveDiceBonuses,
     skills,
     totalWeight: Math.round(totalWeight * 10) / 10,
@@ -673,22 +972,56 @@ export function computeCharacterStats(
 }
 
 /**
- * Synchronizes every character's derived Defense (CA), MaxHP, and Speed onto their
- * MapTokens and Combatants so equipping/unequipping items immediately updates CA everywhere.
+ * Synchronizes every character's derived Defense (CA), MaxHP, MaxMP, and Speed onto their
+ * Character record, MapTokens, and Combatants.
+ * When `prevCamp` is provided, automatically adjusts current HP/MP when conditions/items
+ * increase MaxHP/MaxMP (+delta when gained, clamped down to new max when lost).
  */
-export function syncCampaignDerivedCharacterStats(camp: CampaignState): CampaignState {
+export function syncCampaignDerivedCharacterStats(
+  camp: CampaignState,
+  prevCamp?: CampaignState
+): CampaignState {
   if (!camp || !Array.isArray(camp.characters) || !camp.compendium) return camp;
   const statsByCharId = new Map<string, ComputedCharacterStats>();
   for (const ch of camp.characters) {
     statsByCharId.set(ch.id, computeCharacterStats(ch, camp));
   }
 
+  const nextCharacters = camp.characters.map((ch) => {
+    const nextStats = statsByCharId.get(ch.id);
+    if (!nextStats) return ch;
+    let nextHp = ch.hp;
+    let nextMp = ch.mp;
+    if (prevCamp && Array.isArray(prevCamp.characters) && prevCamp.compendium) {
+      const prevCh = prevCamp.characters.find((p) => p.id === ch.id);
+      if (prevCh) {
+        const prevStats = computeCharacterStats(prevCh, prevCamp);
+        const hpMaxDelta = nextStats.maxHp - prevStats.maxHp;
+        const mpMaxDelta = nextStats.maxMp - prevStats.maxMp;
+        if (hpMaxDelta > 0 && ch.hp === prevCh.hp && ch.hp > 0) {
+          nextHp = Math.min(nextStats.maxHp, ch.hp + hpMaxDelta);
+        } else if (hpMaxDelta < 0 && nextHp > nextStats.maxHp) {
+          nextHp = nextStats.maxHp;
+        }
+        if (mpMaxDelta > 0 && ch.mp === prevCh.mp) {
+          nextMp = Math.min(nextStats.maxMp, ch.mp + mpMaxDelta);
+        } else if (mpMaxDelta < 0 && nextMp > nextStats.maxMp) {
+          nextMp = nextStats.maxMp;
+        }
+      }
+    }
+    if (nextHp !== ch.hp || nextMp !== ch.mp) {
+      return { ...ch, hp: nextHp, mp: nextMp };
+    }
+    return ch;
+  });
+
   const nextMaps = (camp.maps || []).map((m) => ({
     ...m,
     tokens: (m.tokens || []).map((tok) => {
       if (tok.type !== 'character' || !tok.referenceId) return tok;
       const st = statsByCharId.get(tok.referenceId);
-      const ch = camp.characters.find((c) => c.id === tok.referenceId);
+      const ch = nextCharacters.find((c) => c.id === tok.referenceId);
       if (!st || !ch) return tok;
       return {
         ...tok,
@@ -699,27 +1032,70 @@ export function syncCampaignDerivedCharacterStats(camp: CampaignState): Campaign
     }),
   }));
 
+  const activeNextMap = nextMaps.find((m) => m.id === camp.activeMapId);
+  const activePrevMap = prevCamp?.maps?.find((m) => m.id === prevCamp.activeMapId);
+
   const nextCombat = camp.combat
     ? {
         ...camp.combat,
         combatants: (camp.combat.combatants || []).map((cb) => {
-          if (cb.type !== 'character' || !cb.referenceId) return cb;
-          const st = statsByCharId.get(cb.referenceId);
-          const ch = camp.characters.find((c) => c.id === cb.referenceId);
-          if (!st || !ch) return cb;
-          return {
-            ...cb,
-            hp: ch.hp,
-            maxHp: st.maxHp,
-            defense: st.defense,
-            speedMeters: st.speed,
-          };
+          let nextCb = cb;
+          if (cb.type === 'character' && cb.referenceId) {
+            const st = statsByCharId.get(cb.referenceId);
+            const ch = nextCharacters.find((c) => c.id === cb.referenceId);
+            if (st && ch) {
+              nextCb = {
+                ...nextCb,
+                hp: ch.hp,
+                maxHp: st.maxHp,
+                defense: st.defense,
+                speedMeters: st.speed,
+              };
+            }
+          }
+
+          // Sync mid-turn Extra Actions / Extra Bonus Actions when conditions are gained or removed
+          if (prevCamp && prevCamp.combat?.active) {
+            const curCondIds =
+              cb.type === 'character' && cb.referenceId
+                ? nextCharacters.find((c) => c.id === cb.referenceId)?.activeConditionIds || []
+                : activeNextMap?.tokens.find((t) => t.id === cb.tokenId)?.activeConditionIds || [];
+            const prevCondIds =
+              cb.type === 'character' && cb.referenceId
+                ? prevCamp.characters.find((c) => c.id === cb.referenceId)?.activeConditionIds || []
+                : activePrevMap?.tokens.find((t) => t.id === cb.tokenId)?.activeConditionIds || [];
+
+            const curExtra = getConditionExtraEconomy(curCondIds, camp);
+            const prevExtra = getConditionExtraEconomy(prevCondIds, prevCamp);
+            const actDelta = curExtra.extraActions - prevExtra.extraActions;
+            const bonDelta = curExtra.extraBonusActions - prevExtra.extraBonusActions;
+
+            if (actDelta !== 0 || bonDelta !== 0) {
+              const curActs = getCombatantActionsRemaining(nextCb);
+              const curBon = getCombatantBonusActionsRemaining(nextCb);
+              const nextActs = Math.max(0, Math.min(1 + curExtra.extraActions, curActs + actDelta));
+              const nextBon = Math.max(
+                0,
+                Math.min(1 + curExtra.extraBonusActions, curBon + bonDelta)
+              );
+              nextCb = {
+                ...nextCb,
+                actionsRemaining: nextActs,
+                actionAvailable: nextActs > 0,
+                bonusActionsRemaining: nextBon,
+                bonusActionAvailable: nextBon > 0,
+              };
+            }
+          }
+
+          return nextCb;
         }),
       }
     : camp.combat;
 
   return {
     ...camp,
+    characters: nextCharacters,
     maps: nextMaps,
     combat: nextCombat,
   };
@@ -925,6 +1301,8 @@ export function normalizeHeroCharacter(
     tempHp: typeof raw.tempHp === 'number' ? raw.tempHp : 0,
     mp: typeof raw.mp === 'number' ? raw.mp : 6,
     maxMpOverride: raw.maxMpOverride,
+    defenseOverride: raw.defenseOverride,
+    speedOverride: raw.speedOverride,
     knownAbilityIds: Array.isArray(raw.knownAbilityIds) ? raw.knownAbilityIds : [],
     customAttacks: Array.isArray(raw.customAttacks) ? raw.customAttacks : [],
     customAbilities: Array.isArray(raw.customAbilities) ? raw.customAbilities : [],
@@ -1023,6 +1401,7 @@ export function doesTokenCollideAt(
 export function findNearestFreeGridCell(
   map: Pick<TacticalMap, 'gridWidth' | 'gridHeight' | 'tokens'> & {
     terrainCells?: Record<string, TerrainCellKind>;
+    gmMarkers?: TacticalMap['gmMarkers'];
   },
   desiredX: number,
   desiredY: number,
@@ -1035,6 +1414,7 @@ export function findNearestFreeGridCell(
   const maxY = Math.max(0, map.gridHeight - s);
   const startX = Math.max(0, Math.min(maxX, Math.round(desiredX)));
   const startY = Math.max(0, Math.min(maxY, Math.round(desiredY)));
+  const effTerrain = getEffectiveTerrainCells(map);
 
   if (
     !doesTokenCollideAt(
@@ -1044,7 +1424,7 @@ export function findNearestFreeGridCell(
       s,
       ignoreTokenId,
       includeHidden,
-      map.terrainCells
+      effTerrain
     )
   ) {
     return { x: startX, y: startY };
@@ -1067,7 +1447,7 @@ export function findNearestFreeGridCell(
             s,
             ignoreTokenId,
             includeHidden,
-            map.terrainCells
+            effTerrain
           )
         ) {
           candidates.push({ x: cx, y: cy, distSq: dx * dx + dy * dy });
@@ -1089,6 +1469,7 @@ export function findNearestFreeGridCell(
 export function resolveDragTargetCell(
   map: Pick<TacticalMap, 'gridWidth' | 'gridHeight' | 'tokens'> & {
     terrainCells?: Record<string, TerrainCellKind>;
+    gmMarkers?: TacticalMap['gmMarkers'];
   },
   movingToken: MapToken,
   desiredX: number,
@@ -1100,6 +1481,7 @@ export function resolveDragTargetCell(
   const maxY = Math.max(0, map.gridHeight - s);
   const clampedX = Math.max(0, Math.min(maxX, desiredX));
   const clampedY = Math.max(0, Math.min(maxY, desiredY));
+  const effTerrain = getEffectiveTerrainCells(map);
 
   if (
     !doesTokenCollideAt(
@@ -1109,7 +1491,7 @@ export function resolveDragTargetCell(
       s,
       movingToken.id,
       includeHidden,
-      map.terrainCells
+      effTerrain
     )
   ) {
     return { x: clampedX, y: clampedY };
@@ -1123,7 +1505,7 @@ export function resolveDragTargetCell(
       s,
       movingToken.id,
       includeHidden,
-      map.terrainCells
+      effTerrain
     )
   ) {
     return { x: clampedX, y: movingToken.y };
@@ -1137,7 +1519,7 @@ export function resolveDragTargetCell(
       s,
       movingToken.id,
       includeHidden,
-      map.terrainCells
+      effTerrain
     )
   ) {
     return { x: movingToken.x, y: clampedY };
@@ -1192,7 +1574,12 @@ export interface LineOfSightCoverResult {
  * Evaluates Line of Sight (Walls block attacks) and D&D 5e Cover (+2 Half / +5 Three-Quarters AC).
  */
 export function evaluateLineOfSightAndCover(
-  map: Pick<TacticalMap, 'tokens'> & { terrainCells?: Record<string, TerrainCellKind> } | undefined,
+  map:
+    | (Pick<TacticalMap, 'tokens'> & {
+        terrainCells?: Record<string, TerrainCellKind>;
+        gmMarkers?: TacticalMap['gmMarkers'];
+      })
+    | undefined,
   attackerToken: MapToken | undefined,
   defenderToken: MapToken | undefined,
   isRanged: boolean
@@ -1200,7 +1587,7 @@ export function evaluateLineOfSightAndCover(
   if (!map || !attackerToken || !defenderToken || attackerToken.id === defenderToken.id) {
     return { blockedByWall: false, coverAcBonus: 0 };
   }
-  const terrain = map.terrainCells || {};
+  const terrain = getEffectiveTerrainCells(map);
   const ax = attackerToken.x + Math.floor((attackerToken.size || 1) / 2);
   const ay = attackerToken.y + Math.floor((attackerToken.size || 1) / 2);
   const bx = defenderToken.x + Math.floor((defenderToken.size || 1) / 2);
@@ -1833,6 +2220,7 @@ export function resolveDamageWithAffinities(
     resistances?: string[];
     vulnerabilities?: string[];
     activeConditionIds?: string[];
+    compendiumConditions?: ConditionDef[];
   }
 ): DamageAffinityResult {
   const base = Math.max(0, Math.round(rawAmount));
@@ -1859,6 +2247,21 @@ export function resolveDamageWithAffinities(
     resSet.add('corte');
     resSet.add('perfuracao');
     resSet.add('concussao');
+  }
+  // Built-in Wet ("cond-molhado") grants vulnerability to Lightning & Frost
+  if (affinities.activeConditionIds?.includes('cond-molhado')) {
+    vulSet.add('eletrico');
+    vulSet.add('gelo');
+  }
+  // Merge custom GM-defined resistances, vulnerabilities, and immunities from any active condition
+  if (affinities.activeConditionIds?.length && affinities.compendiumConditions?.length) {
+    for (const cid of affinities.activeConditionIds) {
+      const cond = affinities.compendiumConditions.find((c) => c.id === cid);
+      if (!cond) continue;
+      cond.immunities?.forEach((d) => immSet.add(normalizeDamageKey(d)));
+      cond.resistances?.forEach((d) => resSet.add(normalizeDamageKey(d)));
+      cond.vulnerabilities?.forEach((d) => vulSet.add(normalizeDamageKey(d)));
+    }
   }
 
   // Only immune if all incoming damage types are immune (or single type matches)

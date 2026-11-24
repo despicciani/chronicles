@@ -33,24 +33,34 @@ import {
   calculateMovementCostMeters,
   computeAdaptiveMapGrid,
   computeCharacterStats,
+  consumeCombatantEconomy,
   DAMAGE_TYPE_OPTIONS,
   doesTokenCollideAt,
   doSquaresOverlap,
+  ensureSurfaceCondition,
+  evaluateFormula,
   evaluateLineOfSightAndCover,
   evaluateTacticalAttackModifiers,
   findNearestFreeGridCell,
   formatFormulaForDisplay,
+  getConditionGrantedAbilities,
+  getConditionVisualTransform,
+  getEffectiveTerrainCells,
   getGridSpanDistance,
   getMonsterWoundStatus,
+  parseAbilityDuration,
   parseAttackRangeMeters,
   parseAttackRangeSquares,
   resolveDragTargetCell,
 } from '../shared/rulesEngine';
 import {
   AoETemplate,
+  CampaignState,
+  Character,
   ElementalSurfaceKind,
   GmMapMarker,
   GmMarkerKind,
+  LightEmissionMode,
   MapToken,
   PendingAttackChoice,
   TacticalMap,
@@ -209,33 +219,244 @@ const BiomeFloorOverlay: React.FC<{
 };
 
 const TOKEN_LIGHT_PRESETS: Array<{
-  id: NonNullable<MapToken['lightSource']>;
+  id: 'none' | 'torch' | 'lantern' | 'darkvision';
   label: string;
   short: string;
+  mode: LightEmissionMode;
   radiusMeters: number;
 }> = [
-  { id: 'none', label: 'Apagada', short: 'Off', radiusMeters: 0 },
-  { id: 'torch', label: 'Tocha (6m)', short: '🔥 6m', radiusMeters: 6 },
-  { id: 'lantern', label: 'Lanterna (9m)', short: '🏮 9m', radiusMeters: 9 },
-  { id: 'darkvision', label: 'Visão no Escuro (18m)', short: '👁 18m', radiusMeters: 18 },
+  { id: 'none', label: 'Apagada', short: 'Off', mode: 'none', radiusMeters: 0 },
+  { id: 'torch', label: 'Tocha (6m • Todos veem)', short: '🔥 6m', mode: 'shared', radiusMeters: 6 },
+  { id: 'lantern', label: 'Lanterna (9m • Todos veem)', short: '🏮 9m', mode: 'shared', radiusMeters: 9 },
+  {
+    id: 'darkvision',
+    label: 'Visão no Escuro (18m • Só o dono vê)',
+    short: '👁 18m',
+    mode: 'personal-darkvision',
+    radiusMeters: 18,
+  },
 ];
 
-function getTokenLightRadiusMeters(tok: MapToken): number {
+interface ResolvedLightOption {
+  id: string;
+  label: string;
+  short: string;
+  mode: LightEmissionMode;
+  radiusMeters: number;
+}
+
+function getItemLightMeta(item: {
+  name: string;
+  lightMode?: LightEmissionMode;
+  lightRadiusMeters?: number;
+}): { mode: LightEmissionMode; radiusMeters: number } | null {
+  if (item.lightMode && item.lightMode !== 'none' && (item.lightRadiusMeters ?? 0) > 0) {
+    return { mode: item.lightMode, radiusMeters: item.lightRadiusMeters! };
+  }
+  const low = item.name.toLowerCase();
+  if (low.includes('tocha')) return { mode: 'shared', radiusMeters: 6 };
+  if (low.includes('lanterna') || low.includes('lampião') || low.includes('lampiao')) {
+    return { mode: 'shared', radiusMeters: 9 };
+  }
+  return null;
+}
+
+function getAbilityLightMeta(ab: {
+  name: string;
+  lightMode?: LightEmissionMode;
+  lightRadiusMeters?: number;
+}): { mode: LightEmissionMode; radiusMeters: number } | null {
+  if (ab.lightMode && ab.lightMode !== 'none' && (ab.lightRadiusMeters ?? 0) > 0) {
+    return { mode: ab.lightMode, radiusMeters: ab.lightRadiusMeters! };
+  }
+  const low = ab.name.toLowerCase();
+  if (low.includes('visão no escuro') || low.includes('visao no escuro') || low.includes('darkvision')) {
+    return { mode: 'personal-darkvision', radiusMeters: 18 };
+  }
+  return null;
+}
+
+function getCharacterAvailableLightOptions(
+  char: Character,
+  campaign: CampaignState
+): { toggleOptions: ResolvedLightOption[]; passiveDarkvisionMeters: number } {
+  const toggleOptions: ResolvedLightOption[] = [];
+  const seen = new Set<string>();
+  let passiveDarkvisionMeters = 0;
+
+  for (const inv of char.inventory || []) {
+    if (inv.quantity <= 0) continue;
+    const def = campaign.compendium.items.find((i) => i.id === inv.itemId);
+    if (!def) continue;
+    const meta = getItemLightMeta(def);
+    if (!meta) continue;
+    const optId = `item:${def.id}`;
+    if (seen.has(optId)) continue;
+    seen.add(optId);
+    toggleOptions.push({
+      id: optId,
+      label: `${def.name} (${meta.radiusMeters}m • ${meta.mode === 'personal-darkvision' ? 'Só você vê' : 'Todos veem'})`,
+      short: `${meta.mode === 'personal-darkvision' ? '👁' : '🔥'} ${def.name.slice(0, 10)} (${meta.radiusMeters}m)`,
+      mode: meta.mode,
+      radiusMeters: meta.radiusMeters,
+    });
+  }
+
+  for (const aid of char.knownAbilityIds || []) {
+    const ab = campaign.compendium.abilities.find((a) => a.id === aid);
+    if (!ab) continue;
+    const meta = getAbilityLightMeta(ab);
+    if (!meta) continue;
+    if (ab.actionType === 'Passiva' && meta.mode === 'personal-darkvision') {
+      passiveDarkvisionMeters = Math.max(passiveDarkvisionMeters, meta.radiusMeters);
+      continue;
+    }
+    const optId = `ability:${ab.id}`;
+    if (seen.has(optId)) continue;
+    seen.add(optId);
+    toggleOptions.push({
+      id: optId,
+      label: `${ab.name} (${meta.radiusMeters}m • ${meta.mode === 'personal-darkvision' ? 'Só você vê' : 'Todos veem'})`,
+      short: `${meta.mode === 'personal-darkvision' ? '👁' : '✨'} ${ab.name.slice(0, 10)} (${meta.radiusMeters}m)`,
+      mode: meta.mode,
+      radiusMeters: meta.radiusMeters,
+    });
+  }
+
+  for (const cid of char.activeConditionIds || []) {
+    const cond = campaign.compendium.conditions.find((c) => c.id === cid);
+    if (cond?.lightMode === 'personal-darkvision' && (cond.lightRadiusMeters ?? 0) > 0) {
+      passiveDarkvisionMeters = Math.max(passiveDarkvisionMeters, cond.lightRadiusMeters!);
+    }
+  }
+
+  return { toggleOptions, passiveDarkvisionMeters };
+}
+
+function resolveTokenLightForViewer(
+  tok: MapToken,
+  campaign: CampaignState,
+  viewerRole: 'gm' | 'player',
+  viewerCharacterId?: string
+): { sharedRadiusM: number; personalRadiusM: number; immediateSenseM: number } {
+  const linkedChar =
+    tok.type === 'character' && tok.referenceId
+      ? campaign.characters.find((c) => c.id === tok.referenceId)
+      : undefined;
+  const isViewerOwnHero = Boolean(
+    tok.type === 'character' && viewerCharacterId && tok.referenceId === viewerCharacterId
+  );
+  const canSeePersonal = viewerRole === 'gm' || isViewerOwnHero;
+
+  let sharedRadiusM = 0;
+  let personalRadiusM = 0;
+
+  // 1. Explicit active light toggled on the token
+  const src = tok.lightSource || 'none';
+  if (src && src !== 'none') {
+    let valid = true;
+    let mode: LightEmissionMode =
+      tok.lightMode ||
+      (src === 'darkvision' ? 'personal-darkvision' : 'shared');
+    let rad = typeof tok.lightRadiusMeters === 'number' && tok.lightRadiusMeters > 0 ? tok.lightRadiusMeters : 0;
+
+    if (src === 'torch') {
+      mode = 'shared';
+      rad = rad || 6;
+    } else if (src === 'lantern') {
+      mode = 'shared';
+      rad = rad || 9;
+    } else if (src === 'darkvision') {
+      mode = 'personal-darkvision';
+      rad = rad || 18;
+    } else if (src.startsWith('item:')) {
+      const itemId = src.slice(5);
+      const itemDef = campaign.compendium.items.find((i) => i.id === itemId);
+      const stillOwns =
+        !linkedChar || (linkedChar.inventory || []).some((inv) => inv.itemId === itemId && inv.quantity > 0);
+      if (!stillOwns) {
+        valid = false;
+      } else if (itemDef) {
+        const meta = getItemLightMeta(itemDef);
+        if (meta) {
+          mode = meta.mode;
+          rad = rad || meta.radiusMeters;
+        }
+      }
+    } else if (src.startsWith('ability:')) {
+      const abId = src.slice(8);
+      const abDef = campaign.compendium.abilities.find((a) => a.id === abId);
+      const stillKnows = !linkedChar || (linkedChar.knownAbilityIds || []).includes(abId);
+      if (!stillKnows) {
+        valid = false;
+      } else if (abDef) {
+        const meta = getAbilityLightMeta(abDef);
+        if (meta) {
+          mode = meta.mode;
+          rad = rad || meta.radiusMeters;
+        }
+      }
+    }
+
+    if (valid && rad > 0) {
+      if (mode === 'shared') {
+        sharedRadiusM = Math.max(sharedRadiusM, rad);
+      } else if (mode === 'personal-darkvision' && canSeePersonal) {
+        personalRadiusM = Math.max(personalRadiusM, rad);
+      }
+    }
+  }
+
+  // 2. Active Conditions granting shared light or personal darkvision
+  const condIds = new Set<string>([
+    ...(tok.activeConditionIds || []),
+    ...(linkedChar?.activeConditionIds || []),
+  ]);
+  for (const cid of condIds) {
+    const cond = campaign.compendium.conditions.find((c) => c.id === cid);
+    if (!cond?.lightMode || cond.lightMode === 'none' || !(cond.lightRadiusMeters ?? 0)) continue;
+    if (cond.lightMode === 'shared') {
+      sharedRadiusM = Math.max(sharedRadiusM, cond.lightRadiusMeters!);
+    } else if (cond.lightMode === 'personal-darkvision' && canSeePersonal) {
+      personalRadiusM = Math.max(personalRadiusM, cond.lightRadiusMeters!);
+    }
+  }
+
+  // 3. Automatic Passive Personal Darkvision (only for owning player + GM!)
+  if (linkedChar && canSeePersonal) {
+    const { passiveDarkvisionMeters } = getCharacterAvailableLightOptions(linkedChar, campaign);
+    if (passiveDarkvisionMeters > 0) {
+      personalRadiusM = Math.max(personalRadiusM, passiveDarkvisionMeters);
+    }
+  }
+
+  // 4. Tiny immediate personal sense (~1 square around own hero) so players are never 100% blind
+  const immediateSenseM = isViewerOwnHero ? Math.max(1.5, campaign.settings.gridSquareMeters || 1.5) : 0;
+
+  return { sharedRadiusM, personalRadiusM, immediateSenseM };
+}
+
+function getTokenSharedLightRadiusMeters(tok: MapToken, campaign?: CampaignState): number {
+  if (campaign) {
+    return resolveTokenLightForViewer(tok, campaign, 'gm').sharedRadiusM;
+  }
+  if (tok.lightMode === 'personal-darkvision' || tok.lightSource === 'darkvision') return 0;
   if (typeof tok.lightRadiusMeters === 'number' && tok.lightRadiusMeters > 0) {
     return tok.lightRadiusMeters;
   }
   if (tok.lightSource === 'torch') return 6;
   if (tok.lightSource === 'lantern') return 9;
-  if (tok.lightSource === 'darkvision') return 18;
   return 0;
 }
 
 function revealFogCellsAroundToken(
   map: TacticalMap,
   tok: MapToken,
-  sqMeters: number
+  sqMeters: number,
+  campaign?: CampaignState
 ): string[] {
-  const radiusM = getTokenLightRadiusMeters(tok);
+  // Only Shared Light reveals shared Fog of War for the party (Personal Darkvision is private!)
+  const radiusM = getTokenSharedLightRadiusMeters(tok, campaign);
   if (!map.fogEnabled || radiusM <= 0) return map.revealedCells;
   const radiusSq = radiusM / Math.max(0.5, sqMeters);
   const cx = tok.x + (tok.size || 1) / 2;
@@ -259,6 +480,105 @@ function revealFogCellsAroundToken(
     }
   }
   return changed ? Array.from(nextSet) : map.revealedCells;
+}
+
+function hasWallFreeSight(
+  terrainCells: Record<string, TerrainCellKind> | undefined,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number
+): boolean {
+  if (!terrainCells) return true;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const steps = Math.max(Math.abs(dx), Math.abs(dy)) * 2;
+  if (steps <= 0) return true;
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    const gx = Math.floor(x0 + dx * t);
+    const gy = Math.floor(y0 + dy * t);
+    if (gx === Math.floor(x0) && gy === Math.floor(y0)) continue;
+    if (gx === Math.floor(x1) && gy === Math.floor(y1)) continue;
+    if (terrainCells[`${gx},${gy}`] === 'wall') return false;
+  }
+  return true;
+}
+
+function computeDarknessLitCells(
+  map: TacticalMap,
+  sqMeters: number,
+  campaign: CampaignState,
+  viewerRole: 'gm' | 'player',
+  viewerCharacterId?: string
+): Set<string> {
+  const lit = new Set<string>();
+  for (const tok of map.tokens) {
+    if (tok.isHidden) continue;
+    const { sharedRadiusM, personalRadiusM, immediateSenseM } = resolveTokenLightForViewer(
+      tok,
+      campaign,
+      viewerRole,
+      viewerCharacterId
+    );
+    const rainMul =
+      map.weatherEffectsEnabled && map.weather === 'rain' ? 0.7 : 1;
+    let radiusM = Math.max(sharedRadiusM * rainMul, personalRadiusM, immediateSenseM);
+    if (map.weatherEffectsEnabled && map.weather === 'mist' && viewerRole !== 'gm') {
+      radiusM = Math.min(radiusM, 6);
+    }
+    if (radiusM <= 0) continue;
+    const effTerrain = getEffectiveTerrainCells(map);
+    const radiusSq = radiusM / Math.max(0.5, sqMeters);
+    const cx = tok.x + (tok.size || 1) / 2;
+    const cy = tok.y + (tok.size || 1) / 2;
+    const minX = Math.max(0, Math.floor(cx - radiusSq - 1));
+    const maxX = Math.min(map.gridWidth - 1, Math.ceil(cx + radiusSq + 1));
+    const minY = Math.max(0, Math.floor(cy - radiusSq - 1));
+    const maxY = Math.min(map.gridHeight - 1, Math.ceil(cy + radiusSq + 1));
+    for (let gx = minX; gx <= maxX; gx++) {
+      for (let gy = minY; gy <= maxY; gy++) {
+        const dist = Math.hypot(gx + 0.5 - cx, gy + 0.5 - cy);
+        if (dist <= radiusSq + 0.45) {
+          if (hasWallFreeSight(effTerrain, cx, cy, gx + 0.5, gy + 0.5)) {
+            lit.add(`${gx},${gy}`);
+          }
+        }
+      }
+    }
+  }
+  return lit;
+}
+
+function resolveConditionAuraKind(
+  condIds: string[],
+  campaign: CampaignState
+): { kind: Exclude<import('../shared/types').ConditionAuraVfx, 'auto' | 'none'>; color: string } | null {
+  for (const cid of condIds) {
+    const cond = campaign.compendium.conditions.find((c) => c.id === cid);
+    if (!cond) continue;
+    if (cond.auraVfx === 'none') continue;
+    if (cond.auraVfx && cond.auraVfx !== 'auto') {
+      return { kind: cond.auraVfx, color: cond.color || '#f59e0b' };
+    }
+    const low = cond.name
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    if (/demon|furia|sangr|infernal|berserk/.test(low)) return { kind: 'blood', color: '#e11d48' };
+    if (/chama|queim|fogo|incendi/.test(low)) return { kind: 'fire', color: '#f97316' };
+    if (/abencoad|sagrad|velocid|inspirad|escudo|protegid|heroism/.test(low)) {
+      return { kind: 'holy', color: '#facc15' };
+    }
+    if (/venen|envenen|acid|toxi/.test(low)) return { kind: 'poison', color: '#84cc16' };
+    if (/congel|gelo|paralis|petrif|imobil/.test(low)) return { kind: 'frost', color: '#38bdf8' };
+    if (/atordoad|eletr|choq/.test(low)) return { kind: 'lightning', color: '#60a5fa' };
+    if (/invisiv|amaldic|assust|cego|sombra|trevas|medo/.test(low)) {
+      return { kind: 'shadow', color: '#a855f7' };
+    }
+    if (/arcano|magic|concentr/.test(low)) return { kind: 'arcane', color: '#c084fc' };
+  }
+  return null;
 }
 
 export const StageCanvas: React.FC = () => {
@@ -286,6 +606,7 @@ export const StageCanvas: React.FC = () => {
     startCombatDuel,
     castAoEAbility,
     applyDamage,
+    triggerSlashVfx,
     pushCombatLog,
     deleteCharacter,
     assistDeathSave,
@@ -305,6 +626,14 @@ export const StageCanvas: React.FC = () => {
     moveTokensToMap,
     triggerAoESavePrompt,
     startCombatFromMap,
+    screenShakeIntensity,
+    cinematicEnabled,
+    setCinematicEnabled,
+    autoCameraFocus,
+    setAutoCameraFocus,
+    shockwaves,
+    cameraFocusSignal,
+    broadcastCameraFocus,
   } = useCampaign();
 
   const activeMap =
@@ -512,6 +841,11 @@ export const StageCanvas: React.FC = () => {
 
   const sqMeters = campaign.settings.gridSquareMeters || 1.5;
 
+  const darknessLitCells = useMemo(() => {
+    if (!activeMap?.darknessEnabled) return null;
+    return computeDarknessLitCells(activeMap, sqMeters, campaign, role, myCharacter?.id);
+  }, [activeMap, sqMeters, campaign, role, myCharacter?.id]);
+
   const findTokenCombatant = (tok: MapToken) => {
     if (!campaign.combat.active) return undefined;
     return campaign.combat.combatants.find(
@@ -613,6 +947,7 @@ export const StageCanvas: React.FC = () => {
   const finalizeTokenDrag = () => {
     const origin = dragOrigin;
     const pathSnapshot = dragPath;
+    didDragTokenRef.current = false;
     setDraggingTokenId(null);
     setDragOrigin(null);
     setDragPath([]);
@@ -653,10 +988,10 @@ export const StageCanvas: React.FC = () => {
 
     // Automatic Trap Trigger & Dynamic Light Fog Reveal when a token moves!
     const movedAny = finalTok.x !== origin.x || finalTok.y !== origin.y;
-    if (movedAny && activeMap.fogEnabled && getTokenLightRadiusMeters(finalTok) > 0) {
+    if (movedAny && activeMap.fogEnabled && getTokenSharedLightRadiusMeters(finalTok, campaign) > 0) {
       updateActiveMap((m) => ({
         ...m,
-        revealedCells: revealFogCellsAroundToken(m, finalTok, sqMeters),
+        revealedCells: revealFogCellsAroundToken(m, finalTok, sqMeters, campaign),
       }));
     }
     if (movedAny && !origin.shiftFree) {
@@ -682,6 +1017,8 @@ export const StageCanvas: React.FC = () => {
     }
 
     if (!campaign.combat.active || origin.shiftFree) return;
+    // GM can reposition Heroes freely during combat without movement cap or deducting displacement (Monsters/NPCs still follow movement rules!)
+    if (role === 'gm' && finalTok.type === 'character') return;
 
     const { squares } = getGridSpanDistance(
       origin.x,
@@ -803,20 +1140,70 @@ export const StageCanvas: React.FC = () => {
     if (landedSurface && (finalTok.x !== origin.x || finalTok.y !== origin.y) && finalTok.hp > 0) {
       const entityKind =
         finalTok.type === 'character' ? 'hero' : finalTok.type === 'npc' ? 'npc' : 'monster';
+      const surfCfg = activeMap.surfaceConfig;
       if (landedSurface === 'fire' || landedSurface === 'acid') {
-        const dmg = Math.floor(Math.random() * 4) + 1;
+        const formula =
+          landedSurface === 'fire'
+            ? surfCfg?.fireDamageFormula || '1d6'
+            : surfCfg?.acidDamageFormula || '1d4';
+        const dmg = Math.max(1, evaluateFormula(formula).total);
         const dmgType = landedSurface === 'fire' ? 'Fogo' : 'Ácido';
-        applyDamage(finalTok.id, dmg, false, undefined, dmgType);
-        pushCombatLog({
-          category: 'damage',
-          actorName: finalTok.name,
-          actorKind: entityKind,
-          actorColor: finalTok.color,
-          summary: `pisou em superfície de ${dmgType} e sofreu -${dmg} de dano!`,
-        });
+        const acidCondId =
+          landedSurface === 'acid'
+            ? campaign.compendium.conditions.find(
+                (c) => /corro/i.test(c.name) || c.id === 'cond-corroido'
+              )?.id || 'cond-corroido'
+            : undefined;
+        if (acidCondId === 'cond-corroido' && !campaign.compendium.conditions.some((c) => c.id === 'cond-corroido')) {
+          updateCampaign((prev) => ({
+            ...prev,
+            compendium: {
+              ...prev.compendium,
+              conditions: ensureSurfaceCondition(prev.compendium.conditions, 'cond-corroido'),
+            },
+          }));
+        }
+        window.setTimeout(() => {
+          applyDamage(
+            finalTok.id,
+            dmg,
+            false,
+            undefined,
+            dmgType,
+            acidCondId,
+            acidCondId ? 2 : undefined
+          );
+          triggerSlashVfx(finalTok.id, 'hit');
+        }, 60);
+        window.setTimeout(() => {
+          pushCombatLog({
+            category: 'damage',
+            actorName: finalTok.name,
+            actorKind: entityKind,
+            actorColor: finalTok.color,
+            summary: `pisou em superfície de ${dmgType} (${formula}) e sofreu -${dmg} de dano${acidCondId ? ' + Corroído (-2 CA)' : ''}!`,
+          });
+        }, 340);
       } else if (landedSurface === 'ice') {
+        const iceDc = surfCfg?.iceSaveDc ?? 12;
+        let saveBonus = 0;
+        if (finalTok.type === 'character' && finalTok.referenceId) {
+          const ch = campaign.characters.find((c) => c.id === finalTok.referenceId);
+          if (ch) {
+            const st = computeCharacterStats(ch, campaign);
+            saveBonus =
+              st.skills['reflexos']?.total ??
+              st.skills['acrobacia']?.total ??
+              st.attributes['des']?.mod ??
+              0;
+          }
+        } else if (finalTok.type === 'monster' && finalTok.referenceId) {
+          const mon = campaign.compendium.monsters.find((m) => m.id === finalTok.referenceId);
+          if (mon) saveBonus = mon.initiativeBonus ?? 0;
+        }
         const d20 = Math.floor(Math.random() * 20) + 1;
-        const passed = d20 >= 12;
+        const total = d20 + saveBonus;
+        const passed = total >= iceDc;
         if (!passed) {
           updateCampaign((prev) => ({
             ...prev,
@@ -839,24 +1226,81 @@ export const StageCanvas: React.FC = () => {
                     ),
                   }
             ),
+            combat: prev.combat.active
+              ? {
+                  ...prev.combat,
+                  combatants: prev.combat.combatants.map((cb) =>
+                    cb.tokenId === finalTok.id ||
+                    (finalTok.type === 'character' &&
+                      finalTok.referenceId &&
+                      cb.referenceId === finalTok.referenceId)
+                      ? { ...cb, remainingMoveMeters: 0 }
+                      : cb
+                  ),
+                }
+              : prev.combat,
           }));
         }
+        const bTxt = saveBonus >= 0 ? `+${saveBonus}` : `${saveBonus}`;
         pushCombatLog({
           category: 'condition',
           actorName: finalTok.name,
           actorKind: entityKind,
           actorColor: finalTok.color,
           summary: passed
-            ? `manteve o equilíbrio no Gelo (Reflexos ${d20} vs CD 12)`
-            : `escorregou no Gelo (Reflexos ${d20} vs CD 12) e ficou Caído!`,
+            ? `manteve o equilíbrio no Gelo (Reflexos ${d20}${bTxt}=${total} vs CD ${iceDc})`
+            : `escorregou no Gelo (Reflexos ${d20}${bTxt}=${total} vs CD ${iceDc}) e ficou Caído!`,
         });
       } else if (landedSurface === 'water') {
+        const wetCondId =
+          campaign.compendium.conditions.find((c) => /molhad/i.test(c.name) || c.id === 'cond-molhado')
+            ?.id || 'cond-molhado';
+        updateCampaign((prev) => ({
+          ...prev,
+          compendium: {
+            ...prev.compendium,
+            conditions: ensureSurfaceCondition(prev.compendium.conditions, 'cond-molhado'),
+          },
+          characters: prev.characters.map((c) =>
+            finalTok.type === 'character' && finalTok.referenceId === c.id
+              ? {
+                  ...c,
+                  activeConditionIds: Array.from(
+                    new Set([
+                      ...c.activeConditionIds.filter((cid) => !/queim|fogo/i.test(cid)),
+                      wetCondId,
+                    ])
+                  ),
+                }
+              : c
+          ),
+          maps: prev.maps.map((m) =>
+            m.id !== activeMap.id
+              ? m
+              : {
+                  ...m,
+                  tokens: m.tokens.map((t) =>
+                    t.id === finalTok.id
+                      ? {
+                          ...t,
+                          activeConditionIds: Array.from(
+                            new Set([
+                              ...(t.activeConditionIds || []).filter((cid) => !/queim|fogo/i.test(cid)),
+                              wetCondId,
+                            ])
+                          ),
+                        }
+                      : t
+                  ),
+                }
+          ),
+        }));
         pushCombatLog({
-          category: 'system',
+          category: 'condition',
           actorName: finalTok.name,
           actorKind: entityKind,
           actorColor: finalTok.color,
-          summary: 'entrou em Água (Molhado — vulnerável a Raio/Gelo)',
+          summary: 'entrou em Água (Molhado — vulnerável a Elétrico/Gelo; apaga chamas)',
         });
       }
     }
@@ -914,6 +1358,7 @@ export const StageCanvas: React.FC = () => {
         item: 'Item Secreto',
         trap: 'Armadilha Oculta',
         secret: 'Passagem Secreta',
+        door: 'Porta',
       };
       const newMarker: GmMapMarker = {
         id: `gmm-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
@@ -921,7 +1366,13 @@ export const StageCanvas: React.FC = () => {
         y: gy,
         kind: secretMarkerKind,
         title: defaultTitles[secretMarkerKind],
-        revealed: false,
+        revealed: secretMarkerKind === 'door',
+        ...(secretMarkerKind === 'door'
+          ? {
+              doorState: 'closed' as const,
+              lockDc: 13,
+            }
+          : {}),
         ...(secretMarkerKind === 'trap'
           ? {
               trapDc: 13,
@@ -1025,7 +1476,13 @@ export const StageCanvas: React.FC = () => {
         if (!leadTok) return m;
         let targetX = Math.max(0, Math.min(activeMap.gridWidth - leadTok.size, gx));
         let targetY = Math.max(0, Math.min(activeMap.gridHeight - leadTok.size, gy));
-        if (!isGroupDrag && campaign.combat.active && dragOrigin && !dragOrigin.shiftFree) {
+        if (
+          !isGroupDrag &&
+          campaign.combat.active &&
+          dragOrigin &&
+          !dragOrigin.shiftFree &&
+          !(role === 'gm' && leadTok.type === 'character')
+        ) {
           const cb = findTokenCombatant(leadTok);
           const remMeters = cb ? cb.remainingMoveMeters ?? cb.speedMeters ?? 9 : 9;
           const maxSq = Math.max(0, Math.floor(remMeters / sqMeters));
@@ -1651,6 +2108,60 @@ export const StageCanvas: React.FC = () => {
     ? campaign.combat.combatants[campaign.combat.currentTurnIndex]
     : null;
 
+  // Smooth Camera Auto-Focus on active combatant when turn changes (if user has Auto-Focus enabled)
+  const lastAutoFocusedTurnRef = useRef<string>('');
+  useEffect(() => {
+    if (!autoCameraFocus || !campaign.combat.active || !activeTurnCombatant) return;
+    const turnKey = `${campaign.combat.round}-${campaign.combat.currentTurnIndex}-${activeTurnCombatant.id}`;
+    if (turnKey === lastAutoFocusedTurnRef.current) return;
+    lastAutoFocusedTurnRef.current = turnKey;
+
+    const tok = activeMap.tokens.find(
+      (t) =>
+        t.id === activeTurnCombatant.tokenId ||
+        (activeTurnCombatant.referenceId &&
+          t.type === 'character' &&
+          t.referenceId === activeTurnCombatant.referenceId)
+    );
+    if (!tok) return;
+    if (
+      tok.isHidden &&
+      role !== 'gm' &&
+      !(myCharacter && (tok.visibleToCharacterIds || []).includes(myCharacter.id))
+    ) {
+      return;
+    }
+    const sz = Math.max(1, tok.size || 1);
+    const targetPanX = Math.round(totalW / 2 - (tok.x + sz / 2) * cellPx);
+    const targetPanY = Math.round(totalH / 2 - (tok.y + sz / 2) * cellPx);
+    setCameraPan({ x: targetPanX, y: targetPanY });
+  }, [
+    activeMap.tokens,
+    activeTurnCombatant,
+    autoCameraFocus,
+    campaign.combat.active,
+    campaign.combat.currentTurnIndex,
+    campaign.combat.round,
+    cellPx,
+    myCharacter,
+    role,
+    totalH,
+    totalW,
+  ]);
+
+  // Smooth Camera Focus broadcast triggered by GM ("Focar Câmera da Mesa")
+  // Respects player's Auto-Focus toggle ("quero opções p desativar isso tudo")!
+  const lastFocusSignalIdRef = useRef<string>('');
+  useEffect(() => {
+    if (!cameraFocusSignal || cameraFocusSignal.mapId !== activeMap.id) return;
+    if (role !== 'gm' && !autoCameraFocus) return;
+    if (cameraFocusSignal.id === lastFocusSignalIdRef.current) return;
+    lastFocusSignalIdRef.current = cameraFocusSignal.id;
+    const targetPanX = Math.round(totalW / 2 - cameraFocusSignal.x * cellPx);
+    const targetPanY = Math.round(totalH / 2 - cameraFocusSignal.y * cellPx);
+    setCameraPan({ x: targetPanX, y: targetPanY });
+  }, [activeMap.id, autoCameraFocus, cameraFocusSignal, cellPx, role, totalH, totalW]);
+
   const weatherClass =
     activeMap.weather === 'rain'
       ? 'weather-rain'
@@ -1879,8 +2390,42 @@ export const StageCanvas: React.FC = () => {
             })()}
           </div>
 
-          {/* Right: Compact Zoom + Recenter Camera */}
+          {/* Right: Camera Auto-Focus, Cinematic Toggle, Zoom + Recenter Camera */}
           <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => setAutoCameraFocus(!autoCameraFocus)}
+              className={`px-2 py-1 rounded-md text-[10px] font-display font-bold flex items-center gap-1 cursor-pointer border transition ${
+                autoCameraFocus
+                  ? 'bg-sky-950/80 border-sky-400/60 text-sky-200'
+                  : 'rpg-card opacity-65 hover:opacity-100'
+              }`}
+              title={
+                autoCameraFocus
+                  ? 'Auto-Foco de Câmera LIGADO (segue suavemente o turno ativo — clique para desativar)'
+                  : 'Auto-Foco de Câmera DESLIGADO (clique para ativar)'
+              }
+            >
+              <span>🎥</span>
+              <span className="hidden lg:inline">{autoCameraFocus ? 'Auto-Foco' : 'Foco Off'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setCinematicEnabled(!cinematicEnabled)}
+              className={`px-2 py-1 rounded-md text-[10px] font-display font-bold flex items-center gap-1 cursor-pointer border transition ${
+                cinematicEnabled
+                  ? 'bg-amber-950/80 border-amber-400/60 text-amber-200'
+                  : 'rpg-card opacity-65 hover:opacity-100'
+              }`}
+              title={
+                cinematicEnabled
+                  ? 'Efeitos Cinemáticos LIGADOS (tremor, ondas de choque, flashes e banner de turno — clique para desativar)'
+                  : 'Efeitos Cinemáticos DESLIGADOS (clique para ativar)'
+              }
+            >
+              <span>🎬</span>
+              <span className="hidden lg:inline">{cinematicEnabled ? 'Cinemático' : 'Cinem. Off'}</span>
+            </button>
             {(cameraPan.x !== 0 || cameraPan.y !== 0) && (
               <button
                 onClick={() => setCameraPan({ x: 0, y: 0 })}
@@ -2028,11 +2573,85 @@ export const StageCanvas: React.FC = () => {
                   );
                 })}
 
+                {(tool === 'surface-fire' ||
+                  tool === 'surface-ice' ||
+                  tool === 'surface-acid' ||
+                  tool === 'surface-water') && (
+                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/45 border border-amber-400/40 text-[10px]">
+                    <span className="text-amber-300 font-display font-bold">Config:</span>
+                    <label className="flex items-center gap-1" title="Dano da superfície de Fogo">
+                      <span>🔥</span>
+                      <input
+                        value={activeMap.surfaceConfig?.fireDamageFormula ?? '1d6'}
+                        onChange={(e) =>
+                          updateActiveMap((m) => ({
+                            ...m,
+                            surfaceConfig: {
+                              ...(m.surfaceConfig || {}),
+                              fireDamageFormula: e.target.value,
+                            },
+                          }))
+                        }
+                        className="rpg-input w-12 py-0 px-1 text-[10px] font-mono-dice text-center"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1" title="CD de Reflexos para não cair no Gelo">
+                      <span>❄️ CD</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={35}
+                        value={activeMap.surfaceConfig?.iceSaveDc ?? 12}
+                        onChange={(e) =>
+                          updateActiveMap((m) => ({
+                            ...m,
+                            surfaceConfig: {
+                              ...(m.surfaceConfig || {}),
+                              iceSaveDc: Math.max(1, Number(e.target.value) || 12),
+                            },
+                          }))
+                        }
+                        className="rpg-input w-11 py-0 px-1 text-[10px] font-mono-dice text-center"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1" title="Dano da superfície de Ácido">
+                      <span>🧪</span>
+                      <input
+                        value={activeMap.surfaceConfig?.acidDamageFormula ?? '1d4'}
+                        onChange={(e) =>
+                          updateActiveMap((m) => ({
+                            ...m,
+                            surfaceConfig: {
+                              ...(m.surfaceConfig || {}),
+                              acidDamageFormula: e.target.value,
+                            },
+                          }))
+                        }
+                        className="rpg-input w-12 py-0 px-1 text-[10px] font-mono-dice text-center"
+                      />
+                    </label>
+                  </div>
+                )}
+
                 <span className="h-4 w-px bg-white/15 mx-1" />
 
                 <span className="text-[10px] font-display uppercase tracking-wider text-amber-300/80 font-bold">
-                  Névoa:
+                  Névoa / Luz:
                 </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateActiveMap((m) => ({ ...m, darknessEnabled: !m.darknessEnabled }))
+                  }
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition ${
+                    activeMap.darknessEnabled
+                      ? 'bg-indigo-950/90 border border-indigo-400 text-indigo-100 shadow-[0_0_12px_rgba(99,102,241,0.4)]'
+                      : 'rpg-card hover:border-indigo-400/60'
+                  }`}
+                  title="Escuridão Total: jogadores só enxergam dentro do raio dinâmico de Tochas, Lanternas e Visão no Escuro (bloqueado por paredes!)"
+                >
+                  <span>🌑 {activeMap.darknessEnabled ? 'Escuridão Ligada' : 'Escuridão Total'}</span>
+                </button>
                 <button
                   onClick={() =>
                     updateActiveMap((m) => ({ ...m, fogEnabled: !m.fogEnabled }))
@@ -2082,6 +2701,7 @@ export const StageCanvas: React.FC = () => {
                     { kind: 'item' as const, label: 'Item', title: 'Colocar Item Escondido (Só o Mestre vê)' },
                     { kind: 'trap' as const, label: 'Armadilha', title: 'Colocar Armadilha Automática Oculta (Só o Mestre vê)' },
                     { kind: 'secret' as const, label: 'Passagem Secreta', title: 'Colocar Passagem Secreta (Só o Mestre vê)' },
+                    { kind: 'door' as const, label: '🚪 Porta', title: 'Colocar Porta Interativa (bloqueia visão, luz e movimento quando fechada/trancada)' },
                   ] as const
                 ).map((btn) => {
                   const active = secretMarkerKind === btn.kind;
@@ -2343,6 +2963,44 @@ export const StageCanvas: React.FC = () => {
                 <option value="snow">Neve</option>
                 <option value="mist">Névoa</option>
               </select>
+              {activeMap.weather !== 'none' && (
+                <label
+                  className="flex items-center gap-1 text-[11px] cursor-pointer px-2 py-0.5 rounded bg-black/35 border border-sky-400/35 text-sky-200"
+                  title="Quando ligado: Chuva aplica Molhado e reduz luz de tochas; Névoa limita visão a 6m"
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(activeMap.weatherEffectsEnabled)}
+                    onChange={(e) =>
+                      updateActiveMap((m) => ({
+                        ...m,
+                        weatherEffectsEnabled: e.target.checked,
+                      }))
+                    }
+                  />
+                  <span>Efeito Tático</span>
+                </label>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <span>Ciclo Dia/Noite:</span>
+              <select
+                value={activeMap.timeOfDay || 'none'}
+                onChange={(e) =>
+                  updateActiveMap((m) => ({
+                    ...m,
+                    timeOfDay: e.target.value as TacticalMap['timeOfDay'],
+                  }))
+                }
+                className="rpg-input py-1 text-xs"
+                title="Opcional (ideal para mapas externos): altera a atmosfera e iluminação ambiente do mapa"
+              >
+                <option value="none">Desativado (Interno)</option>
+                <option value="day">☀️ Dia</option>
+                <option value="dusk">🌅 Crepúsculo</option>
+                <option value="night">🌙 Noite</option>
+              </select>
             </div>
 
             {activeMap.backgroundUrl && (
@@ -2457,7 +3115,9 @@ export const StageCanvas: React.FC = () => {
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-chronicle font-black text-sm text-amber-100 tracking-wide truncate">
-                        {activeBossTok.name}
+                        {role !== 'gm' && activeBossTok.hideNameFromPlayers
+                          ? '???'
+                          : activeBossTok.name}
                       </span>
                       <span
                         className={`text-[9px] font-display font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
@@ -2507,27 +3167,40 @@ export const StageCanvas: React.FC = () => {
 
               {!bossBarCollapsed && (
                 <>
-              {/* Boss HP Bar with Phase 2 threshold tick */}
+              {/* Boss HP Bar with Optional Multi-Phase threshold ticks */}
               <div className="relative">
                 <SculptedHealthBar
                   hp={activeBossTok.hp}
                   maxHp={activeBossTok.maxHp}
                   heightClass="h-3"
                 />
-                {phase2Pct > 0 && phase2Pct < 100 && (
-                  <div
-                    className="absolute top-0 bottom-0 w-[2px] bg-amber-300/90 pointer-events-none"
-                    style={{ left: `${phase2Pct}%` }}
-                    title={`Limiar da Fase 2 (${phase2Pct}% PV)`}
-                  />
-                )}
+                {activeBossTok.bossPhases && activeBossTok.bossPhases.length > 0
+                  ? [...activeBossTok.bossPhases]
+                      .sort((a, b) => b.hpThresholdPct - a.hpThresholdPct)
+                      .map((ph, idx) => (
+                        <div
+                          key={ph.id}
+                          className="absolute top-0 bottom-0 w-[2px] bg-amber-300/90 pointer-events-none"
+                          style={{ left: `${ph.hpThresholdPct}%` }}
+                          title={`Fase ${idx + 2}: ${ph.title} (${ph.hpThresholdPct}% PV)`}
+                        />
+                      ))
+                  : activeBossTok.bossPhase2Title &&
+                    phase2Pct > 0 &&
+                    phase2Pct < 100 && (
+                      <div
+                        className="absolute top-0 bottom-0 w-[2px] bg-amber-300/90 pointer-events-none"
+                        style={{ left: `${phase2Pct}%` }}
+                        title={`Limiar da Fase 2 (${phase2Pct}% PV)`}
+                      />
+                    )}
               </div>
 
               {/* Legendary Actions & Legendary Resistances Strip */}
               {(legActMax > 0 || legResMax > 0) && (
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-[10px]">
                   {legActMax > 0 && (
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-display font-bold uppercase tracking-wider text-amber-300/90">
                         Ações Lendárias:
                       </span>
@@ -2559,6 +3232,69 @@ export const StageCanvas: React.FC = () => {
                           />
                         ))}
                       </div>
+                      {role === 'gm' && bossMonDef && bossMonDef.attacks.length > 0 && (
+                        <div className="flex items-center gap-1 ml-1">
+                          {bossMonDef.attacks.slice(0, 3).map((atk, aIdx) => (
+                            <button
+                              key={aIdx}
+                              type="button"
+                              disabled={legActRem <= 0}
+                              onClick={() => {
+                                updateActiveMap((m) => ({
+                                  ...m,
+                                  tokens: m.tokens.map((t) =>
+                                    t.id === activeBossTok.id
+                                      ? { ...t, legendaryActionsRemaining: Math.max(0, legActRem - 1) }
+                                      : t
+                                  ),
+                                }));
+                                setPendingAttackChoice({
+                                  attackerTokenId: activeBossTok.id,
+                                  attackerName: activeBossTok.name,
+                                  attackerColor: activeBossTok.color || '#dc2626',
+                                  attackerImageUrl: activeBossTok.imageUrl,
+                                  attackerFrame: activeBossTok.frameStyle || 'crimson',
+                                  diceSkin: 'blood',
+                                  actionTitle: `⚡ Ação Lendária: ${atk.name}`,
+                                  attackFormula: `1d20 + ${atk.attackBonus}`,
+                                  damageFormula: atk.damageFormula,
+                                  damageType: atk.damageType,
+                                  range: atk.range || 'Corpo a Corpo (1,5m)',
+                                  actionCost: 'Livre',
+                                  applyConditionId: atk.applyConditionId,
+                                  conditionDurationRounds: atk.conditionDurationRounds,
+                                });
+                                showTacticalAlert(
+                                  `⚡ Ação Lendária ativada (${legActRem - 1} restante)! Clique em um alvo no mapa para "${atk.name}".`
+                                );
+                              }}
+                              title={`Gasta 1 Ação Lendária para disparar "${atk.name}" fora do turno!`}
+                              className="px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-400/50 text-[9px] font-display font-bold text-amber-200 hover:border-amber-300 cursor-pointer disabled:opacity-35"
+                            >
+                              ⚡ {atk.name}
+                            </button>
+                          ))}
+                          {legActRem < legActMax && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateActiveMap((m) => ({
+                                  ...m,
+                                  tokens: m.tokens.map((t) =>
+                                    t.id === activeBossTok.id
+                                      ? { ...t, legendaryActionsRemaining: legActMax }
+                                      : t
+                                  ),
+                                }))
+                              }
+                              title="Recarregar todas as Ações Lendárias (início do turno do Boss)"
+                              className="px-1.5 py-0.5 rounded rpg-card text-[9px] text-amber-300 hover:border-amber-400 cursor-pointer"
+                            >
+                              ↻
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -2742,6 +3478,7 @@ export const StageCanvas: React.FC = () => {
             className="rpg-panel rounded-lg p-2 shadow-[0_30px_85px_rgba(0,0,0,0.95)] shrink-0 relative cursor-default"
             style={{
               transform: `translate3d(${cameraPan.x}px, ${cameraPan.y}px, 0)`,
+              transition: isPanningWorld ? 'none' : 'transform 460ms cubic-bezier(0.22, 1, 0.36, 1)',
               willChange: isPanningWorld ? 'transform' : 'auto',
             }}
           >
@@ -2760,7 +3497,11 @@ export const StageCanvas: React.FC = () => {
                   if (secretMarkerKind) setSecretMarkerKind(null);
                 }}
                 className={`relative shadow-2xl select-none shrink-0 rounded border-2 ${
-                  screenShakeActive ? 'animate-map-screen-shake' : ''
+                  cinematicEnabled && screenShakeIntensity === 'heavy'
+                    ? 'animate-map-shake-heavy'
+                    : cinematicEnabled && screenShakeIntensity === 'light'
+                      ? 'animate-map-shake-light'
+                      : ''
                 }`}
                 style={{
                   width: totalW,
@@ -2805,6 +3546,20 @@ export const StageCanvas: React.FC = () => {
                       height={totalH}
                     />
                   )}
+
+                  {/* Optional Outdoor Day / Dusk / Night Atmospheric Tint */}
+                  {(activeMap.timeOfDay === 'dusk' || activeMap.timeOfDay === 'night') && (
+                    <div
+                      className="absolute inset-0 pointer-events-none transition-colors duration-700"
+                      style={{
+                        background:
+                          activeMap.timeOfDay === 'dusk'
+                            ? 'linear-gradient(180deg, rgba(217, 119, 6, 0.22) 0%, rgba(124, 45, 18, 0.24) 100%)'
+                            : 'linear-gradient(180deg, rgba(12, 20, 56, 0.44) 0%, rgba(5, 10, 30, 0.52) 100%)',
+                        mixBlendMode: 'multiply',
+                      }}
+                    />
+                  )}
                 </div>
 
                 {/* Live Drop Highlight Square when dragging a Hero or NPC from Left Panel */}
@@ -2825,33 +3580,36 @@ export const StageCanvas: React.FC = () => {
                   Object.entries(activeMap.elementalSurfaces).map(([key, surf]) => {
                     const [sx, sy] = key.split(',').map(Number);
                     if (isNaN(sx) || isNaN(sy)) return null;
+                    const fireLbl = activeMap.surfaceConfig?.fireDamageFormula || '1d6';
+                    const iceDcLbl = activeMap.surfaceConfig?.iceSaveDc ?? 12;
+                    const acidLbl = activeMap.surfaceConfig?.acidDamageFormula || '1d4';
                     const cfg =
                       surf === 'fire'
                         ? {
                             bg: 'rgba(249, 115, 22, 0.34)',
                             border: 'rgba(251, 146, 60, 0.7)',
                             icon: '🔥',
-                            label: 'Fogo (1d4 ao pisar)',
+                            label: `Fogo (${fireLbl} ao pisar / início do turno)`,
                           }
                         : surf === 'ice'
                           ? {
                               bg: 'rgba(56, 189, 248, 0.28)',
                               border: 'rgba(125, 211, 252, 0.7)',
                               icon: '❄️',
-                              label: 'Gelo (Reflexos CD 12 ou Caído)',
+                              label: `Gelo (Reflexos CD ${iceDcLbl} ou Caído)`,
                             }
                           : surf === 'acid'
                             ? {
                                 bg: 'rgba(34, 197, 94, 0.30)',
                                 border: 'rgba(74, 222, 128, 0.7)',
                                 icon: '🧪',
-                                label: 'Ácido (1d4 ao pisar)',
+                                label: `Ácido (${acidLbl} + Corroído -2 CA)`,
                               }
                             : {
                                 bg: 'rgba(37, 99, 235, 0.28)',
                                 border: 'rgba(96, 165, 250, 0.65)',
                                 icon: '💧',
-                                label: 'Água (Molhado)',
+                                label: 'Água (Molhado — 2× Raio/Gelo)',
                               };
                     return (
                       <div
@@ -3159,7 +3917,7 @@ export const StageCanvas: React.FC = () => {
             {/* D&D Movement Budget Perimeter while dragging in Combat */}
             {draggingTokenId && dragOrigin && campaign.combat.active && !dragOrigin.shiftFree && (() => {
               const dragTok = activeMap.tokens.find((t) => t.id === draggingTokenId);
-              if (!dragTok) return null;
+              if (!dragTok || (role === 'gm' && dragTok.type === 'character')) return null;
               const cb = findTokenCombatant(dragTok);
               const remMeters = cb ? cb.remainingMoveMeters ?? cb.speedMeters ?? 9 : 9;
               const maxSq = Math.max(0, Math.floor(remMeters / sqMeters));
@@ -3348,6 +4106,7 @@ export const StageCanvas: React.FC = () => {
                     : `Esfera ${meters}m • ${feet} ft`;
 
               const handleTemplateDown = (e: React.MouseEvent) => {
+                if (role !== 'gm') return;
                 e.stopPropagation();
                 if (e.button === 0) {
                   setSelectedTemplateId(tmpl.id);
@@ -3355,7 +4114,7 @@ export const StageCanvas: React.FC = () => {
                 }
               };
               const handleTemplateWheel = (e: React.WheelEvent) => {
-                if (!isRotatable) return;
+                if (role !== 'gm' || !isRotatable) return;
                 e.stopPropagation();
                 const delta = e.deltaY > 0 ? 15 : -15;
                 updateActiveMap((m) => ({
@@ -3366,6 +4125,7 @@ export const StageCanvas: React.FC = () => {
                 }));
               };
               const handleTemplateContext = (e: React.MouseEvent) => {
+                if (role !== 'gm') return;
                 e.preventDefault();
                 e.stopPropagation();
                 updateActiveMap((m) => ({
@@ -3734,18 +4494,27 @@ export const StageCanvas: React.FC = () => {
               );
             })}
 
-            {/* Dynamic Token Light Auras (Torch / Lantern / Darkvision) */}
+            {/* Dynamic Token Light Auras (Shared Light for all; Personal Darkvision only for owner + GM!) */}
             <div className="absolute inset-0 pointer-events-none z-8 overflow-hidden">
               {activeMap.tokens.map((tok) => {
-                if (tok.isHidden && role !== 'gm') return null;
-                const radiusM = getTokenLightRadiusMeters(tok);
+                const spottedLight = Boolean(
+                  myCharacter && (tok.visibleToCharacterIds || []).includes(myCharacter.id)
+                );
+                if (tok.isHidden && role !== 'gm' && !spottedLight) return null;
+                const { sharedRadiusM, personalRadiusM } = resolveTokenLightForViewer(
+                  tok,
+                  campaign,
+                  role,
+                  myCharacter?.id
+                );
+                const radiusM = Math.max(sharedRadiusM, personalRadiusM);
                 if (radiusM <= 0) return null;
                 const radiusPx = (radiusM / Math.max(0.5, sqMeters)) * cellPx;
                 const cx = (tok.x + (tok.size || 1) / 2) * cellPx;
                 const cy = (tok.y + (tok.size || 1) / 2) * cellPx;
+                const isPersonalOnly = sharedRadiusM <= 0 && personalRadiusM > 0;
                 const isTorch = tok.lightSource === 'torch';
-                const isDarkvision = tok.lightSource === 'darkvision';
-                const grad = isDarkvision
+                const grad = isPersonalOnly
                   ? 'radial-gradient(circle, rgba(129,140,248,0.16) 0%, rgba(99,102,241,0.08) 55%, transparent 78%)'
                   : isTorch
                     ? 'radial-gradient(circle, rgba(251,146,60,0.28) 0%, rgba(245,158,11,0.14) 50%, rgba(217,119,6,0.04) 74%, transparent 100%)'
@@ -3753,7 +4522,9 @@ export const StageCanvas: React.FC = () => {
                 return (
                   <div
                     key={`light-${tok.id}`}
-                    className="absolute rounded-full pointer-events-none"
+                    className={`absolute rounded-full pointer-events-none ${
+                      isTorch ? 'animate-torch-flicker' : ''
+                    }`}
                     style={{
                       left: cx - radiusPx,
                       top: cy - radiusPx,
@@ -3844,13 +4615,10 @@ export const StageCanvas: React.FC = () => {
 
             {/* Tokens with Token Stamp (#7), Turn Aura, Click Menu, Slash VFX & Floating Damage */}
             {activeMap.tokens.map((tok) => {
-              if (tok.isHidden && role !== 'gm') return null;
-              const isTarget = tok.id === targetTokenId;
-              const isMenuOpen = tok.id === selectedTokenId;
-              const isCurrentTurn =
-                activeTurnCombatant &&
-                (activeTurnCombatant.tokenId === tok.id ||
-                  (tok.referenceId && activeTurnCombatant.referenceId === tok.referenceId));
+              const isSpottedByMe = Boolean(
+                myCharacter && (tok.visibleToCharacterIds || []).includes(myCharacter.id)
+              );
+              if (tok.isHidden && role !== 'gm' && !isSpottedByMe) return null;
               const linkedChar =
                 tok.type === 'character' && tok.referenceId
                   ? campaign.characters.find((c) => c.id === tok.referenceId)
@@ -3859,14 +4627,40 @@ export const StageCanvas: React.FC = () => {
                 tok.type === 'monster' && tok.referenceId
                   ? campaign.compendium.monsters.find((m) => m.id === tok.referenceId)
                   : null;
+              const effectiveCondIds = linkedChar?.activeConditionIds || tok.activeConditionIds || [];
+              const condTransform = getConditionVisualTransform(effectiveCondIds, campaign);
+              const effectiveTokSize = condTransform.size ?? tok.size;
+              if (darknessLitCells && role !== 'gm') {
+                const isOwnHero = Boolean(
+                  tok.type === 'character' && myCharacter && tok.referenceId === myCharacter.id
+                );
+                if (!isOwnHero) {
+                  let anyCellLit = false;
+                  const sz = Math.max(1, effectiveTokSize || 1);
+                  for (let dx = 0; dx < sz && !anyCellLit; dx++) {
+                    for (let dy = 0; dy < sz && !anyCellLit; dy++) {
+                      if (darknessLitCells.has(`${Math.floor(tok.x) + dx},${Math.floor(tok.y) + dy}`)) {
+                        anyCellLit = true;
+                      }
+                    }
+                  }
+                  if (!anyCellLit) return null;
+                }
+              }
+              const isTarget = tok.id === targetTokenId;
+              const isMenuOpen = tok.id === selectedTokenId;
+              const isCurrentTurn =
+                activeTurnCombatant &&
+                (activeTurnCombatant.tokenId === tok.id ||
+                  (tok.referenceId && activeTurnCombatant.referenceId === tok.referenceId));
               const tokenColor = linkedChar?.playerColor || tok.color;
               const frameStyle =
                 linkedChar?.tokenFrameStyle ||
                 tok.frameStyle ||
                 (tok.type === 'character' ? 'gold' : 'crimson');
-              const portraitImg = linkedChar?.portraitUrl || tok.imageUrl;
+              const portraitImg = condTransform.imageUrl || linkedChar?.portraitUrl || tok.imageUrl;
 
-              const tokPx = tok.size * cellPx;
+              const tokPx = effectiveTokSize * cellPx;
               const hpPct = Math.max(0, Math.min(100, (tok.hp / Math.max(1, tok.maxHp)) * 100));
               const tokenVfx = floatingVfx.filter((v) => v.tokenId === tok.id);
               const tokenSlashes = slashVfx.filter((s) => s.tokenId === tok.id);
@@ -4011,22 +4805,21 @@ export const StageCanvas: React.FC = () => {
                       return;
                     }
                     if (tool === 'select') {
+                      didDragTokenRef.current = false;
                       if (hasActiveOpportunityPrompt && opportunityPrompt) {
-                        didDragTokenRef.current = false;
                         showTacticalAlert(
                           `Ataque de Oportunidade em aberto (${opportunityPrompt.reactorName} → ${opportunityPrompt.targetName})! Resolva ou passe a reação antes de mover.`
                         );
                         return;
                       }
                       if (activeDuel) {
-                        didDragTokenRef.current = false;
                         return;
                       }
                       if (role === 'player') {
                         const isOwnTok = Boolean(
-                          tok.type === 'character' &&
-                            myCharacter &&
-                            tok.referenceId === myCharacter.id
+                          myCharacter &&
+                            ((tok.type === 'character' && tok.referenceId === myCharacter.id) ||
+                              tok.controlledByCharacterId === myCharacter.id)
                         );
                         if (!isOwnTok) {
                           // Players can click other tokens to open context actions/attacks, but never drag them
@@ -4036,10 +4829,35 @@ export const StageCanvas: React.FC = () => {
                           showTacticalAlert('Seu personagem está caído (0 PV) e não pode se mover!');
                           return;
                         }
+                        const immobCondIds = linkedChar?.activeConditionIds || tok.activeConditionIds || [];
+                        const immobCond = immobCondIds
+                          .map((cid) => campaign.compendium.conditions.find((c) => c.id === cid))
+                          .find(
+                            (c) =>
+                              c &&
+                              /paralisad|atordoad|petrificad|inconscient|agarrad|imobilizad|incapacitad/i.test(
+                                c.name
+                              )
+                          );
+                        if (immobCond) {
+                          showTacticalAlert(
+                            `${tok.name} está ${immobCond.icon} ${immobCond.name} e não pode se mover!`
+                          );
+                          return;
+                        }
+                        if (linkedChar) {
+                          const charStats = computeCharacterStats(linkedChar, campaign);
+                          if (charStats.speed <= 0) {
+                            showTacticalAlert('Seu deslocamento atual é 0m — você não pode se mover!');
+                            return;
+                          }
+                        }
                         if (campaign.combat.active) {
                           const cb = findTokenCombatant(tok);
-                          if (activeTurnCombatant && cb && activeTurnCombatant.id !== cb.id) {
-                            showTacticalAlert(`Aguarde seu turno na iniciativa (${activeTurnCombatant.name} está agindo).`);
+                          if (activeTurnCombatant && (!cb || activeTurnCombatant.id !== cb.id)) {
+                            showTacticalAlert(
+                              `Aguarde seu turno na iniciativa (${activeTurnCombatant.name} está agindo).`
+                            );
                             return;
                           }
                           if (cb && (cb.remainingMoveMeters ?? cb.speedMeters ?? 9) < sqMeters) {
@@ -4078,6 +4896,7 @@ export const StageCanvas: React.FC = () => {
                         );
                         setSelectedTokenId(null);
                       } else {
+                        const wasAlreadySelected = targetTokenId === tok.id;
                         setSelectedTokenIds([tok.id]);
                         setTargetTokenId(tok.id);
                         if (
@@ -4087,7 +4906,12 @@ export const StageCanvas: React.FC = () => {
                         ) {
                           setActiveCharacterId(tok.referenceId);
                         }
-                        setSelectedTokenId(isMenuOpen ? null : tok.id);
+                        if (role === 'gm') {
+                          // 1st click selects token for the bottom HUD only; 2nd click on the same token opens/toggles the popover above the token
+                          setSelectedTokenId(wasAlreadySelected ? (isMenuOpen ? null : tok.id) : null);
+                        } else {
+                          setSelectedTokenId(isMenuOpen ? null : tok.id);
+                        }
                       }
                     }
                     finalizeTokenDrag();
@@ -4101,13 +4925,29 @@ export const StageCanvas: React.FC = () => {
                     }
                     setTargetTokenId(isTarget ? null : tok.id);
                   }}
-                  title={`${tok.name} | CA ${
+                  title={`${
+                    role !== 'gm' &&
+                    (tok.type === 'monster' || tok.type === 'npc') &&
+                    tok.hideNameFromPlayers
+                      ? '???'
+                      : linkedChar?.name || tok.name
+                  } | CA ${
                     role !== 'gm' &&
                     tok.type === 'monster' &&
-                    !campaign.settings.showEnemyAcToPlayers
+                    (tok.hideAcFromPlayers !== undefined
+                      ? tok.hideAcFromPlayers
+                      : linkedMonster?.hideAcFromPlayers !== undefined
+                        ? linkedMonster.hideAcFromPlayers
+                        : !campaign.settings.showEnemyAcToPlayers)
                       ? '??'
                       : tok.defense
-                  } | Clique para abrir ações${
+                  } | ${
+                    role === 'gm'
+                      ? isTarget
+                        ? 'Clique novamente para abrir painel do token'
+                        : 'Clique para selecionar na barra inferior'
+                      : 'Clique para abrir ações'
+                  }${
                     role === 'gm' ||
                     (tok.type === 'character' &&
                       myCharacter &&
@@ -4138,7 +4978,15 @@ export const StageCanvas: React.FC = () => {
                     top: tok.y * cellPx,
                     width: tokPx,
                     height: tokPx,
-                    zIndex: isMenuOpen ? 40 : isTarget || isCurrentTurn ? 15 : 10,
+                    zIndex: isMenuOpen
+                      ? 40
+                      : activeMap.darknessEnabled
+                        ? isTarget || isCurrentTurn
+                          ? 19
+                          : 18
+                        : isTarget || isCurrentTurn
+                          ? 15
+                          : 10,
                     transition:
                       draggingTokenId === tok.id
                         ? 'left 0.05s linear, top 0.05s linear'
@@ -4204,8 +5052,75 @@ export const StageCanvas: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Token Stamp Miniature Coin */}
+                  {/* Token Stamp Miniature Coin + Animated Condition Aura */}
                   <div className="relative flex items-center justify-center">
+                    {tok.hp > 0 && (() => {
+                      const aura = resolveConditionAuraKind(
+                        Array.from(
+                          new Set([
+                            ...(tok.activeConditionIds || []),
+                            ...(linkedChar?.activeConditionIds || []),
+                          ])
+                        ),
+                        campaign
+                      );
+                      if (!aura) return null;
+                      const auraSize = Math.max(32, Math.round(tokPx * 1.18));
+                      const spinCls =
+                        aura.kind === 'shadow' || aura.kind === 'blood'
+                          ? 'animate-aura-spin-rev'
+                          : aura.kind === 'holy' || aura.kind === 'arcane' || aura.kind === 'frost'
+                            ? 'animate-aura-spin'
+                            : 'animate-aura-pulse';
+                      return (
+                        <div
+                          className="absolute pointer-events-none flex items-center justify-center"
+                          style={{ width: auraSize, height: auraSize }}
+                        >
+                          {/* Soft atmospheric halo */}
+                          <div
+                            className="absolute inset-0 rounded-full animate-aura-pulse"
+                            style={{
+                              background: `radial-gradient(circle, ${aura.color}38 0%, ${aura.color}18 55%, transparent 76%)`,
+                            }}
+                          />
+                          {/* Rotating/Pulsing runic SVG ring */}
+                          <svg
+                            viewBox="0 0 100 100"
+                            className={`w-full h-full ${spinCls}`}
+                            style={{ filter: `drop-shadow(0 0 5px ${aura.color})` }}
+                          >
+                            <circle
+                              cx="50"
+                              cy="50"
+                              r="44"
+                              fill="none"
+                              stroke={aura.color}
+                              strokeWidth={aura.kind === 'blood' || aura.kind === 'fire' ? '2.4' : '1.8'}
+                              strokeDasharray={
+                                aura.kind === 'frost'
+                                  ? '14 8'
+                                  : aura.kind === 'poison'
+                                    ? '4 7'
+                                    : aura.kind === 'lightning'
+                                      ? '10 5 3 5'
+                                      : '18 10'
+                              }
+                              strokeLinecap="round"
+                              opacity="0.88"
+                            />
+                            {(aura.kind === 'holy' || aura.kind === 'blood' || aura.kind === 'arcane') && (
+                              <g stroke={aura.color} strokeWidth="2" opacity="0.85">
+                                <line x1="50" y1="2" x2="50" y2="10" />
+                                <line x1="50" y1="90" x2="50" y2="98" />
+                                <line x1="2" y1="50" x2="10" y2="50" />
+                                <line x1="90" y1="50" x2="98" y2="50" />
+                              </g>
+                            )}
+                          </svg>
+                        </div>
+                      );
+                    })()}
                     <TokenPortrait
                       name={linkedChar?.name || tok.name}
                       imageUrl={portraitImg}
@@ -4215,10 +5130,14 @@ export const StageCanvas: React.FC = () => {
                       isDead={tok.hp <= 0}
                       iconHint={linkedMonster?.type || linkedChar?.classId}
                     />
-                    {/* Engraved Mini CA Shield Pill on Coin Rim (Hidden for Monsters when GM hides enemy AC) */}
+                    {/* Engraved Mini CA Shield Pill on Coin Rim (Respects both per-token and global hideAc settings!) */}
                     {(role === 'gm' ||
                       tok.type !== 'monster' ||
-                      campaign.settings.showEnemyAcToPlayers) && (
+                      !(tok.hideAcFromPlayers !== undefined
+                        ? tok.hideAcFromPlayers
+                        : linkedMonster?.hideAcFromPlayers !== undefined
+                          ? linkedMonster.hideAcFromPlayers
+                          : !campaign.settings.showEnemyAcToPlayers)) && (
                       <span
                         className="absolute -bottom-0.5 -right-1 px-1 rounded bg-[#0c0e16]/95 border border-amber-400/60 text-[8px] font-display font-bold text-amber-200 leading-tight pointer-events-none shadow"
                         title={`Classe de Armadura: ${tok.defense}`}
@@ -4278,7 +5197,18 @@ export const StageCanvas: React.FC = () => {
                         OCULTO
                       </span>
                     )}
-                    <span>{linkedChar?.name || tok.name}</span>
+                    {tok.hideNameFromPlayers && role === 'gm' && (tok.type === 'monster' || tok.type === 'npc') && (
+                      <span className="text-[8px] px-1 rounded bg-purple-500/30 text-purple-200 border border-purple-400/60">
+                        ???
+                      </span>
+                    )}
+                    <span>
+                      {role !== 'gm' &&
+                      (tok.type === 'monster' || tok.type === 'npc') &&
+                      tok.hideNameFromPlayers
+                        ? '???'
+                        : linkedChar?.name || tok.name}
+                    </span>
                   </div>
 
                   {/* Concentration Crest on Token Top-Left Rim */}
@@ -4347,7 +5277,11 @@ export const StageCanvas: React.FC = () => {
                       <div className="flex items-center justify-between border-b pb-1.5" style={{ borderColor: 'var(--border-subtle)' }}>
                         <div>
                           <div className="font-display font-bold text-sm">
-                            {linkedChar?.name || tok.name}
+                            {role !== 'gm' &&
+                            (tok.type === 'monster' || tok.type === 'npc') &&
+                            tok.hideNameFromPlayers
+                              ? '???'
+                              : linkedChar?.name || tok.name}
                           </div>
                           <div className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
                             CA{' '}
@@ -4385,58 +5319,98 @@ export const StageCanvas: React.FC = () => {
                         </button>
                       </div>
 
-                      {/* Light Source / Torch Controls (GM on any token, Player on own token) */}
+                      {/* Light Source / Torch Controls (GM free on any token; Player ONLY from owned light items/abilities!) */}
                       {(role === 'gm' ||
-                        (linkedChar && linkedChar.id === myCharacter?.id)) && (
-                        <div className="space-y-1 border-b pb-2" style={{ borderColor: 'var(--border-subtle)' }}>
-                          <div className="text-[10px] uppercase tracking-wider text-amber-300/90 font-display font-bold flex items-center justify-between">
-                            <span>Iluminação / Tocha</span>
-                            {getTokenLightRadiusMeters(tok) > 0 && (
-                              <span className="font-mono-dice text-[9px] text-amber-200">
-                                {getTokenLightRadiusMeters(tok)}m
-                              </span>
-                            )}
-                          </div>
-                          <div className="grid grid-cols-4 gap-1">
-                            {TOKEN_LIGHT_PRESETS.map((preset) => {
-                              const activeLight = (tok.lightSource || 'none') === preset.id;
-                              return (
-                                <button
-                                  key={preset.id}
-                                  type="button"
-                                  onClick={() => {
-                                    updateActiveMap((m) => {
-                                      const nextTok: MapToken = {
-                                        ...tok,
-                                        lightSource: preset.id,
-                                        lightRadiusMeters: preset.radiusMeters || undefined,
-                                      };
-                                      return {
-                                        ...m,
-                                        tokens: m.tokens.map((t) =>
-                                          t.id === tok.id ? nextTok : t
-                                        ),
-                                        revealedCells:
-                                          preset.radiusMeters > 0 && m.fogEnabled
-                                            ? revealFogCellsAroundToken(m, nextTok, sqMeters)
-                                            : m.revealedCells,
-                                      };
-                                    });
-                                  }}
-                                  title={preset.label}
-                                  className={`px-1 py-1 rounded text-[10px] font-display font-bold border cursor-pointer transition text-center ${
-                                    activeLight
-                                      ? 'bg-amber-600/35 border-amber-400 text-amber-100'
-                                      : 'rpg-card hover:border-amber-400/60 opacity-85'
-                                  }`}
-                                >
-                                  {preset.short}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
+                        (linkedChar && linkedChar.id === myCharacter?.id)) &&
+                        (() => {
+                          const charLight = linkedChar
+                            ? getCharacterAvailableLightOptions(linkedChar, campaign)
+                            : { toggleOptions: [], passiveDarkvisionMeters: 0 };
+                          const lightMeta = resolveTokenLightForViewer(
+                            tok,
+                            campaign,
+                            role,
+                            myCharacter?.id
+                          );
+                          const effectiveRadius = Math.max(
+                            lightMeta.sharedRadiusM,
+                            lightMeta.personalRadiusM
+                          );
+                          const applyLightOption = (opt: ResolvedLightOption) => {
+                            updateActiveMap((m) => {
+                              const nextTok: MapToken = {
+                                ...tok,
+                                lightSource: opt.id,
+                                lightMode: opt.mode,
+                                lightRadiusMeters: opt.radiusMeters || undefined,
+                                lightLabel: opt.id === 'none' ? undefined : opt.label,
+                              };
+                              return {
+                                ...m,
+                                tokens: m.tokens.map((t) => (t.id === tok.id ? nextTok : t)),
+                                revealedCells:
+                                  opt.mode === 'shared' && opt.radiusMeters > 0 && m.fogEnabled
+                                    ? revealFogCellsAroundToken(m, nextTok, sqMeters, campaign)
+                                    : m.revealedCells,
+                              };
+                            });
+                          };
+                          const optionsToRender: ResolvedLightOption[] =
+                            role === 'gm'
+                              ? [...TOKEN_LIGHT_PRESETS, ...charLight.toggleOptions]
+                              : charLight.toggleOptions.length > 0
+                                ? [TOKEN_LIGHT_PRESETS[0], ...charLight.toggleOptions]
+                                : [];
+
+                          return (
+                            <div
+                              className="space-y-1 border-b pb-2"
+                              style={{ borderColor: 'var(--border-subtle)' }}
+                            >
+                              <div className="text-[10px] uppercase tracking-wider text-amber-300/90 font-display font-bold flex items-center justify-between">
+                                <span>Iluminação / Visão</span>
+                                {effectiveRadius > 0 && (
+                                  <span className="font-mono-dice text-[9px] text-amber-200">
+                                    {effectiveRadius}m
+                                  </span>
+                                )}
+                              </div>
+                              {charLight.passiveDarkvisionMeters > 0 && (
+                                <div className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-950/70 border border-indigo-400/50 text-indigo-200">
+                                  👁 Visão no Escuro Passiva ativa ({charLight.passiveDarkvisionMeters}m • só você vê)
+                                </div>
+                              )}
+                              {optionsToRender.length > 0 ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {optionsToRender.map((opt) => {
+                                    const activeLight = (tok.lightSource || 'none') === opt.id;
+                                    return (
+                                      <button
+                                        key={opt.id}
+                                        type="button"
+                                        onClick={() => applyLightOption(opt)}
+                                        title={opt.label}
+                                        className={`px-1.5 py-1 rounded text-[10px] font-display font-bold border cursor-pointer transition text-center ${
+                                          activeLight
+                                            ? opt.mode === 'personal-darkvision'
+                                              ? 'bg-indigo-600/35 border-indigo-400 text-indigo-100'
+                                              : 'bg-amber-600/35 border-amber-400 text-amber-100'
+                                            : 'rpg-card hover:border-amber-400/60 opacity-85'
+                                        }`}
+                                      >
+                                        {opt.short}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <div className="text-[10px] italic opacity-70">
+                                  Sem item ou magia de luz na mochila/grimório.
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
 
                       {/* Own Character / GM Controlled Character Attacks (Click to aim on map) */}
                       {linkedChar &&
@@ -4528,6 +5502,55 @@ export const StageCanvas: React.FC = () => {
                                     </span>
                                   </button>
                                 ))}
+                                {getConditionGrantedAbilities(linkedChar.activeConditionIds, campaign).map(
+                                  ({ ability: ab, condition: cond }) => (
+                                    <button
+                                      key={`tok-cond-${cond.id}-${ab.id}`}
+                                      onClick={() => {
+                                        setSelectedTokenId(null);
+                                        rollCharacterAction({
+                                          characterId: linkedChar.id,
+                                          title: ab.name,
+                                          attackFormula: ab.attackFormula,
+                                          damageFormula: ab.damageFormula,
+                                          damageType: ab.damageType,
+                                          range: ab.range,
+                                          actionCost:
+                                            ab.actionType === 'Bônus'
+                                              ? 'Bônus'
+                                              : ab.actionType === 'Reação'
+                                                ? 'Reação'
+                                                : ab.actionType === 'Livre'
+                                                  ? 'Livre'
+                                                  : 'Padrão',
+                                          saveSkillId: ab.saveSkillId,
+                                          saveDcFormula: ab.saveDcFormula,
+                                          costMp: ab.costMp,
+                                          costResourceId: ab.costResourceId,
+                                          applyConditionId: ab.applyConditionId,
+                                          conditionDurationRounds: ab.conditionDurationRounds,
+                                          aoeShape: ab.aoeShape,
+                                          aoeSizeMeters: ab.aoeSizeMeters,
+                                          aoeColor: ab.aoeColor,
+                                          aoePersistent: ab.aoePersistent,
+                                        });
+                                      }}
+                                      style={{ borderColor: cond.color || '#f59e0b' }}
+                                      className="w-full rpg-card px-2.5 py-1.5 rounded-lg text-[11px] flex items-center justify-between gap-1 cursor-pointer border"
+                                      title={`Liberado por ${cond.name}`}
+                                    >
+                                      <span className="truncate flex items-center gap-1 text-amber-100 font-bold">
+                                        <span>{cond.icon}</span>
+                                        {ab.name}
+                                      </span>
+                                      <span className="font-mono-dice text-[10px] text-amber-300 shrink-0">
+                                        {ab.damageFormula
+                                          ? formatFormulaForDisplay(ab.damageFormula, charStats, linkedChar)
+                                          : cond.name}
+                                      </span>
+                                    </button>
+                                  )
+                                )}
                                 {knownAbs.slice(0, 3).map((ab) => (
                                   <button
                                     key={ab.id}
@@ -4668,9 +5691,140 @@ export const StageCanvas: React.FC = () => {
                           </button>
                         )}
 
+                      {/* Player-Controlled Summon / Familiar Attacks */}
+                      {role === 'player' &&
+                        myCharacter &&
+                        tok.controlledByCharacterId === myCharacter.id &&
+                        tok.hp > 0 &&
+                        (() => {
+                          const linkedNpc =
+                            tok.type === 'npc' && tok.referenceId
+                              ? campaign.npcs.find((n) => n.id === tok.referenceId)
+                              : undefined;
+                          const summonAttacks =
+                            linkedMonster?.attacks ||
+                            (linkedNpc?.combatEnabled ? linkedNpc.attacks : []) ||
+                            [];
+                          const condGrants = getConditionGrantedAbilities(
+                            tok.activeConditionIds,
+                            campaign
+                          );
+                          if (summonAttacks.length === 0 && condGrants.length === 0) return null;
+                          return (
+                            <div
+                              className="space-y-1 pt-1.5 border-t"
+                              style={{ borderColor: 'var(--border-subtle)' }}
+                            >
+                              <div className="text-[10px] uppercase tracking-wider font-display font-bold text-emerald-300">
+                                🐾 Ataques de {tok.name} (Sua Invocação):
+                              </div>
+                              {summonAttacks.map((satk, i) => (
+                                <button
+                                  key={`sum-atk-${i}`}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedTokenId(null);
+                                    setPendingAttackChoice({
+                                      attackerTokenId: tok.id,
+                                      attackerName: tok.name,
+                                      attackerColor: tok.color,
+                                      attackerImageUrl: tok.imageUrl,
+                                      attackerFrame: tok.frameStyle || 'emerald',
+                                      diceSkin: myCharacter.diceSkin || 'emerald',
+                                      actionTitle: satk.name,
+                                      attackFormula: `1d20 + ${satk.attackBonus}`,
+                                      damageFormula: satk.damageFormula,
+                                      damageType: satk.damageType,
+                                      range: satk.range,
+                                      actionCost: 'Padrão',
+                                    });
+                                  }}
+                                  className="w-full rpg-card px-2 py-1 rounded text-[11px] flex items-center justify-between hover:border-emerald-400 cursor-pointer"
+                                >
+                                  <span className="truncate">{satk.name}</span>
+                                  <span className="font-mono-dice text-[10px] text-emerald-300">
+                                    +{satk.attackBonus} | {satk.damageFormula}
+                                  </span>
+                                </button>
+                              ))}
+                              {condGrants.map(({ ability: ab, condition: cond }) => (
+                                <button
+                                  key={`sum-cond-${cond.id}-${ab.id}`}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedTokenId(null);
+                                    const parsedCondDur = parseAbilityDuration(
+                                      ab.duration,
+                                      ab.conditionDurationRounds
+                                    );
+                                    setPendingAttackChoice({
+                                      attackerTokenId: tok.id,
+                                      attackerName: tok.name,
+                                      attackerColor: tok.color,
+                                      attackerImageUrl: tok.imageUrl,
+                                      attackerFrame: tok.frameStyle || 'emerald',
+                                      diceSkin: myCharacter.diceSkin || 'emerald',
+                                      actionTitle: ab.name,
+                                      attackFormula: ab.attackFormula,
+                                      damageFormula: ab.damageFormula,
+                                      damageType: ab.damageType,
+                                      range: ab.range,
+                                      actionCost:
+                                        ab.actionType === 'Bônus'
+                                          ? 'Bônus'
+                                          : ab.actionType === 'Reação'
+                                            ? 'Reação'
+                                            : ab.actionType === 'Livre'
+                                              ? 'Livre'
+                                              : 'Padrão',
+                                      applyConditionId: ab.applyConditionId,
+                                      conditionDurationRounds: parsedCondDur.isDiceFormula
+                                        ? undefined
+                                        : parsedCondDur.rounds,
+                                      conditionDurationFormula: parsedCondDur.isDiceFormula
+                                        ? parsedCondDur.formula
+                                        : undefined,
+                                      saveSkillId: ab.saveSkillId,
+                                      saveDcFormula: ab.saveDcFormula,
+                                      sfxPreset: ab.sfxPreset,
+                                      vfxKind: ab.vfxKind,
+                                      aoeShape: ab.aoeShape,
+                                      aoeSizeMeters: ab.aoeSizeMeters,
+                                      aoeColor: ab.aoeColor,
+                                      aoePersistent: ab.aoePersistent,
+                                      aoeTargetFilter: ab.aoeTargetFilter,
+                                      createsSurface: ab.createsSurface,
+                                    });
+                                  }}
+                                  className="w-full rpg-card px-2 py-1 rounded text-[11px] flex items-center justify-between border cursor-pointer"
+                                  style={{ borderColor: cond.color || '#f59e0b' }}
+                                >
+                                  <span className="truncate">
+                                    {cond.icon} {ab.name}
+                                  </span>
+                                  <span className="text-[10px] opacity-80">{ab.actionType}</span>
+                                </button>
+                              ))}
+                            </div>
+                          );
+                        })()}
+
                       {/* GM Controls: Free Token Resize (1x1 to 8x8), Next-Attack Adv/Disadv, Monster Attacks, Death Save Rescue, Quick HP, Hide, Delete */}
                       {role === 'gm' && (
                         <div className="space-y-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const sz = Math.max(1, tok.size || 1);
+                              broadcastCameraFocus(tok.x + sz / 2, tok.y + sz / 2, tok.name);
+                              showTacticalAlert(`🎯 Câmera da mesa focada em ${tok.name}!`);
+                              setSelectedTokenId(null);
+                            }}
+                            className="w-full py-1 rounded bg-sky-950/75 hover:bg-sky-900 border border-sky-400/50 text-sky-200 text-[10px] font-display font-bold cursor-pointer"
+                            title="Puxa suavemente a câmera de todos os jogadores conectados para este token!"
+                          >
+                            🎯 Focar Câmera da Mesa Aqui
+                          </button>
                           <div className="flex items-center justify-between gap-1.5 text-[10px]">
                             <span className="font-display font-bold uppercase tracking-wider text-amber-300/90">
                               Tamanho: {tok.size}×{tok.size}
@@ -4710,6 +5864,82 @@ export const StageCanvas: React.FC = () => {
                               </button>
                             </div>
                           </div>
+                          {(tok.type === 'monster' || tok.type === 'npc') &&
+                            tok.hp > 0 &&
+                            (() => {
+                              const condGrants = getConditionGrantedAbilities(
+                                tok.activeConditionIds,
+                                campaign
+                              );
+                              if (condGrants.length === 0) return null;
+                              return (
+                                <div className="space-y-1">
+                                  <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/90">
+                                    Ataques por Condição:
+                                  </div>
+                                  {condGrants.map(({ ability: ab, condition: cond }) => (
+                                    <button
+                                      key={`gm-tok-cond-${cond.id}-${ab.id}`}
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedTokenId(null);
+                                        const parsedCondDur = parseAbilityDuration(
+                                          ab.duration,
+                                          ab.conditionDurationRounds
+                                        );
+                                        setPendingAttackChoice({
+                                          attackerTokenId: tok.id,
+                                          attackerName: tok.name,
+                                          attackerColor: tok.color,
+                                          attackerImageUrl: tok.imageUrl,
+                                          attackerFrame: tok.frameStyle || 'crimson',
+                                          diceSkin: 'blood',
+                                          actionTitle: ab.name,
+                                          attackFormula: ab.attackFormula,
+                                          damageFormula: ab.damageFormula,
+                                          damageType: ab.damageType,
+                                          range: ab.range,
+                                          actionCost:
+                                            ab.actionType === 'Bônus'
+                                              ? 'Bônus'
+                                              : ab.actionType === 'Reação'
+                                                ? 'Reação'
+                                                : ab.actionType === 'Livre'
+                                                  ? 'Livre'
+                                                  : 'Padrão',
+                                          applyConditionId: ab.applyConditionId,
+                                          conditionDurationRounds: parsedCondDur.isDiceFormula
+                                            ? undefined
+                                            : parsedCondDur.rounds,
+                                          conditionDurationFormula: parsedCondDur.isDiceFormula
+                                            ? parsedCondDur.formula
+                                            : undefined,
+                                          saveSkillId: ab.saveSkillId,
+                                          saveDcFormula: ab.saveDcFormula,
+                                          sfxPreset: ab.sfxPreset,
+                                          vfxKind: ab.vfxKind,
+                                          aoeShape: ab.aoeShape,
+                                          aoeSizeMeters: ab.aoeSizeMeters,
+                                          aoeColor: ab.aoeColor,
+                                          aoePersistent: ab.aoePersistent,
+                                          aoeTargetFilter: ab.aoeTargetFilter,
+                                          createsSurface: ab.createsSurface,
+                                        });
+                                      }}
+                                      style={{ borderColor: cond.color || '#f59e0b' }}
+                                      className="w-full rpg-card px-2 py-1 rounded text-[10px] font-display font-bold flex items-center justify-between gap-1 border cursor-pointer"
+                                    >
+                                      <span className="truncate">
+                                        {cond.icon} {ab.name}
+                                      </span>
+                                      <span className="font-mono-dice text-amber-300 shrink-0">
+                                        {ab.damageFormula || cond.name}
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              );
+                            })()}
                           {linkedChar && (
                             <div className="space-y-1">
                               <div className="text-[9px] uppercase tracking-wider font-display font-bold text-amber-300/90">
@@ -4962,6 +6192,33 @@ export const StageCanvas: React.FC = () => {
                             </button>
                           )}
 
+                          {/* Hide Name (???) Toggle for NPCs & Monsters */}
+                          {(tok.type === 'monster' || tok.type === 'npc') && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateActiveMap((m) => ({
+                                  ...m,
+                                  tokens: m.tokens.map((t) =>
+                                    t.id === tok.id
+                                      ? { ...t, hideNameFromPlayers: !t.hideNameFromPlayers }
+                                      : t
+                                  ),
+                                }))
+                              }
+                              className={`w-full py-1 rounded text-[10px] font-display font-bold border cursor-pointer ${
+                                tok.hideNameFromPlayers
+                                  ? 'bg-purple-950/75 border-purple-400/60 text-purple-200'
+                                  : 'bg-emerald-950/50 border-emerald-500/40 text-emerald-200'
+                              }`}
+                              title="Alternar se os jogadores veem o nome real ou '???'"
+                            >
+                              {tok.hideNameFromPlayers
+                                ? 'Nome p/ Jogadores: ??? (Oculto)'
+                                : 'Nome p/ Jogadores: Visível'}
+                            </button>
+                          )}
+
                           {/* Per-Enemy Invisible CA & Boss Toggle (Monsters) */}
                           {tok.type === 'monster' && (() => {
                             const mDef = tok.referenceId
@@ -5001,28 +6258,49 @@ export const StageCanvas: React.FC = () => {
                                   onClick={() =>
                                     updateActiveMap((m) => ({
                                       ...m,
-                                      tokens: m.tokens.map((t) =>
-                                        t.id === tok.id
-                                          ? {
-                                              ...t,
-                                              isBoss: !t.isBoss,
-                                              bossPhase: !t.isBoss ? 1 : undefined,
-                                              bossPhase2HpPct: t.bossPhase2HpPct ?? 50,
-                                              legendaryActionsMax: !t.isBoss
-                                                ? (t.legendaryActionsMax ?? 3)
-                                                : undefined,
-                                              legendaryActionsRemaining: !t.isBoss
-                                                ? (t.legendaryActionsMax ?? 3)
-                                                : undefined,
-                                              legendaryResistancesMax: !t.isBoss
-                                                ? (t.legendaryResistancesMax ?? 3)
-                                                : undefined,
-                                              legendaryResistancesRemaining: !t.isBoss
-                                                ? (t.legendaryResistancesMax ?? 3)
-                                                : undefined,
-                                            }
-                                          : t
-                                      ),
+                                      tokens: m.tokens.map((t) => {
+                                        if (t.id !== tok.id) return t;
+                                        const enabling = !t.isBoss;
+                                        return {
+                                          ...t,
+                                          isBoss: enabling,
+                                          bossTitle: enabling
+                                            ? (t.bossTitle ?? linkedMonster?.bossTitle)
+                                            : t.bossTitle,
+                                          bossPhase: enabling ? 1 : undefined,
+                                          bossPhase2HpPct: enabling
+                                            ? (t.bossPhase2HpPct ?? linkedMonster?.bossPhase2HpPct)
+                                            : t.bossPhase2HpPct,
+                                          bossPhase2Title: enabling
+                                            ? (t.bossPhase2Title ?? linkedMonster?.bossPhase2Title)
+                                            : t.bossPhase2Title,
+                                          bossPhases: enabling
+                                            ? (t.bossPhases ??
+                                              linkedMonster?.bossPhases?.map((p) => ({ ...p })))
+                                            : t.bossPhases,
+                                          triggeredBossPhaseIds: enabling ? [] : undefined,
+                                          legendaryActionsMax: enabling
+                                            ? (t.legendaryActionsMax ??
+                                              linkedMonster?.legendaryActionsMax ??
+                                              3)
+                                            : undefined,
+                                          legendaryActionsRemaining: enabling
+                                            ? (t.legendaryActionsMax ??
+                                              linkedMonster?.legendaryActionsMax ??
+                                              3)
+                                            : undefined,
+                                          legendaryResistancesMax: enabling
+                                            ? (t.legendaryResistancesMax ??
+                                              linkedMonster?.legendaryResistancesMax ??
+                                              3)
+                                            : undefined,
+                                          legendaryResistancesRemaining: enabling
+                                            ? (t.legendaryResistancesMax ??
+                                              linkedMonster?.legendaryResistancesMax ??
+                                              3)
+                                            : undefined,
+                                        };
+                                      }),
                                     }))
                                   }
                                   className={`flex-1 py-1 rounded text-[10px] font-display font-bold border cursor-pointer ${
@@ -5061,6 +6339,129 @@ export const StageCanvas: React.FC = () => {
                               <Trash2 className="w-3 h-3" /> Remover Token
                             </button>
                           </div>
+
+                          {/* Summon / Familiar Player Control + Manual Loot Drop for Monsters & NPCs */}
+                          {(tok.type === 'monster' || tok.type === 'npc') && (
+                            <div className="rpg-card p-2 rounded-lg space-y-1.5 text-[10px]">
+                              <label className="block">
+                                <span className="font-display font-bold text-emerald-300 block mb-0.5">
+                                  🐾 Controlado por (Invocação / Familiar):
+                                </span>
+                                <select
+                                  value={tok.controlledByCharacterId || ''}
+                                  onChange={(e) => {
+                                    const ownerId = e.target.value || undefined;
+                                    updateCampaign((prev) => ({
+                                      ...prev,
+                                      maps: prev.maps.map((m) =>
+                                        m.id !== activeMap.id
+                                          ? m
+                                          : {
+                                              ...m,
+                                              tokens: m.tokens.map((t) =>
+                                                t.id === tok.id
+                                                  ? { ...t, controlledByCharacterId: ownerId }
+                                                  : t
+                                              ),
+                                            }
+                                      ),
+                                      combat: prev.combat.active
+                                        ? {
+                                            ...prev.combat,
+                                            combatants: prev.combat.combatants.map((cb) =>
+                                              cb.tokenId === tok.id
+                                                ? { ...cb, controlledByCharacterId: ownerId }
+                                                : cb
+                                            ),
+                                          }
+                                        : prev.combat,
+                                    }));
+                                  }}
+                                  className="rpg-input w-full py-0.5 text-[10px]"
+                                >
+                                  <option value="">Apenas Mestre</option>
+                                  {campaign.characters.map((ch) => (
+                                    <option key={ch.id} value={ch.id}>
+                                      {ch.name} ({ch.playerName})
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const goldVal = linkedMonster?.lootGoldFormula?.trim()
+                                    ? Math.max(0, evaluateFormula(linkedMonster.lootGoldFormula.trim()).total)
+                                    : 0;
+                                  const lootMarker: GmMapMarker = {
+                                    id: `loot-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                                    x: tok.x,
+                                    y: tok.y,
+                                    kind: 'chest',
+                                    title: `Espólio: ${tok.name}`,
+                                    description: `Itens e moedas deixados por ${tok.name}.`,
+                                    revealed: true,
+                                    lootGold: goldVal > 0 ? goldVal : undefined,
+                                    lootItems: linkedMonster?.lootItems?.map((li) => ({ ...li })),
+                                  };
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    tokens: m.tokens.map((t) =>
+                                      t.id === tok.id ? { ...t, lootDropped: true } : t
+                                    ),
+                                    gmMarkers: [...(m.gmMarkers || []), lootMarker],
+                                  }));
+                                  showTacticalAlert(`💰 Espólio de ${tok.name} solto no mapa!`);
+                                  setSelectedTokenId(null);
+                                }}
+                                className="w-full py-1 rounded bg-amber-950/75 hover:bg-amber-900 border border-amber-400/50 text-amber-200 font-display font-bold cursor-pointer"
+                                title="Soltar um baú/espólio saqueável na posição deste token"
+                              >
+                                💰 Soltar Espólio no Mapa
+                              </button>
+                            </div>
+                          )}
+
+                          {tok.isHidden && campaign.characters.length > 0 && (
+                            <div className="rpg-card p-2 rounded-lg space-y-1">
+                              <div className="text-[10px] font-display font-bold text-purple-300">
+                                👁️ Oculto — Visível só para quem percebeu:
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {campaign.characters.map((ch) => {
+                                  const canSee = (tok.visibleToCharacterIds || []).includes(ch.id);
+                                  return (
+                                    <button
+                                      key={`tok-vis-${ch.id}`}
+                                      type="button"
+                                      onClick={() =>
+                                        updateActiveMap((m) => ({
+                                          ...m,
+                                          tokens: m.tokens.map((t) => {
+                                            if (t.id !== tok.id) return t;
+                                            const cur = t.visibleToCharacterIds || [];
+                                            return {
+                                              ...t,
+                                              visibleToCharacterIds: canSee
+                                                ? cur.filter((id) => id !== ch.id)
+                                                : [...cur, ch.id],
+                                            };
+                                          }),
+                                        }))
+                                      }
+                                      className={`px-1.5 py-0.5 rounded text-[10px] border cursor-pointer ${
+                                        canSee
+                                          ? 'bg-purple-600/45 border-purple-400 text-purple-100 font-bold'
+                                          : 'bg-black/30 border-white/15 opacity-70 hover:opacity-100'
+                                      }`}
+                                    >
+                                      {canSee ? '👁️ ' : ''}{ch.name}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
 
                           {tok.type === 'character' && tok.referenceId && (
                             <button
@@ -5136,21 +6537,33 @@ export const StageCanvas: React.FC = () => {
 
             {/* GM Secret Map Markers & Interactive Treasures Layer */}
             {(activeMap.gmMarkers || []).map((marker) => {
-              if (!marker.revealed && role !== 'gm') return null;
+              const isSpottedByMe = Boolean(
+                myCharacter && (marker.visibleToCharacterIds || []).includes(myCharacter.id)
+              );
+              const isVisibleToPlayer = marker.revealed || isSpottedByMe;
+              if (!isVisibleToPlayer && role !== 'gm') return null;
+              if (darknessLitCells && role !== 'gm' && !darknessLitCells.has(`${marker.x},${marker.y}`)) {
+                return null;
+              }
               const isSelected = selectedMarkerId === marker.id;
               const hasLoot =
                 (marker.lootItems && marker.lootItems.length > 0) ||
                 (marker.lootGold ?? 0) > 0;
-              const canPlayerClick =
-                marker.revealed && (marker.kind === 'chest' || marker.kind === 'item' || hasLoot);
+              const canPlayerClick = isVisibleToPlayer;
               const markerAccent =
-                marker.kind === 'chest'
-                  ? '#f59e0b'
-                  : marker.kind === 'item'
-                    ? '#38bdf8'
-                    : marker.kind === 'trap'
-                      ? '#ef4444'
-                      : '#a855f7';
+                marker.kind === 'door'
+                  ? marker.doorState === 'open'
+                    ? '#22c55e'
+                    : marker.doorState === 'locked'
+                      ? '#f59e0b'
+                      : '#d97706'
+                  : marker.kind === 'chest'
+                    ? '#f59e0b'
+                    : marker.kind === 'item'
+                      ? '#38bdf8'
+                      : marker.kind === 'trap'
+                        ? '#ef4444'
+                        : '#a855f7';
               return (
                 <div
                   key={marker.id}
@@ -5244,6 +6657,26 @@ export const StageCanvas: React.FC = () => {
                           <circle cx="15" cy="14" r="1.4" fill="#fde047" />
                         </>
                       )}
+                      {marker.kind === 'door' && (
+                        <>
+                          <rect
+                            x="5"
+                            y="3"
+                            width="14"
+                            height="18"
+                            rx="1.5"
+                            fill={marker.doorState === 'open' ? 'rgba(34,197,94,0.2)' : '#451a03'}
+                            stroke={marker.doorState === 'open' ? '#4ade80' : '#f59e0b'}
+                            strokeWidth="1.8"
+                            strokeDasharray={marker.doorState === 'open' ? '3 2' : undefined}
+                          />
+                          {marker.doorState === 'locked' ? (
+                            <circle cx="12" cy="12" r="2.6" fill="#fbbf24" stroke="#78350f" strokeWidth="1" />
+                          ) : marker.doorState !== 'open' ? (
+                            <circle cx="15.5" cy="12" r="1.4" fill="#fde047" />
+                          ) : null}
+                        </>
+                      )}
                     </svg>
                   </div>
 
@@ -5255,6 +6688,9 @@ export const StageCanvas: React.FC = () => {
                     {!marker.revealed && role === 'gm' && (
                       <span className="text-amber-300">[SECRETO]</span>
                     )}
+                    {!marker.revealed && role !== 'gm' && isSpottedByMe && (
+                      <span className="text-purple-300" title="Percebido por você">👁️</span>
+                    )}
                     <span>{marker.title}</span>
                     {hasLoot && (
                       <span className="text-emerald-300">
@@ -5263,8 +6699,8 @@ export const StageCanvas: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Player Treasure Claim Popover */}
-                  {role !== 'gm' && isSelected && marker.revealed && (
+                  {/* Player Treasure / Interactive Door Popover */}
+                  {role !== 'gm' && isSelected && isVisibleToPlayer && (
                     <div
                       onMouseDown={(e) => e.stopPropagation()}
                       className="absolute bottom-[110%] left-1/2 -translate-x-1/2 w-60 rpg-glass-panel rounded-lg p-3 space-y-2 text-xs shadow-2xl z-50 cursor-default"
@@ -5280,40 +6716,211 @@ export const StageCanvas: React.FC = () => {
                           ✕
                         </button>
                       </div>
-
-                      {hasLoot ? (
-                        <div className="space-y-1 text-[11px]">
-                          {(marker.lootGold ?? 0) > 0 && (
-                            <div className="text-amber-300 font-mono-dice font-bold">
-                              🪙 {marker.lootGold} PO
+                      {marker.kind === 'door' && (() => {
+                        const myHeroTok = myCharacter
+                          ? activeMap.tokens.find(
+                              (t) => t.type === 'character' && t.referenceId === myCharacter.id
+                            )
+                          : undefined;
+                        const distSq = myHeroTok
+                          ? getGridSpanDistance(
+                              myHeroTok.x,
+                              myHeroTok.y,
+                              myHeroTok.size || 1,
+                              marker.x,
+                              marker.y,
+                              1,
+                              sqMeters
+                            ).squares
+                          : 99;
+                        const isAdjacent = distSq <= 1;
+                        const dState = marker.doorState || 'closed';
+                        const myHeroIncap = (myCharacter?.activeConditionIds || [])
+                          .map((cid) => campaign.compendium.conditions.find((c) => c.id === cid))
+                          .find(
+                            (c) =>
+                              c &&
+                              /paralisad|atordoad|petrificad|inconscient|incapacitad/i.test(c.name)
+                          );
+                        const myDoorCb =
+                          campaign.combat.active && myCharacter
+                            ? campaign.combat.combatants.find((cb) => cb.referenceId === myCharacter.id)
+                            : undefined;
+                        const isNotMyCombatTurn = Boolean(
+                          campaign.combat.active &&
+                            activeTurnCombatant &&
+                            (!myDoorCb || activeTurnCombatant.id !== myDoorCb.id)
+                        );
+                        const cannotInteractReason =
+                          !myCharacter || myCharacter.hp <= 0
+                            ? 'Você está caído (0 PV) e não pode interagir.'
+                            : myHeroIncap
+                              ? `Incapacitado (${myHeroIncap.name}) — não pode interagir.`
+                              : isNotMyCombatTurn
+                                ? `Aguarde seu turno (${activeTurnCombatant?.name}) para interagir.`
+                                : !isAdjacent
+                                  ? 'Aproxime-se (adjacente) para interagir com esta porta.'
+                                  : null;
+                        return (
+                          <div className="space-y-1.5">
+                            <div className="text-[11px] opacity-80">
+                              Estado:{' '}
+                              <strong className="text-amber-200">
+                                {dState === 'open'
+                                  ? 'Aberta'
+                                  : dState === 'locked'
+                                    ? `Trancada (Ladinagem CD ${marker.lockDc ?? 13})`
+                                    : 'Fechada'}
+                              </strong>
                             </div>
-                          )}
-                          {(marker.lootItems || []).map((li) => {
-                            const itemDef = campaign.compendium.items.find(
-                              (it) => it.id === li.itemId
-                            );
-                            return (
-                              <div key={li.itemId} className="flex items-center justify-between">
-                                <span className="truncate">{itemDef?.name || 'Item'}</span>
-                                <span className="font-mono-dice text-emerald-300">x{li.quantity}</span>
+                            {cannotInteractReason ? (
+                              <div className="text-[10px] text-amber-300/80 italic">
+                                {cannotInteractReason}
                               </div>
-                            );
-                          })}
-                          <button
-                            onClick={() => {
-                              claimTreasureMarker(marker.id);
-                              setSelectedMarkerId(null);
-                            }}
-                            className="w-full rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-xs cursor-pointer mt-1"
-                          >
-                            ✨ Pegar Tesouro
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="text-[11px] font-lore italic opacity-75">
-                          Baú vazio no momento.
-                        </div>
-                      )}
+                            ) : dState === 'locked' ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!myCharacter) return;
+                                  if (
+                                    campaign.combat.active &&
+                                    myDoorCb &&
+                                    myDoorCb.actionAvailable === false
+                                  ) {
+                                    showTacticalAlert(
+                                      'Você já gastou sua Ação Padrão neste turno (Arrombar custa 1 Ação)!'
+                                    );
+                                    return;
+                                  }
+                                  const st = computeCharacterStats(myCharacter, campaign);
+                                  const bonus =
+                                    st.skills['ladinagem']?.total ??
+                                    st.skills['prestidigitacao']?.total ??
+                                    st.attributes['des']?.mod ??
+                                    0;
+                                  const dc = marker.lockDc ?? 13;
+                                  const d20 = Math.floor(Math.random() * 20) + 1;
+                                  const total = d20 + bonus;
+                                  const ok = total >= dc;
+                                  updateCampaign((prev) => ({
+                                    ...prev,
+                                    maps: ok
+                                      ? prev.maps.map((m) =>
+                                          m.id !== activeMap.id
+                                            ? m
+                                            : {
+                                                ...m,
+                                                gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                                  gm.id === marker.id
+                                                    ? { ...gm, doorState: 'open' }
+                                                    : gm
+                                                ),
+                                              }
+                                        )
+                                      : prev.maps,
+                                    combat:
+                                      prev.combat.active && myDoorCb
+                                        ? {
+                                            ...prev.combat,
+                                            combatants: prev.combat.combatants.map((cb) =>
+                                              cb.id === myDoorCb.id
+                                                ? consumeCombatantEconomy(cb, 'Padrão')
+                                                : cb
+                                            ),
+                                          }
+                                        : prev.combat,
+                                  }));
+                                  pushCombatLog({
+                                    category: 'system',
+                                    actorName: myCharacter.name,
+                                    actorKind: 'hero',
+                                    actorColor: myCharacter.playerColor || myCharacter.tokenColor,
+                                    summary: ok
+                                      ? `destrancou e abriu ${marker.title} (Ladinagem ${total} vs CD ${dc})!`
+                                      : `falhou ao tentar arrombar ${marker.title} (Ladinagem ${total} vs CD ${dc}).`,
+                                  });
+                                  showTacticalAlert(
+                                    ok
+                                      ? `🔓 ${myCharacter.name} destrancou ${marker.title} (${total} vs CD ${dc})!`
+                                      : `🔒 Falhou ao arrombar ${marker.title} (${total} vs CD ${dc}).`
+                                  );
+                                  setSelectedMarkerId(null);
+                                }}
+                                className="w-full rpg-btn-primary py-1.5 rounded text-xs font-display font-bold cursor-pointer"
+                              >
+                                🔓 Tentar Arrombar (CD {marker.lockDc ?? 13}
+                                {campaign.combat.active ? ' • Ação' : ''})
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nextState = dState === 'open' ? 'closed' : 'open';
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id ? { ...gm, doorState: nextState } : gm
+                                    ),
+                                  }));
+                                  pushCombatLog({
+                                    category: 'system',
+                                    actorName: myCharacter?.name || 'Herói',
+                                    actorKind: 'hero',
+                                    summary: `${nextState === 'open' ? 'abriu' : 'fechou'} ${marker.title}.`,
+                                  });
+                                  setSelectedMarkerId(null);
+                                }}
+                                className="w-full rpg-btn-primary py-1.5 rounded text-xs font-display font-bold cursor-pointer"
+                              >
+                                {dState === 'open' ? '🚪 Fechar Porta' : '🚪 Abrir Porta'}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      {marker.kind !== 'door' &&
+                        (hasLoot ? (
+                          <div className="space-y-1 text-[11px]">
+                            {(marker.lootGold ?? 0) > 0 && (
+                              <div className="text-amber-300 font-mono-dice font-bold">
+                                🪙 {marker.lootGold} PO
+                              </div>
+                            )}
+                            {(marker.lootItems || []).map((li) => {
+                              const itemDef = campaign.compendium.items.find(
+                                (it) => it.id === li.itemId
+                              );
+                              return (
+                                <div key={li.itemId} className="flex items-center justify-between">
+                                  <span className="truncate">{itemDef?.name || 'Item'}</span>
+                                  <span className="font-mono-dice text-emerald-300">x{li.quantity}</span>
+                                </div>
+                              );
+                            })}
+                            <button
+                              onClick={() => {
+                                claimTreasureMarker(marker.id);
+                                setSelectedMarkerId(null);
+                              }}
+                              className="w-full rpg-btn-primary px-3 py-1.5 rounded-md font-display font-bold text-xs cursor-pointer mt-1"
+                            >
+                              ✨ Pegar Tesouro
+                            </button>
+                          </div>
+                        ) : marker.description ? (
+                          <div className="text-[11px] font-lore leading-relaxed text-amber-100/90">
+                            {marker.description}
+                          </div>
+                        ) : marker.kind === 'chest' || marker.kind === 'item' ? (
+                          <div className="text-[11px] font-lore italic opacity-75">
+                            Baú vazio no momento.
+                          </div>
+                        ) : (
+                          <div className="text-[11px] font-lore italic opacity-80 text-purple-200">
+                            👁️ Você percebeu este detalhe oculto no ambiente.
+                          </div>
+                        ))}
                     </div>
                   )}
 
@@ -5459,59 +7066,133 @@ export const StageCanvas: React.FC = () => {
                         </div>
                       )}
 
-                      {/* Secret Passage Target Map Link & Instant Party Transfer */}
-                      {marker.kind === 'secret' && (
-                        <div className="space-y-1.5 p-2 rounded bg-purple-950/40 border border-purple-400/40 text-[10px]">
-                          <div className="font-display font-bold text-purple-200">
-                            Passagem Secreta — Destino
-                          </div>
-                          <label className="block">
-                            <span className="opacity-75 block mb-0.5">Mapa de Destino (Opcional)</span>
-                            <select
-                              value={marker.targetMapId || ''}
-                              onChange={(e) => {
-                                const val = e.target.value || undefined;
-                                updateActiveMap((m) => ({
-                                  ...m,
-                                  gmMarkers: (m.gmMarkers || []).map((gm) =>
-                                    gm.id === marker.id ? { ...gm, targetMapId: val } : gm
-                                  ),
-                                }));
-                              }}
-                              className="rpg-input w-full py-1 text-[11px]"
-                            >
-                              <option value="">Apenas notificar (sem trocar mapa)</option>
-                              {campaign.maps
-                                .filter((mp) => mp.id !== activeMap.id)
-                                .map((mp) => (
-                                  <option key={mp.id} value={mp.id}>
-                                    Ir para: {mp.name}
-                                  </option>
-                                ))}
-                            </select>
-                          </label>
-                          <div className="flex gap-1.5 pt-0.5">
-                            <button
-                              type="button"
-                              onClick={() => triggerSecretPassage(marker.id)}
-                              className="flex-1 rpg-card py-1 rounded font-display font-bold text-purple-200 cursor-pointer hover:border-purple-400/60"
-                            >
-                              Notificar
-                            </button>
-                            {marker.targetMapId && (
+                      {/* Secret Passage Target Map Link & Connected Destination Passage */}
+                      {marker.kind === 'secret' && (() => {
+                        const dstMapObj = marker.targetMapId
+                          ? campaign.maps.find((mp) => mp.id === marker.targetMapId)
+                          : undefined;
+                        const dstSecrets = (dstMapObj?.gmMarkers || []).filter(
+                          (gm) => gm.kind === 'secret'
+                        );
+                        return (
+                          <div className="space-y-1.5 p-2 rounded bg-purple-950/40 border border-purple-400/40 text-[10px]">
+                            <div className="font-display font-bold text-purple-200">
+                              Passagem Secreta — Conexão entre Mapas
+                            </div>
+                            <label className="block">
+                              <span className="opacity-75 block mb-0.5">Mapa de Destino</span>
+                              <select
+                                value={marker.targetMapId || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value || undefined;
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id
+                                        ? { ...gm, targetMapId: val, targetMarkerId: undefined }
+                                        : gm
+                                    ),
+                                  }));
+                                }}
+                                className="rpg-input w-full py-1 text-[11px]"
+                              >
+                                <option value="">Apenas notificar (sem trocar mapa)</option>
+                                {campaign.maps
+                                  .filter((mp) => mp.id !== activeMap.id)
+                                  .map((mp) => (
+                                    <option key={mp.id} value={mp.id}>
+                                      Ir para: {mp.name}
+                                    </option>
+                                  ))}
+                              </select>
+                            </label>
+                            {dstMapObj && (
+                              <label className="block">
+                                <span className="opacity-75 block mb-0.5">
+                                  Passagem Conectada em {dstMapObj.name}
+                                </span>
+                                <select
+                                  value={marker.targetMarkerId || ''}
+                                  onChange={(e) => {
+                                    const val = e.target.value || undefined;
+                                    updateActiveMap((m) => ({
+                                      ...m,
+                                      gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                        gm.id === marker.id ? { ...gm, targetMarkerId: val } : gm
+                                      ),
+                                    }));
+                                  }}
+                                  className="rpg-input w-full py-1 text-[11px]"
+                                >
+                                  <option value="">Entrada padrão do mapa</option>
+                                  {dstSecrets.map((ds) => (
+                                    <option key={ds.id} value={ds.id}>
+                                      🌀 {ds.title} ({ds.x},{ds.y})
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            )}
+                            {dstMapObj && marker.targetMarkerId && (
                               <button
                                 type="button"
-                                onClick={() =>
-                                  moveTokensToMap(activeMap.id, marker.targetMapId!, 'all-heroes')
-                                }
-                                className="flex-1 rpg-btn-primary py-1 rounded font-display font-bold cursor-pointer"
+                                onClick={() => {
+                                  updateCampaign((prev) => ({
+                                    ...prev,
+                                    maps: prev.maps.map((mp) =>
+                                      mp.id !== dstMapObj.id
+                                        ? mp
+                                        : {
+                                            ...mp,
+                                            gmMarkers: (mp.gmMarkers || []).map((gm) =>
+                                              gm.id === marker.targetMarkerId
+                                                ? {
+                                                    ...gm,
+                                                    targetMapId: activeMap.id,
+                                                    targetMarkerId: marker.id,
+                                                  }
+                                                : gm
+                                            ),
+                                          }
+                                    ),
+                                  }));
+                                  showTacticalAlert(
+                                    `Passagens conectadas em ida e volta entre "${activeMap.name}" e "${dstMapObj.name}"!`
+                                  );
+                                }}
+                                className="w-full rpg-card py-1 rounded font-display font-bold text-emerald-300 hover:border-emerald-400 cursor-pointer"
                               >
-                                Levar Grupo →
+                                🔗 Conectar Ida e Volta Automaticamente
                               </button>
                             )}
+                            <div className="flex gap-1.5 pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => triggerSecretPassage(marker.id)}
+                                className="flex-1 rpg-card py-1 rounded font-display font-bold text-purple-200 cursor-pointer hover:border-purple-400/60"
+                              >
+                                Notificar
+                              </button>
+                              {marker.targetMapId && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    moveTokensToMap(
+                                      activeMap.id,
+                                      marker.targetMapId!,
+                                      'all-heroes',
+                                      marker.targetMarkerId
+                                    )
+                                  }
+                                  className="flex-1 rpg-btn-primary py-1 rounded font-display font-bold cursor-pointer"
+                                >
+                                  Levar Grupo →
+                                </button>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        );
+                      })()}
 
                       {(marker.kind === 'chest' || marker.kind === 'item') && (
                         <div className="space-y-1.5 p-2 rounded bg-black/35 border border-amber-500/30">
@@ -5620,6 +7301,183 @@ export const StageCanvas: React.FC = () => {
                         </div>
                       )}
 
+                      {/* Interactive Door Controls (GM) */}
+                      {marker.kind === 'door' && (
+                        <div className="rpg-card p-2 rounded-lg space-y-1.5 text-[10px]">
+                          <div className="font-display font-bold text-amber-300">
+                            🚪 Estado da Porta (bloqueia visão, luz e movimento se fechada)
+                          </div>
+                          <div className="grid grid-cols-3 gap-1">
+                            {(
+                              [
+                                { id: 'open', label: 'Aberta' },
+                                { id: 'closed', label: 'Fechada' },
+                                { id: 'locked', label: '🔒 Trancada' },
+                              ] as const
+                            ).map((st) => (
+                              <button
+                                key={st.id}
+                                type="button"
+                                onClick={() =>
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id ? { ...gm, doorState: st.id } : gm
+                                    ),
+                                  }))
+                                }
+                                className={`py-1 rounded border cursor-pointer font-display font-bold ${
+                                  (marker.doorState || 'closed') === st.id
+                                    ? 'bg-amber-600/40 border-amber-400 text-amber-100'
+                                    : 'bg-black/35 border-white/15 opacity-75 hover:opacity-100'
+                                }`}
+                              >
+                                {st.label}
+                              </button>
+                            ))}
+                          </div>
+                          {(marker.doorState || 'closed') === 'locked' && (
+                            <label className="flex items-center justify-between gap-2">
+                              <span className="opacity-80">CD para Arrombar (Ladinagem):</span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={35}
+                                value={marker.lockDc ?? 13}
+                                onChange={(e) => {
+                                  const dc = Math.max(1, Number(e.target.value) || 13);
+                                  updateActiveMap((m) => ({
+                                    ...m,
+                                    gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                      gm.id === marker.id ? { ...gm, lockDc: dc } : gm
+                                    ),
+                                  }));
+                                }}
+                                className="rpg-input w-14 py-0.5 text-center font-mono-dice"
+                              />
+                            </label>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Selective Per-Player Visibility & Perception DC */}
+                      <div className="rpg-card p-2 rounded-lg space-y-1.5 text-[10px]">
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="font-display font-bold text-purple-300">
+                            👁️ Percepção / Visível só para:
+                          </span>
+                          <label className="flex items-center gap-1">
+                            <span className="opacity-75">CD</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={35}
+                              placeholder="—"
+                              value={marker.perceptionDc ?? ''}
+                              onChange={(e) => {
+                                const raw = Number(e.target.value);
+                                const val = raw > 0 ? raw : undefined;
+                                updateActiveMap((m) => ({
+                                  ...m,
+                                  gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                    gm.id === marker.id ? { ...gm, perceptionDc: val } : gm
+                                  ),
+                                }));
+                              }}
+                              className="rpg-input w-12 py-0.5 px-1 text-center font-mono-dice"
+                              title="CD de Percepção (0 = sem teste automático). Quem rolar Percepção >= CD vê automaticamente!"
+                            />
+                          </label>
+                        </div>
+                        {campaign.characters.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                            {campaign.characters.map((ch) => {
+                              const canSee = (marker.visibleToCharacterIds || []).includes(ch.id);
+                              return (
+                                <button
+                                  key={`mk-vis-${ch.id}`}
+                                  type="button"
+                                  onClick={() =>
+                                    updateActiveMap((m) => ({
+                                      ...m,
+                                      gmMarkers: (m.gmMarkers || []).map((gm) => {
+                                        if (gm.id !== marker.id) return gm;
+                                        const cur = gm.visibleToCharacterIds || [];
+                                        return {
+                                          ...gm,
+                                          visibleToCharacterIds: canSee
+                                            ? cur.filter((id) => id !== ch.id)
+                                            : [...cur, ch.id],
+                                        };
+                                      }),
+                                    }))
+                                  }
+                                  className={`px-1.5 py-0.5 rounded border cursor-pointer ${
+                                    canSee
+                                      ? 'bg-purple-600/45 border-purple-400 text-purple-100 font-bold'
+                                      : 'bg-black/30 border-white/15 opacity-70 hover:opacity-100'
+                                  }`}
+                                >
+                                  {canSee ? '👁️ ' : ''}{ch.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {(marker.perceptionDc ?? 0) > 0 && campaign.characters.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const dc = marker.perceptionDc || 12;
+                              const passedIds: string[] = [];
+                              const passedNames: string[] = [];
+                              campaign.characters.forEach((ch) => {
+                                const st = computeCharacterStats(ch, campaign);
+                                const percepBonus =
+                                  st.skills['percepcao']?.total ??
+                                  st.attributes['sab']?.mod ??
+                                  0;
+                                const d20 = Math.floor(Math.random() * 20) + 1;
+                                const tot = d20 + percepBonus;
+                                if (tot >= dc) {
+                                  passedIds.push(ch.id);
+                                  passedNames.push(`${ch.name} (${tot})`);
+                                }
+                              });
+                              if (passedIds.length > 0) {
+                                updateActiveMap((m) => ({
+                                  ...m,
+                                  gmMarkers: (m.gmMarkers || []).map((gm) =>
+                                    gm.id === marker.id
+                                      ? {
+                                          ...gm,
+                                          visibleToCharacterIds: Array.from(
+                                            new Set([
+                                              ...(gm.visibleToCharacterIds || []),
+                                              ...passedIds,
+                                            ])
+                                          ),
+                                        }
+                                      : gm
+                                  ),
+                                }));
+                                showTacticalAlert(
+                                  `👁️ Percepção (CD ${dc}): ${passedNames.join(', ')} avistou "${marker.title}"!`
+                                );
+                              } else {
+                                showTacticalAlert(
+                                  `Ninguém passou na Percepção (CD ${dc}) para notar "${marker.title}".`
+                                );
+                              }
+                            }}
+                            className="w-full py-1 rounded bg-purple-950/75 hover:bg-purple-900 border border-purple-400/50 text-purple-200 font-display font-bold cursor-pointer"
+                            title="Rola Percepção secreta para todos os heróis e libera este marcador apenas para quem passar!"
+                          >
+                            🎲 Testar Percepção do Grupo (CD {marker.perceptionDc})
+                          </button>
+                        )}
+                      </div>
+
                       <div className="flex items-center gap-1.5">
                         <button
                           onClick={() =>
@@ -5663,6 +7521,50 @@ export const StageCanvas: React.FC = () => {
               gridWidth={activeMap.gridWidth}
               gridHeight={activeMap.gridHeight}
             />
+
+            {/* Expanding Cinematic Impact Shockwave Rings (Crits, AoE Explosions) */}
+            {cinematicEnabled &&
+              shockwaves
+                .filter((sw) => sw.mapId === activeMap.id)
+                .map((sw) => (
+                  <div
+                    key={sw.id}
+                    className="absolute pointer-events-none z-35 rounded-full animate-shockwave-ring"
+                    style={{
+                      left: sw.x * cellPx,
+                      top: sw.y * cellPx,
+                      width: sw.sizePx || 120,
+                      height: sw.sizePx || 120,
+                      border: `3px solid ${sw.color}`,
+                      boxShadow: `0 0 24px ${sw.color}, inset 0 0 18px ${sw.color}`,
+                    }}
+                  />
+                ))}
+
+            {/* Total Darkness Grid Cells (Pitch black unless inside live Torch/Lantern/Darkvision + Wall LoS!) */}
+            {activeMap.darknessEnabled && darknessLitCells && (
+              <div className="absolute inset-0 pointer-events-none z-16">
+                {Array.from({ length: activeMap.gridHeight }).map((_, gy) =>
+                  Array.from({ length: activeMap.gridWidth }).map((__, gx) => {
+                    if (darknessLitCells.has(`${gx},${gy}`)) return null;
+                    return (
+                      <div
+                        key={`dark-${gx}-${gy}`}
+                        className="absolute"
+                        style={{
+                          left: gx * cellPx,
+                          top: gy * cellPx,
+                          width: cellPx,
+                          height: cellPx,
+                          backgroundColor:
+                            role === 'gm' ? 'rgba(2, 3, 7, 0.52)' : 'rgba(2, 3, 7, 0.99)',
+                        }}
+                      />
+                    );
+                  })
+                )}
+              </div>
+            )}
 
             {/* Fog of War Grid Cells */}
             {activeMap.fogEnabled && (

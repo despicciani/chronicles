@@ -85,7 +85,7 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
     '"Encontrem-me à meia-noite atrás da capela em ruínas. Não confiem nos guardas do portão leste."'
   );
   const [handoutImage, setHandoutImage] = useState('');
-  const [handoutTarget, setHandoutTarget] = useState('');
+  const [handoutRecipientIds, setHandoutRecipientIds] = useState<string[]>([]);
 
   // Gift Item state
   const [giftItemMap, setGiftItemMap] = useState<Record<string, string>>({});
@@ -653,29 +653,60 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
                   />
                 </div>
                 <div>
-                  <label className="block mb-1">Enviar Para</label>
-                  <select
-                    value={handoutTarget}
-                    onChange={(e) => setHandoutTarget(e.target.value)}
-                    className="rpg-input w-full"
-                  >
-                    <option value="">Todos os Jogadores da Mesa</option>
-                    {campaign.characters.map((c) => (
-                      <option key={c.id} value={c.playerName}>
-                        Sussurro apenas para {c.playerName} ({c.name})
-                      </option>
-                    ))}
-                  </select>
+                  <label className="block mb-1">
+                    Enviar Para ({handoutRecipientIds.length === 0 ? 'Todos os Jogadores' : `${handoutRecipientIds.length} selecionado(s) — Sussurro Secreto`})
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setHandoutRecipientIds([])}
+                      className={`px-2 py-1 rounded text-[11px] border cursor-pointer ${
+                        handoutRecipientIds.length === 0
+                          ? 'bg-amber-600/35 border-amber-400 text-amber-100 font-bold'
+                          : 'rpg-card opacity-75 hover:opacity-100'
+                      }`}
+                    >
+                      Todos
+                    </button>
+                    {campaign.characters.map((c) => {
+                      const active = handoutRecipientIds.includes(c.id);
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() =>
+                            setHandoutRecipientIds((prev) =>
+                              prev.includes(c.id) ? prev.filter((id) => id !== c.id) : [...prev, c.id]
+                            )
+                          }
+                          className={`px-2 py-1 rounded text-[11px] border cursor-pointer ${
+                            active
+                              ? 'bg-purple-600/40 border-purple-400 text-purple-100 font-bold'
+                              : 'rpg-card opacity-75 hover:opacity-100'
+                          }`}
+                        >
+                          {active ? '👁️ ' : ''}{c.name}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
-              <div>
-                <label className="block mb-1">URL da Imagem (Mapa, Retrato, Carta - Opcional)</label>
-                <input
-                  value={handoutImage}
-                  onChange={(e) => setHandoutImage(e.target.value)}
-                  placeholder="https://..."
-                  className="rpg-input w-full"
-                />
+              <div className="space-y-1.5">
+                <label className="block">Imagem (Mapa, Retrato, Carta — Opcional)</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    value={handoutImage}
+                    onChange={(e) => setHandoutImage(e.target.value)}
+                    placeholder="https://... ou envie um arquivo"
+                    className="rpg-input flex-1"
+                  />
+                  <FileUploadButton
+                    accept="image/*"
+                    label="Upload"
+                    onUploaded={(url) => setHandoutImage(url)}
+                  />
+                </div>
               </div>
               <div>
                 <label className="block mb-1">Texto / Mensagem</label>
@@ -692,13 +723,16 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
                     title: handoutTitle,
                     text: handoutText,
                     imageUrl: handoutImage || undefined,
-                    targetPlayerName: handoutTarget || undefined,
+                    recipientCharacterIds:
+                      handoutRecipientIds.length > 0 ? handoutRecipientIds : undefined,
                   })
                 }
                 className="rpg-btn-crimson px-4 py-2 rounded font-semibold flex items-center gap-2 cursor-pointer"
               >
                 <Send className="w-4 h-4" />
-                Exibir na Tela Agora
+                {handoutRecipientIds.length > 0
+                  ? `Enviar Sussurro Secreto (${handoutRecipientIds.length})`
+                  : 'Exibir na Tela de Todos Agora'}
               </button>
             </div>
           )}

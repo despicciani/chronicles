@@ -67,6 +67,11 @@ export const InspectEntityModal: React.FC = () => {
     char?.damageVulnerabilities || mon?.damageVulnerabilities || npc?.damageVulnerabilities || [];
 
   const wound = getMonsterWoundStatus(tok.hp, tok.maxHp);
+  const displayName =
+    role !== 'gm' && (tok.type === 'monster' || tok.type === 'npc') && tok.hideNameFromPlayers
+      ? '???'
+      : tok.name;
+
   const subtitle = char
     ? `Herói Nv ${char.level} • ${campaign.compendium.races.find((r) => r.id === char.raceId)?.name || ''} ${campaign.compendium.classes.find((c) => c.id === char.classId)?.name || ''}`
     : mon
@@ -97,7 +102,7 @@ export const InspectEntityModal: React.FC = () => {
           >
             <div className="flex items-center gap-3 min-w-0">
               <TokenPortrait
-                name={tok.name}
+                name={displayName}
                 imageUrl={tok.imageUrl}
                 playerColor={tok.color}
                 frameStyle={tok.frameStyle || (mon?.isBoss ? 'crimson' : 'gold')}
@@ -110,7 +115,7 @@ export const InspectEntityModal: React.FC = () => {
                   <Eye className="w-3 h-3" /> Inspecionar Criatura
                 </div>
                 <h2 className="font-chronicle font-black text-xl truncate chronicle-gold-text">
-                  {tok.name}
+                  {displayName}
                 </h2>
                 <div className="text-[11px] opacity-80 truncate">{subtitle}</div>
               </div>

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { TokenFrameStyle } from '../shared/types';
 import { useCampaign } from '../context/CampaignContext';
 
@@ -236,6 +236,10 @@ export const TokenPortrait: React.FC<TokenPortraitProps> = ({
 }) => {
   const { resolveAssetUrl } = useCampaign();
   const resolved = resolveAssetUrl(imageUrl);
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => {
+    setImgFailed(false);
+  }, [resolved]);
   const rimPad = Math.max(2, Math.round(sizePx * 0.085));
 
   return (
@@ -261,11 +265,12 @@ export const TokenPortrait: React.FC<TokenPortraitProps> = ({
           color: '#fff7e0',
         }}
       >
-        {resolved ? (
+        {resolved && !imgFailed ? (
           <img
             src={resolved}
             alt={name}
             draggable={false}
+            onError={() => setImgFailed(true)}
             onDragStart={(e) => e.preventDefault()}
             className={`w-full h-full object-cover pointer-events-none select-none ${isDead ? 'grayscale sepia-[0.35] brightness-75' : ''}`}
           />

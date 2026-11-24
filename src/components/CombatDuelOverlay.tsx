@@ -1,7 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { Dices, Flame, Heart, Shield, Sparkles, Swords, X } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
-import { formatFormulaForDisplay, getMonsterWoundStatus } from '../shared/rulesEngine';
+import {
+  formatFormulaForDisplay,
+  getHeroInspirationPoints,
+  getMonsterWoundStatus,
+} from '../shared/rulesEngine';
 import { OrnateDivider, OrnateFrame, OrnateHeaderBanner, SculptedHealthBar } from './OrnateFrame';
 import { PolyhedronShape } from './PolyhedralDiceOverlay';
 import { TokenPortrait } from './TokenPortrait';
@@ -14,9 +18,11 @@ export const CombatDuelOverlay: React.FC = () => {
     activeDuel,
     rollDuelAttack,
     rollDuelDamage,
+    rerollDuelAttackWithInspiration,
     triggerDuelShieldReaction,
     advanceDuelPhase,
     dismissDuel,
+    cinematicEnabled,
   } = useCampaign();
   const [tickNums, setTickNums] = useState<number[]>([20, 20, 8, 6]);
 
@@ -52,17 +58,32 @@ export const CombatDuelOverlay: React.FC = () => {
   const isDamageRolling = activeDuel.phase === 'rolling-damage';
   const isDamageResult = activeDuel.phase === 'damage-result';
 
-  const canRollDuel =
-    role === 'gm' ||
-    (activeDuel.attackerCharacterId
-      ? myCharacter?.id === activeDuel.attackerCharacterId
-      : myCharacter?.name === activeDuel.attackerName);
-
   // Read live HP of defender so bar drops visually in real time when damage is applied!
   const activeMap = campaign.maps.find((m) => m.id === campaign.activeMapId);
   const liveDefenderToken = activeMap?.tokens.find(
     (t) => t.id === activeDuel.defenderTokenId
   );
+  const liveAttackerToken = activeDuel.attackerTokenId
+    ? activeMap?.tokens.find((t) => t.id === activeDuel.attackerTokenId)
+    : !activeDuel.attackerCharacterId
+      ? activeMap?.tokens.find((t) => t.name === activeDuel.attackerName && t.type !== 'character')
+      : undefined;
+
+  const isOwnedSummonAttacker = Boolean(
+    myCharacter &&
+      liveAttackerToken &&
+      liveAttackerToken.controlledByCharacterId === myCharacter.id
+  );
+  const canRollDuel =
+    role === 'gm' ||
+    isOwnedSummonAttacker ||
+    (activeDuel.attackerCharacterId
+      ? myCharacter?.id === activeDuel.attackerCharacterId
+      : myCharacter?.name === activeDuel.attackerName);
+  const displayAttackerName =
+    role !== 'gm' && liveAttackerToken?.hideNameFromPlayers ? '???' : activeDuel.attackerName;
+  const displayDefenderName =
+    role !== 'gm' && liveDefenderToken?.hideNameFromPlayers ? '???' : activeDuel.defenderName;
   const currentDefenderHp = liveDefenderToken ? liveDefenderToken.hp : activeDuel.defenderHpBefore;
   const isHeal = activeDuel.damageType?.toLowerCase() === 'cura';
   const isDefenderMonster =
@@ -85,7 +106,7 @@ export const CombatDuelOverlay: React.FC = () => {
       <OrnateFrame
         accentColor={activeDuel.isCrit ? '#facc15' : activeDuel.attackerColor}
         className={`rpg-glass-panel rounded-lg max-w-3xl w-full p-6 space-y-5 ${
-          isAttackResult && activeDuel.isCrit
+          cinematicEnabled && isAttackResult && activeDuel.isCrit
             ? 'animate-crit-shake animate-critical-nova'
             : 'animate-modal-unfurl'
         }`}
@@ -148,14 +169,18 @@ export const CombatDuelOverlay: React.FC = () => {
             }`}
           >
             <TokenPortrait
-              name={activeDuel.attackerName}
+              name={displayAttackerName}
               imageUrl={activeDuel.attackerImageUrl}
               playerColor={activeDuel.attackerColor}
               frameStyle={activeDuel.attackerFrame || 'gold'}
               sizePx={74}
             />
-            <div className="font-display font-bold text-sm" style={{ color: activeDuel.attackerColor }}>
-              {activeDuel.attackerName}
+            <div className="font-display font-bold text-sm text-amber-100 flex items-center justify-center gap-1.5">
+              <span
+                className="w-2.5 h-2.5 rounded-full shrink-0 border border-white/30"
+                style={{ backgroundColor: activeDuel.attackerColor || '#e0b84c' }}
+              />
+              <span className="truncate max-w-[180px]">{displayAttackerName}</span>
             </div>
             <span className="rpg-socket text-[10px] font-display uppercase tracking-widest px-2.5 py-0.5 rounded-xs text-amber-200/85">
               Atacante
@@ -242,14 +267,14 @@ export const CombatDuelOverlay: React.FC = () => {
           {/* Defender + Live Ghost-Drain HP Bar */}
           <div className="md:col-span-4 rpg-card rounded-lg p-4 flex flex-col items-center text-center gap-2">
             <TokenPortrait
-              name={activeDuel.defenderName}
+              name={displayDefenderName}
               imageUrl={activeDuel.defenderImageUrl}
               playerColor={activeDuel.defenderColor}
               frameStyle={activeDuel.defenderFrame || 'crimson'}
               sizePx={74}
               isDead={currentDefenderHp <= 0}
             />
-            <div className="font-display font-bold text-sm">{activeDuel.defenderName}</div>
+            <div className="font-display font-bold text-sm">{displayDefenderName}</div>
             <div className="w-full space-y-1.5">
               {hideEnemyAc ? (
                 (() => {
@@ -429,7 +454,25 @@ export const CombatDuelOverlay: React.FC = () => {
                         BLOQUEADO PELA DEFESA (CA {displayedAc})!
                       </div>
                       {canRollDuel ? (
-                        <div>
+                        <div className="flex flex-wrap items-center justify-center gap-2">
+                          {(() => {
+                            const atkHero = activeDuel.attackerCharacterId
+                              ? campaign.characters.find((c) => c.id === activeDuel.attackerCharacterId)
+                              : undefined;
+                            const inspPts = getHeroInspirationPoints(atkHero);
+                            if (!atkHero || inspPts <= 0) return null;
+                            return (
+                              <button
+                                type="button"
+                                onClick={rerollDuelAttackWithInspiration}
+                                className="px-4 py-2 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer bg-amber-950/90 hover:bg-amber-900 border border-amber-400 text-amber-200 shadow-[0_0_16px_rgba(251,191,36,0.4)]"
+                                title="Gastar 1 Ponto de Inspiração Heroica para re-rolar este d20 agora!"
+                              >
+                                <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                                <span>★ Re-rolar d20 (Inspiração {inspPts}/3)</span>
+                              </button>
+                            );
+                          })()}
                           <button
                             onClick={dismissDuel}
                             className="rpg-card px-5 py-2 rounded-md text-xs font-display font-semibold cursor-pointer hover:border-amber-400"

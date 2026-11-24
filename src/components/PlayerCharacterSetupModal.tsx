@@ -119,7 +119,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
   const [trainedSkillIds, setTrainedSkillIds] = useState<string[]>([]);
 
   const pointsSpent = campaign.compendium.attributes.reduce(
-    (sum, a) => sum + Math.max(0, (attributes[a.id] ?? 10) - 10),
+    (sum, a) => sum + ((attributes[a.id] ?? 10) - 10),
     0
   );
   const pointsRemaining = Math.max(0, attrBudget - pointsSpent);
@@ -134,10 +134,10 @@ export const PlayerCharacterSetupModal: React.FC = () => {
   const adjustAttr = (attrId: string, delta: 1 | -1) => {
     const current = attributes[attrId] ?? 10;
     if (delta > 0) {
-      if (pointsRemaining <= 0 || current >= 18) return;
+      if (pointsRemaining <= 0 || current >= 20) return;
       setAttributes((prev) => ({ ...prev, [attrId]: current + 1 }));
     } else {
-      if (current <= 10) return;
+      if (current <= 0) return;
       setAttributes((prev) => ({ ...prev, [attrId]: current - 1 }));
     }
   };
@@ -628,7 +628,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
               <div className="rpg-card rounded-xl p-3 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-display font-bold text-xs">
-                    Distribuição de Atributos (Base 10 + Bônus Racial)
+                    Distribuição de Atributos (Base 10 • Faixa 0 a 20 + Bônus Racial)
                   </span>
                   <span
                     className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
@@ -663,7 +663,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => adjustAttr(a.id, -1)}
-                            disabled={baseVal <= 10}
+                            disabled={baseVal <= 0}
                             className="w-5 h-5 rounded bg-black/40 flex items-center justify-center cursor-pointer disabled:opacity-30"
                           >
                             <Minus className="w-3 h-3" />
@@ -672,7 +672,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => adjustAttr(a.id, 1)}
-                            disabled={pointsRemaining <= 0 || baseVal >= 18}
+                            disabled={pointsRemaining <= 0 || baseVal >= 20}
                             className="w-5 h-5 rounded bg-amber-500/25 text-amber-300 flex items-center justify-center cursor-pointer disabled:opacity-30"
                           >
                             <Plus className="w-3 h-3" />

@@ -26,28 +26,10 @@ interface DiaryModalProps {
 
 export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' }) => {
   const { campaign, role, updateCampaign } = useCampaign();
-  const [tab, setTab] = useState<'quests' | 'npcs' | 'treasury'>(
-    mode === 'npcs' ? 'npcs' : 'quests'
+  const [tab, setTab] = useState<'npcs' | 'treasury'>(
+    mode === 'npcs' ? 'npcs' : 'treasury'
   );
-  const activeTab = mode === 'npcs' ? 'npcs' : tab === 'npcs' ? 'quests' : tab;
-
-  const addQuest = async () => {
-    const title = await openTextPrompt(
-      'Título da Missão / Objetivo:',
-      'Investigar a Torre Abandonada'
-    );
-    if (!title) return;
-    const q: Quest = {
-      id: `quest-${Date.now()}`,
-      title,
-      category: 'Principal',
-      status: 'Ativa',
-      description: 'Descreva o objetivo combinado com o grupo.',
-      reward: 'A definir',
-      giverName: 'Desconhecido',
-    };
-    updateCampaign((p) => ({ ...p, quests: [q, ...p.quests] }));
-  };
+  const activeTab = mode === 'npcs' ? 'npcs' : tab;
 
   const addNpc = async () => {
     const name = await openTextPrompt('Nome do NPC:', 'Novo Personagem');
@@ -212,7 +194,7 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
               <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
                 {mode === 'npcs'
                   ? 'Crie aliados, mercadores e figurantes com foto, história e combate opcional (separado do Bestiário).'
-                  : 'Missões ativas e tesouro coletivo do grupo.'}
+                  : 'Tesouro coletivo e estoque compartilhado do grupo (Missões ficam no botão "Missões" do Menu).'}
               </p>
             </div>
           </div>
@@ -225,19 +207,8 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
         {mode !== 'npcs' && (
           <div className="px-4 py-2 border-b flex items-center gap-2 shrink-0" style={{ borderColor: 'var(--border-subtle)' }}>
             <button
-              onClick={() => setTab('quests')}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
-                activeTab === 'quests' ? 'rpg-btn-primary' : 'rpg-card'
-              }`}
-            >
-              <ScrollText className="w-4 h-4" />
-              <span>Mural de Missões ({campaign.quests.length})</span>
-            </button>
-            <button
               onClick={() => setTab('treasury')}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer ${
-                activeTab === 'treasury' ? 'rpg-btn-primary' : 'rpg-card'
-              }`}
+              className="px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer rpg-btn-primary"
             >
               <Coins className="w-4 h-4" />
               <span>Tesouro do Grupo ({campaign.groupTreasury.gold} PO)</span>
@@ -247,96 +218,6 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 min-h-0">
-          {activeTab === 'quests' && (
-            <div className="space-y-3 text-xs">
-              <div className="flex justify-end">
-                <button
-                  onClick={addQuest}
-                  className="rpg-btn-primary px-3 py-1.5 rounded flex items-center gap-1 cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" /> Nova Missão
-                </button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {campaign.quests.map((q) => (
-                  <div key={q.id} className="rpg-card rounded-xl p-3.5 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <input
-                        value={q.title}
-                        onChange={(e) =>
-                          updateCampaign((p) => ({
-                            ...p,
-                            quests: p.quests.map((x) =>
-                              x.id === q.id ? { ...x, title: e.target.value } : x
-                            ),
-                          }))
-                        }
-                        className="rpg-input font-display font-bold text-sm flex-1"
-                      />
-                      <select
-                        value={q.status}
-                        onChange={(e) =>
-                          updateCampaign((p) => ({
-                            ...p,
-                            quests: p.quests.map((x) =>
-                              x.id === q.id ? { ...x, status: e.target.value as Quest['status'] } : x
-                            ),
-                          }))
-                        }
-                        className="rpg-input text-xs py-1"
-                      >
-                        <option value="Ativa">Ativa</option>
-                        <option value="Concluída">Concluída</option>
-                        <option value="Falhou">Falhou</option>
-                      </select>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input
-                        value={q.giverName}
-                        onChange={(e) =>
-                          updateCampaign((p) => ({
-                            ...p,
-                            quests: p.quests.map((x) =>
-                              x.id === q.id ? { ...x, giverName: e.target.value } : x
-                            ),
-                          }))
-                        }
-                        placeholder="Contratante"
-                        className="rpg-input"
-                      />
-                      <input
-                        value={q.reward}
-                        onChange={(e) =>
-                          updateCampaign((p) => ({
-                            ...p,
-                            quests: p.quests.map((x) =>
-                              x.id === q.id ? { ...x, reward: e.target.value } : x
-                            ),
-                          }))
-                        }
-                        placeholder="Recompensa"
-                        className="rpg-input"
-                      />
-                    </div>
-                    <textarea
-                      rows={2}
-                      value={q.description}
-                      onChange={(e) =>
-                        updateCampaign((p) => ({
-                          ...p,
-                          quests: p.quests.map((x) =>
-                            x.id === q.id ? { ...x, description: e.target.value } : x
-                          ),
-                        }))
-                      }
-                      className="rpg-input w-full"
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
           {activeTab === 'npcs' && (
             <div className="space-y-3 text-xs">
               <div className="flex items-center justify-between gap-2 flex-wrap">

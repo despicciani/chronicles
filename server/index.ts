@@ -1079,6 +1079,7 @@ io.on('connection', (socket) => {
             ...(foundToken?.activeConditionIds || []),
             ...(targetChar?.activeConditionIds || []),
           ],
+          compendiumConditions: campaignState.compendium.conditions,
         });
         effectiveAmount = res.finalAmount;
         affinityNote = res.modifierLabel;
@@ -1098,33 +1099,104 @@ io.on('connection', (socket) => {
       }
 
       const delta = isHeal ? effectiveAmount : -hpDamageAfterTemp;
+      let triggeredBossPhaseLog: { name: string; phase: number; title?: string; color?: string } | null = null;
 
-      const updatedMaps = campaignState.maps.map((m) => ({
-        ...m,
-        tokens: m.tokens.map((t) => {
+      const updatedMaps = campaignState.maps.map((m) => {
+        const autoLootMarkers: typeof m.gmMarkers = [];
+        const nextTokens = m.tokens.map((t) => {
           if (t.id !== targetTokenId) return t;
           matchedRefId = t.referenceId;
           targetName = t.name;
           const nextHp = Math.max(0, Math.min(t.maxHp, t.hp + delta));
-          const phase2Pct = t.bossPhase2HpPct ?? 50;
-          const shouldEnterPhase2 =
-            Boolean(t.isBoss) &&
-            (t.bossPhase || 1) < 2 &&
-            t.maxHp > 0 &&
-            nextHp > 0 &&
-            (nextHp / t.maxHp) * 100 <= phase2Pct;
+          let nextPhase = t.bossPhase || 1;
+          let nextPhaseTitle = t.bossPhase2Title;
+          let nextTriggeredIds = t.triggeredBossPhaseIds ? [...t.triggeredBossPhaseIds] : [];
+          let restoreLegActions = false;
+
+          if (t.isBoss && t.maxHp > 0 && nextHp > 0) {
+            const hpPct = (nextHp / t.maxHp) * 100;
+            if (t.bossPhases && t.bossPhases.length > 0) {
+              // Unlimited optional boss phases sorted from highest threshold to lowest
+              const sorted = [...t.bossPhases].sort((a, b) => b.hpThresholdPct - a.hpThresholdPct);
+              sorted.forEach((ph, idx) => {
+                if (hpPct <= ph.hpThresholdPct && !nextTriggeredIds.includes(ph.id)) {
+                  nextTriggeredIds.push(ph.id);
+                  nextPhase = Math.max(nextPhase, idx + 2);
+                  nextPhaseTitle = ph.title;
+                  if (ph.restoreLegendaryActions) restoreLegActions = true;
+                }
+              });
+            } else if (t.bossPhase2Title && (t.bossPhase || 1) < 2) {
+              const phase2Pct = t.bossPhase2HpPct ?? 50;
+              if (hpPct <= phase2Pct) {
+                nextPhase = 2;
+                restoreLegActions = true;
+              }
+            }
+          }
+          if (nextPhase !== (t.bossPhase || 1)) {
+            triggeredBossPhaseLog = {
+              name: t.name,
+              phase: nextPhase,
+              title: nextPhaseTitle,
+              color: t.color,
+            };
+          }
+
+          let droppedNow = false;
+          if (
+            t.type === 'monster' &&
+            t.hp > 0 &&
+            nextHp === 0 &&
+            !t.lootDropped &&
+            targetMonster &&
+            ((targetMonster.lootGoldFormula && targetMonster.lootGoldFormula.trim()) ||
+              (targetMonster.lootItems && targetMonster.lootItems.length > 0))
+          ) {
+            droppedNow = true;
+            const goldRolled = targetMonster.lootGoldFormula?.trim()
+              ? Math.max(0, evaluateFormula(targetMonster.lootGoldFormula.trim()).total)
+              : 0;
+            autoLootMarkers.push({
+              id: `loot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              x: t.x,
+              y: t.y,
+              kind: 'chest',
+              title: `Espólio: ${t.name}`,
+              description: `Itens e moedas deixados por ${t.name}.`,
+              revealed: true,
+              lootGold: goldRolled > 0 ? goldRolled : undefined,
+              lootItems: targetMonster.lootItems?.map((li) => ({ ...li })),
+            });
+          }
+
           return {
             ...t,
             hp: nextHp,
-            ...(shouldEnterPhase2
+            ...(droppedNow ? { lootDropped: true } : {}),
+            ...(nextPhase !== (t.bossPhase || 1)
               ? {
-                  bossPhase: 2,
-                  legendaryActionsRemaining: t.legendaryActionsMax ?? t.legendaryActionsRemaining,
+                  bossPhase: nextPhase,
+                  bossPhase2Title: nextPhaseTitle,
+                  triggeredBossPhaseIds: nextTriggeredIds,
+                  ...(restoreLegActions
+                    ? {
+                        legendaryActionsRemaining:
+                          t.legendaryActionsMax ?? t.legendaryActionsRemaining,
+                      }
+                    : {}),
                 }
               : {}),
           };
-        }),
-      }));
+        });
+        return {
+          ...m,
+          tokens: nextTokens,
+          ...(autoLootMarkers.length > 0
+            ? { gmMarkers: [...(m.gmMarkers || []), ...autoLootMarkers] }
+            : {}),
+        };
+      });
 
       const updatedChars = campaignState.characters.map((c) => {
         if (c.id !== matchedRefId && c.id !== targetTokenId) return c;
@@ -1132,7 +1204,7 @@ io.on('connection', (socket) => {
         const wasDown = c.hp <= 0;
         const charMaxHp = Math.max(
           1,
-          foundToken?.maxHp || c.maxHpOverride || computeCharacterStats(c, campaignState).maxHp
+          computeCharacterStats(c, campaignState).maxHp
         );
         const nextTempHp = Math.max(0, (c.tempHp || 0) - tempHpAbsorbed);
         const nextHp = Math.max(0, Math.min(charMaxHp, c.hp + delta));
@@ -1180,6 +1252,13 @@ io.on('connection', (socket) => {
         return { ...cb, hp: nextHp, effects: nextEffects };
       });
 
+      const bossPhaseInfo = triggeredBossPhaseLog as {
+        name: string;
+        phase: number;
+        title?: string;
+        color?: string;
+      } | null;
+
       const updatedBoss =
         campaignState.activeBoss && campaignState.activeBoss.id === targetTokenId
           ? {
@@ -1188,6 +1267,9 @@ io.on('connection', (socket) => {
                 0,
                 Math.min(campaignState.activeBoss.maxHp, campaignState.activeBoss.hp + delta)
               ),
+              ...(bossPhaseInfo?.title
+                ? { title: `Fase ${bossPhaseInfo.phase} • ${bossPhaseInfo.title}` }
+                : {}),
             }
           : campaignState.activeBoss;
 
@@ -1245,6 +1327,16 @@ io.on('connection', (socket) => {
           actorColor: targetChar?.playerColor || foundToken?.color,
           summary: actorKindForLog === 'hero' ? 'caiu inconsciente (0 PV)!' : 'foi derrotado (0 PV)!',
         });
+      } else if (bossPhaseInfo) {
+        newBg3Logs.push({
+          id: `clog-phase-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          timestamp: nowIsoLog,
+          category: 'damage',
+          actorName: bossPhaseInfo.name,
+          actorKind: 'monster',
+          actorColor: bossPhaseInfo.color || '#dc2626',
+          summary: `entrou na 👑 Fase ${bossPhaseInfo.phase}${bossPhaseInfo.title ? `: ${bossPhaseInfo.title}` : ''}!`,
+        });
       } else if (isHeal && prevHpForLog <= 0 && nextHpForLog > 0) {
         newBg3Logs.push({
           id: `clog-rev-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
@@ -1277,7 +1369,8 @@ io.on('connection', (socket) => {
           )
         : updatedChars;
 
-      campaignState = {
+      const prevCampaignSnapshot = campaignState;
+      const nextRawState = {
         ...campaignState,
         maps: finalMaps,
         characters: finalChars,
@@ -1289,6 +1382,9 @@ io.on('connection', (socket) => {
         rollLog: [sysLog, ...updatedRollLog].slice(0, 120),
         combatLog: [...(campaignState.combatLog || []).slice(-(120 - newBg3Logs.length)), ...newBg3Logs],
       };
+      campaignState = applyConditionId
+        ? syncCampaignDerivedCharacterStats(nextRawState, prevCampaignSnapshot)
+        : nextRawState;
 
       await persistState();
       io.emit('floating:vfx', {
@@ -1983,6 +2079,13 @@ io.on('connection', (socket) => {
   socket.on('handout:show', (handout: HandoutPayload) => {
     io.emit('handout:received', handout);
   });
+
+  socket.on(
+    'camera:focus',
+    (payload: { id: string; mapId: string; x: number; y: number; label?: string }) => {
+      io.emit('camera:focus', payload);
+    }
+  );
 
   socket.on(
     'sound:trigger',
