@@ -13,8 +13,7 @@ import {
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import { QuestEntry } from '../shared/types';
-import { soundEngine } from '../utils/soundEngine';
-import { OrnateFrame } from './OrnateFrame';
+import { GrimoireModal } from './GrimoireModal';
 import { openConfirmDialog } from './PromptDialog';
 
 interface QuestLogModalProps {
@@ -132,7 +131,6 @@ export const QuestLogModal: React.FC<QuestLogModalProps> = ({ onClose }) => {
     }
 
     triggerSound({ action: 'sfx', presetKey: gold > 0 ? 'coin' : 'levelup', name: quest.title });
-    soundEngine.playSfxPreset('levelup');
     pushCombatLog({
       category: 'xp',
       actorName: 'Crônica',
@@ -156,87 +154,53 @@ export const QuestLogModal: React.FC<QuestLogModalProps> = ({ onClose }) => {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
-      onClick={onClose}
+    <GrimoireModal
+      title="Quadro de Missões"
+      subtitle="Objetivos ativos da campanha, contratos e recompensas do grupo"
+      icon={<Compass className="w-4 h-4" />}
+      onClose={onClose}
+      size="xl"
+      bodyClassName="flex flex-col overflow-hidden"
+      headerActions={
+        role === 'gm' ? (
+          <button
+            type="button"
+            onClick={handleCreateQuest}
+            className="rpg-btn-primary px-3 py-1.5 rounded text-xs flex items-center gap-1.5 cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Nova Missão</span>
+          </button>
+        ) : undefined
+      }
     >
+      {/* Status Tabs */}
       <div
-        className="max-w-4xl w-full max-h-[86vh] flex flex-col animate-modal-unfurl"
-        onClick={(e) => e.stopPropagation()}
+        className="px-4 py-2 border-b flex items-center gap-1.5 shrink-0 bg-[#0d0f16]"
+        style={{ borderColor: 'var(--border-hairline)' }}
       >
-        <OrnateFrame
-          accentColor="#d4aa48"
-          cornerSize={18}
-          className="rpg-glass-panel rounded-xl flex flex-col max-h-[86vh] overflow-hidden shadow-[0_24px_70px_rgba(0,0,0,0.92)]"
-        >
-          {/* Header */}
-          <div
-            className="px-5 py-3.5 border-b flex items-center justify-between gap-3 shrink-0"
-            style={{ borderColor: 'var(--border-subtle)' }}
+        {(
+          [
+            { id: 'active', label: `Ativas (${activeCount})` },
+            { id: 'completed', label: `Concluídas (${completedCount})` },
+            { id: 'failed', label: `Falhas (${failedCount})` },
+          ] as const
+        ).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTab(t.id)}
+            className={`px-3 py-1 rounded text-xs font-display font-semibold transition cursor-pointer ${
+              tab === t.id ? 'rpg-btn-primary' : 'rpg-btn-ghost'
+            }`}
           >
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-lg flex items-center justify-center rpg-ornate-border bg-black/50">
-                <Compass className="w-5 h-5 text-amber-400" />
-              </div>
-              <div>
-                <h2 className="font-chronicle font-black text-base tracking-[0.14em] uppercase chronicle-gold-text">
-                  Quadro de Missões
-                </h2>
-                <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                  Objetivos ativos da campanha, contratos e recompensas do grupo
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {role === 'gm' && (
-                <button
-                  type="button"
-                  onClick={handleCreateQuest}
-                  className="rpg-btn-primary px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Nova Missão</span>
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onClose}
-                className="rpg-card p-1.5 rounded-md hover:border-amber-400 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
+            {t.label}
+          </button>
+        ))}
+      </div>
 
-          {/* Status Tabs */}
-          <div
-            className="px-5 py-2 border-b flex items-center gap-2 shrink-0"
-            style={{ borderColor: 'var(--border-subtle)' }}
-          >
-            {(
-              [
-                { id: 'active', label: `Ativas (${activeCount})` },
-                { id: 'completed', label: `Concluídas (${completedCount})` },
-                { id: 'failed', label: `Falhas (${failedCount})` },
-              ] as const
-            ).map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setTab(t.id)}
-                className={`px-3 py-1 rounded-md text-xs font-display font-bold transition cursor-pointer ${
-                  tab === t.id
-                    ? 'rpg-btn-primary'
-                    : 'rpg-card opacity-75 hover:opacity-100 hover:border-amber-400/50'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Body: Left Quest List + Right Quest Details */}
-          <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[260px_1fr] overflow-hidden">
+      {/* Body: Left Quest List + Right Quest Details */}
+      <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[260px_1fr] overflow-hidden">
             {/* Quest List */}
             <div
               className="border-r overflow-y-auto p-3 space-y-2"
@@ -348,11 +312,11 @@ export const QuestLogModal: React.FC<QuestLogModalProps> = ({ onClose }) => {
                         <span
                           className="text-[10px] font-display font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
                           style={{
-                            borderColor: `${CATEGORY_LABELS[selected.category].color}66`,
-                            color: CATEGORY_LABELS[selected.category].color,
+                            borderColor: `${(CATEGORY_LABELS[selected.category] || CATEGORY_LABELS.principal).color}66`,
+                            color: (CATEGORY_LABELS[selected.category] || CATEGORY_LABELS.principal).color,
                           }}
                         >
-                          {CATEGORY_LABELS[selected.category].label}
+                          {(CATEGORY_LABELS[selected.category] || CATEGORY_LABELS.principal).label}
                         </span>
                       </div>
                     )}
@@ -583,8 +547,6 @@ export const QuestLogModal: React.FC<QuestLogModalProps> = ({ onClose }) => {
               )}
             </div>
           </div>
-        </OrnateFrame>
-      </div>
-    </div>
+    </GrimoireModal>
   );
 };

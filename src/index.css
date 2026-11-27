@@ -1,48 +1,63 @@
 @import "tailwindcss";
 
+/* ============================================================================
+   CHRONICLES — AAA DARK-FANTASY MATERIAL SYSTEM (Obsidian & Aged Brass)
+   Restrained palette: Matte Obsidian • Burnished Brass • Warm Ivory • Crimson
+   ============================================================================ */
 :root,
 [data-theme="dark-fantasy"] {
-  --bg-app: #06070c;
-  --bg-panel: #10121b;
-  --bg-card: #171a26;
-  --bg-card-hover: #212536;
-  --bg-input: #0a0c13;
-  --border-subtle: rgba(197, 155, 56, 0.22);
-  --border-ornate: #d4aa48;
-  --text-primary: #f6eedc;
-  --text-secondary: #bfb59f;
-  --text-muted: #7c7566;
-  --accent-primary: #e4ba52;
-  --accent-primary-hover: #f7d479;
-  --accent-crimson: #9f2225;
-  --accent-crimson-hover: #c52e32;
-  --accent-arcane: #3b82f6;
-  --accent-success: #22c55e;
-  --shadow-panel: 0 22px 60px rgba(0, 0, 0, 0.85);
-  --canvas-bg: #08090f;
-  --grid-line: rgba(228, 186, 82, 0.13);
+  --bg-app: #08090d;
+  --bg-well: #0b0d13;
+  --bg-panel: #11131b;
+  --bg-card: #161923;
+  --bg-card-hover: #1d212e;
+  --bg-input: #0a0c11;
+
+  --border-hairline: rgba(206, 172, 102, 0.14);
+  --border-subtle: rgba(206, 172, 102, 0.24);
+  --border-ornate: #b89146;
+  --border-brass-bright: #d8b56c;
+
+  --text-primary: #ece4d5;
+  --text-secondary: #a69b88;
+  --text-muted: #6c6457;
+
+  --accent-primary: #d4ad5c;
+  --accent-primary-hover: #e7c67b;
+  --accent-crimson: #9e2427;
+  --accent-crimson-hover: #bd2d31;
+  --accent-arcane: #3b72a8;
+  --accent-success: #2f8556;
+
+  --shadow-panel: 0 20px 52px rgba(0, 0, 0, 0.88);
+  --shadow-floating: 0 12px 32px rgba(0, 0, 0, 0.82);
+  --canvas-bg: #07080c;
+  --grid-line: rgba(212, 173, 92, 0.11);
+  --font-ui: 'Philosopher', Georgia, serif;
 }
 
-[data-theme="bright-fantasy"] {
-  --bg-app: #e7dbc1;
-  --bg-panel: #f7efdc;
-  --bg-card: #fcf6e8;
-  --bg-card-hover: #efe1c4;
-  --bg-input: #fffdf7;
-  --border-subtle: rgba(139, 90, 43, 0.28);
-  --border-ornate: #8c5a24;
-  --text-primary: #25190d;
-  --text-secondary: #5a452d;
-  --text-muted: #8a7254;
-  --accent-primary: #8f5c22;
-  --accent-primary-hover: #6e4414;
-  --accent-crimson: #8f1d21;
-  --accent-crimson-hover: #b32429;
-  --accent-arcane: #1d4ed8;
-  --accent-success: #15803d;
-  --shadow-panel: 0 18px 42px rgba(68, 48, 22, 0.22);
-  --canvas-bg: #dfd0b0;
-  --grid-line: rgba(110, 68, 29, 0.18);
+[data-ui-font="philosopher"] {
+  --font-ui: 'Philosopher', Georgia, serif;
+}
+
+[data-ui-font="marcellus"] {
+  --font-ui: 'Marcellus', Georgia, serif;
+}
+
+[data-ui-font="spectral"] {
+  --font-ui: 'Spectral', Georgia, serif;
+}
+
+[data-ui-font="eb-garamond"] {
+  --font-ui: 'EB Garamond', Georgia, serif;
+}
+
+[data-ui-font="lora"] {
+  --font-ui: 'Lora', Georgia, serif;
+}
+
+[data-ui-font="jakarta"] {
+  --font-ui: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
 }
 
 * {
@@ -51,18 +66,33 @@
 
 body {
   margin: 0;
-  background: radial-gradient(circle at 50% 15%, rgba(212, 170, 72, 0.08), transparent 60%), var(--bg-app);
+  background-color: var(--bg-app);
   color: var(--text-primary);
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
-  transition: background-color 0.3s ease, color 0.3s ease;
+  user-select: none;
 }
 
+input,
+textarea,
+[contenteditable="true"] {
+  user-select: text;
+}
+
+/* Typography Roles */
 .font-chronicle {
   font-family: 'Cinzel Decorative', 'Cinzel', Georgia, serif;
 }
 
+/* Live-selectable UI font for buttons/menus/actions; Cinzel reserved strictly for true headings & large titles */
 .font-display {
+  font-family: var(--font-ui);
+}
+
+:where(h1, h2, h3, h4).font-display,
+.font-display:is(.text-base, .text-lg, .text-xl, .text-2xl, .text-3xl, .text-4xl, .text-5xl, .text-6xl) {
   font-family: 'Cinzel', Georgia, serif;
 }
 
@@ -72,227 +102,301 @@ body {
 
 .font-mono-dice {
   font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Carved Metallic Gold Title (Static brushed brass — no synthetic shimmer loop) */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Engraved Antique Brass Title (Matte metallic sheen, zero neon bloom) */
 .chronicle-gold-text {
-  background: linear-gradient(
-    180deg,
-    #fff4d0 0%,
-    #e9c46a 46%,
-    #b8872c 100%
-  );
+  background: linear-gradient(180deg, #f7e6bd 0%, #d4ae5e 52%, #9a7431 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.72));
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
 }
 
-[data-theme="bright-fantasy"] .chronicle-gold-text {
-  background: linear-gradient(
-    180deg,
-    #8c581c 0%,
-    #5c370d 60%,
-    #3d2207 100%
-  );
-  -webkit-background-clip: text;
-  background-clip: text;
-  filter: drop-shadow(0 1px 3px rgba(90, 56, 15, 0.22));
+/* Subtle procedural stone/obsidian tactile micro-grain */
+.rpg-grain {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 128 128' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.032'/%3E%3C/svg%3E");
 }
 
+/* ============================================================================
+   MATTE OBSIDIAN SURFACES & PLATES (Grounded, Sharp 1px Brass Hairlines)
+   ============================================================================ */
 .rpg-panel {
   background:
-    radial-gradient(120% 80% at 50% 0%, rgba(212, 170, 72, 0.08) 0%, transparent 55%),
-    linear-gradient(180deg, var(--bg-panel) 0%, var(--bg-app) 100%);
-  border: 1px solid rgba(197, 155, 56, 0.28);
+    linear-gradient(180deg, #131620 0%, #0d0f16 100%);
+  border: 1px solid var(--border-subtle);
   box-shadow:
     var(--shadow-panel),
-    inset 0 1px 0 rgba(255, 228, 158, 0.12),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.75);
+    inset 0 1px 0 rgba(240, 214, 158, 0.08),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.85);
+}
+
+.rpg-glass-panel {
+  background:
+    radial-gradient(120% 70% at 50% 0%, rgba(212, 173, 92, 0.065) 0%, transparent 55%),
+    linear-gradient(180deg, rgba(18, 21, 30, 0.96) 0%, rgba(11, 13, 19, 0.98) 100%);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(184, 145, 70, 0.42);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.9),
+    inset 0 1px 0 rgba(244, 219, 165, 0.11),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 
 .rpg-card {
-  background:
-    radial-gradient(110% 85% at 50% 0%, rgba(228, 186, 82, 0.05) 0%, transparent 60%),
-    linear-gradient(170deg, var(--bg-card) 0%, var(--bg-panel) 100%);
-  border: 1px solid var(--border-subtle);
+  background: linear-gradient(180deg, #171a25 0%, #11131c 100%);
+  border: 1px solid var(--border-hairline);
+  color: var(--text-primary);
   box-shadow:
-    inset 0 1px 0 rgba(255, 232, 179, 0.1),
-    inset 0 -2px 8px rgba(0, 0, 0, 0.52),
-    0 6px 16px rgba(0, 0, 0, 0.36);
+    inset 0 1px 0 rgba(255, 236, 194, 0.06),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.65),
+    0 2px 8px rgba(0, 0, 0, 0.38);
+  transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease;
+}
+
+.rpg-card:hover {
+  border-color: rgba(206, 172, 102, 0.34);
 }
 
 .rpg-socket {
-  background: radial-gradient(circle at 50% 35%, #121520 0%, #06070c 100%);
-  border: 1px solid rgba(197, 155, 56, 0.32);
+  background: radial-gradient(circle at 50% 25%, #0f1119 0%, #07080d 100%);
+  border: 1px solid rgba(196, 158, 86, 0.22);
   box-shadow:
-    inset 0 3px 10px rgba(0, 0, 0, 0.95),
-    0 1px 0 rgba(255, 230, 165, 0.12);
-}
-
-[data-theme="bright-fantasy"] .rpg-socket {
-  background: radial-gradient(circle at 50% 35%, #efe3c7 0%, #dec99f 100%);
-  border-color: rgba(140, 90, 36, 0.38);
-  box-shadow:
-    inset 0 2px 6px rgba(80, 50, 18, 0.24),
-    0 1px 0 rgba(255, 255, 255, 0.65);
+    inset 0 2px 8px rgba(0, 0, 0, 0.92),
+    0 1px 0 rgba(255, 232, 180, 0.06);
 }
 
 .rpg-ornate-border {
   border: 1px solid var(--border-ornate);
   box-shadow:
-    0 0 22px rgba(212, 170, 72, 0.16),
-    inset 0 0 18px rgba(212, 170, 72, 0.07);
+    0 0 0 1px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(247, 224, 166, 0.18);
 }
 
-.rpg-glass-panel {
-  background:
-    radial-gradient(120% 90% at 50% 0%, rgba(212, 170, 72, 0.11) 0%, transparent 55%),
-    linear-gradient(180deg, rgba(22, 24, 34, 0.96) 0%, rgba(12, 14, 21, 0.97) 58%, rgba(7, 8, 13, 0.98) 100%);
-  backdrop-filter: blur(14px);
-  border: 1px solid #8c6d2e;
+.rpg-well {
+  background: #090b10;
+  border: 1px solid rgba(206, 172, 102, 0.14);
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.72);
+}
+
+/* Vertical Foundry-style Tool Rail */
+.rpg-rail {
+  background: linear-gradient(180deg, rgba(16, 19, 27, 0.96) 0%, rgba(10, 12, 18, 0.98) 100%);
+  border: 1px solid rgba(184, 145, 70, 0.32);
   box-shadow:
-    0 22px 60px rgba(0, 0, 0, 0.92),
-    inset 0 0 0 1px rgba(255, 226, 150, 0.14),
-    inset 0 2px 16px rgba(0, 0, 0, 0.85);
+    0 14px 36px rgba(0, 0, 0, 0.85),
+    inset 0 1px 0 rgba(244, 219, 165, 0.09);
 }
 
-[data-theme="bright-fantasy"] .rpg-glass-panel {
-  background: linear-gradient(160deg, rgba(252, 246, 232, 0.96), rgba(236, 223, 194, 0.97));
-  border-color: #9c6a32;
-  box-shadow:
-    0 20px 50px rgba(72, 48, 20, 0.28),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.78);
-}
-
+/* Tactile Form Inputs */
 .rpg-input {
   background-color: var(--bg-input);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid rgba(206, 172, 102, 0.2);
   color: var(--text-primary);
-  border-radius: 0.45rem;
+  border-radius: 0.375rem;
   padding: 0.42rem 0.68rem;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   outline: none;
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55);
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.62);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.rpg-input::placeholder {
+  color: var(--text-muted);
+}
+
+.rpg-input:hover {
+  border-color: rgba(206, 172, 102, 0.34);
 }
 
 .rpg-input:focus {
-  border-color: var(--accent-primary);
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55), 0 0 0 2px rgba(228, 186, 82, 0.22);
+  border-color: var(--border-brass-bright);
+  background-color: #0d1018;
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.62),
+    0 0 0 1px rgba(212, 173, 92, 0.32);
 }
 
+select.rpg-input option {
+  background-color: #11131b;
+  color: #ece4d5;
+}
+
+/* Beveled Burnished Brass Primary Button */
 .rpg-btn-primary {
   position: relative;
   overflow: hidden;
-  background: linear-gradient(180deg, #eec96c 0%, #c18f2b 55%, #845d14 100%);
+  background: linear-gradient(180deg, #deb866 0%, #b38632 54%, #825d1d 100%);
   color: #140e04;
-  font-family: 'Cinzel', Georgia, serif;
+  font-family: var(--font-ui);
   font-weight: 700;
-  letter-spacing: 0.03em;
-  border: 1px solid #fbe29dcc;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(247, 224, 166, 0.72);
   box-shadow:
-    0 5px 15px rgba(0, 0, 0, 0.7),
-    inset 0 1px 0 rgba(255, 255, 255, 0.6),
-    inset 0 -2px 0 rgba(65, 42, 6, 0.72);
-  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), filter 0.18s ease, box-shadow 0.18s ease;
+    0 3px 10px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 250, 232, 0.55),
+    inset 0 -2px 0 rgba(62, 40, 8, 0.65);
+  transition: filter 0.14s ease, transform 0.1s ease, box-shadow 0.14s ease;
 }
 
-[data-theme="bright-fantasy"] .rpg-btn-primary {
-  background: linear-gradient(180deg, #a66c28 0%, #7d4c17 100%);
-  color: #fff9ec;
-  border-color: #d4a66a;
-}
-
-.rpg-btn-primary:hover {
+.rpg-btn-primary:hover:not(:disabled) {
   filter: brightness(1.08);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.78), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  box-shadow:
+    0 5px 14px rgba(0, 0, 0, 0.76),
+    inset 0 1px 0 rgba(255, 250, 232, 0.7);
 }
 
-.rpg-btn-primary:active {
+.rpg-btn-primary:active:not(:disabled) {
   transform: translateY(1px);
-  filter: brightness(0.96);
+  filter: brightness(0.95);
 }
 
+.rpg-btn-primary:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* Deep Crimson Combat / Danger Button */
 .rpg-btn-crimson {
   position: relative;
   overflow: hidden;
-  background: linear-gradient(180deg, #c93437 0%, #8f1c20 62%, #590d10 100%);
-  color: #fff5f5;
-  font-family: 'Cinzel', Georgia, serif;
+  background: linear-gradient(180deg, #b82c2f 0%, #851b1e 58%, #570f11 100%);
+  color: #f8ecec;
+  font-family: var(--font-ui);
   font-weight: 700;
-  letter-spacing: 0.03em;
-  border: 1px solid rgba(252, 165, 165, 0.42);
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(239, 134, 134, 0.36);
   box-shadow:
-    0 5px 15px rgba(0, 0, 0, 0.72),
-    inset 0 1px 0 rgba(255, 255, 255, 0.25),
-    inset 0 -2px 0 rgba(50, 5, 8, 0.8);
-  transition: filter 0.14s ease, box-shadow 0.14s ease, transform 0.1s ease;
+    0 3px 10px rgba(0, 0, 0, 0.68),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    inset 0 -2px 0 rgba(48, 6, 8, 0.78);
+  transition: filter 0.14s ease, transform 0.1s ease, box-shadow 0.14s ease;
 }
 
-.rpg-btn-crimson:hover {
+.rpg-btn-crimson:hover:not(:disabled) {
   filter: brightness(1.1);
-  box-shadow: 0 6px 18px rgba(153, 27, 27, 0.55);
+  box-shadow: 0 5px 14px rgba(135, 24, 28, 0.45);
 }
 
-.rpg-btn-crimson:active {
+.rpg-btn-crimson:active:not(:disabled) {
   transform: translateY(1px);
-  filter: brightness(0.96);
+  filter: brightness(0.95);
 }
 
-/* Collectible Fantasy Magic Cards (Grounded hover — no floaty scale bounce) */
+/* Quiet Ghost / Secondary Button */
+.rpg-btn-ghost {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  transition: background-color 0.13s ease, border-color 0.13s ease, color 0.13s ease;
+}
+
+.rpg-btn-ghost:hover:not(:disabled) {
+  background: rgba(212, 173, 92, 0.08);
+  border-color: rgba(206, 172, 102, 0.22);
+  color: var(--text-primary);
+}
+
+/* Keyboard Shortcut Keycap */
+.rpg-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.3rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: #0a0c12;
+  border: 1px solid rgba(206, 172, 102, 0.24);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+}
+
+/* Hotbar Action Tile (BG3-Inspired Carved Obsidian Slot) */
+.rpg-hotbar-slot {
+  position: relative;
+  background:
+    radial-gradient(90% 80% at 50% 0%, rgba(212, 173, 92, 0.08) 0%, transparent 65%),
+    linear-gradient(180deg, #191d29 0%, #0f1119 100%);
+  border: 1px solid rgba(196, 158, 86, 0.26);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 236, 194, 0.08),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.72),
+    0 2px 6px rgba(0, 0, 0, 0.55);
+  transition: border-color 0.12s ease, transform 0.1s ease, filter 0.12s ease, background-color 0.12s ease;
+}
+
+.rpg-hotbar-slot:hover:not(:disabled) {
+  border-color: rgba(216, 181, 108, 0.72);
+  filter: brightness(1.1);
+}
+
+.rpg-hotbar-slot:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.95);
+}
+
+/* Collectible Fantasy Magic Cards (Grounded hover) */
 .rpg-magic-card {
-  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
+  transition: border-color 0.14s ease, background-color 0.14s ease, filter 0.14s ease;
   position: relative;
   overflow: hidden;
 }
 
 .rpg-magic-card:hover {
-  filter: brightness(1.07);
+  filter: brightness(1.06);
 }
 
 .rarity-comum {
-  border: 1px solid rgba(148, 163, 184, 0.45);
-  box-shadow: 0 4px 14px rgba(100, 116, 139, 0.18);
+  border: 1px solid rgba(156, 152, 144, 0.35);
 }
 
 .rarity-raro {
-  border: 1px solid rgba(56, 189, 248, 0.65);
-  box-shadow: 0 4px 18px rgba(56, 189, 248, 0.28), inset 0 0 18px rgba(56, 189, 248, 0.09);
+  border: 1px solid rgba(74, 144, 217, 0.55);
+  box-shadow: inset 0 0 14px rgba(59, 114, 168, 0.1);
 }
 
 .rarity-epico {
-  border: 1px solid rgba(168, 85, 247, 0.72);
-  box-shadow: 0 4px 20px rgba(168, 85, 247, 0.34), inset 0 0 20px rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(149, 97, 206, 0.6);
+  box-shadow: inset 0 0 16px rgba(149, 97, 206, 0.12);
 }
 
 .rarity-lendario {
-  border: 1px solid rgba(245, 158, 11, 0.85);
-  box-shadow: 0 6px 26px rgba(245, 158, 11, 0.44), inset 0 0 24px rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(216, 166, 62, 0.78);
+  box-shadow: inset 0 0 18px rgba(212, 162, 54, 0.15);
 }
 
-/* Static subtle specular highlight for vital gauges (no infinite shimmer strip) */
+/* Subtle specular sheen for vital vials & HP bars */
 .liquid-bar-shine {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, transparent 55%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14) 0%, transparent 55%);
 }
 
-/* Scrollbar styling */
+/* Precision Scrollbars */
 ::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--bg-app);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-subtle);
-  border-radius: 999px;
+  background: rgba(184, 145, 70, 0.24);
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border-ornate);
+  background: rgba(212, 173, 92, 0.52);
 }
 
 /* Weather effects */
@@ -351,7 +455,7 @@ body {
 @keyframes uiEnter {
   from {
     opacity: 0;
-    transform: translateY(5px);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
@@ -360,13 +464,13 @@ body {
 }
 
 .animate-ui-enter {
-  animation: uiEnter 0.14s cubic-bezier(0.2, 0, 0, 1) forwards;
+  animation: uiEnter 0.13s cubic-bezier(0.2, 0, 0, 1) forwards;
 }
 
 @keyframes drawerRightEnter {
   from {
     opacity: 0;
-    transform: translateX(12px);
+    transform: translateX(10px);
   }
   to {
     opacity: 1;
@@ -378,10 +482,25 @@ body {
   animation: drawerRightEnter 0.15s cubic-bezier(0.2, 0, 0, 1) forwards;
 }
 
+@keyframes drawerLeftEnter {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-drawer-left {
+  animation: drawerLeftEnter 0.15s cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
 @keyframes popoverEnter {
   from {
     opacity: 0;
-    transform: translateY(3px) scale(0.975);
+    transform: translateY(3px) scale(0.98);
   }
   to {
     opacity: 1;
@@ -408,10 +527,39 @@ body {
 }
 
 .map-ping-ring {
-  animation: pingPulse 1.2s ease-out infinite;
+  animation: pingPulse 1.15s ease-out 1 forwards;
 }
 
-/* One-shot clean impact ripple (replaces Tailwind infinite animate-ping) */
+@keyframes pingLabelFade {
+  0% { opacity: 0; transform: translate(-50%, -115%) scale(0.92); }
+  14% { opacity: 1; transform: translate(-50%, -135%) scale(1); }
+  75% { opacity: 1; transform: translate(-50%, -142%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -158%) scale(0.96); }
+}
+
+.map-ping-label {
+  animation: pingLabelFade 1.2s ease-out 1 forwards;
+}
+
+@keyframes speechBubbleUnfurl {
+  0% { opacity: 0; transform: translate(-50%, 8px) scale(0.9); }
+  100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+
+.animate-speech-bubble {
+  animation: speechBubbleUnfurl 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes magicInkFade {
+  0% { opacity: 0.96; }
+  78% { opacity: 0.92; }
+  100% { opacity: 0; }
+}
+
+.animate-magic-ink-fade {
+  animation: magicInkFade 8.1s linear 1 forwards;
+}
+
 @keyframes impactRipple {
   0% { transform: scale(0.72); opacity: 0.9; }
   100% { transform: scale(1.55); opacity: 0; }
@@ -421,29 +569,105 @@ body {
   animation: impactRipple 0.42s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* Weighted dice landing settle (ONLY for actual dice faces, never UI panels) */
+/* Weighted 3D-perspective dice landing settle (ONLY for actual dice faces, never UI panels) */
 @keyframes diceLand {
-  0% { transform: translateY(-14px) scale(1.08) rotate(-8deg); opacity: 0.85; }
-  58% { transform: translateY(1px) scale(0.98) rotate(2deg); opacity: 1; }
-  100% { transform: translateY(0) scale(1) rotate(0deg); opacity: 1; }
+  0% {
+    transform: perspective(360px) translateY(-20px) scale(1.12) rotateX(22deg) rotateZ(-10deg);
+    opacity: 0.78;
+  }
+  52% {
+    transform: perspective(360px) translateY(2px) scale(0.96) rotateX(-6deg) rotateZ(2deg);
+    opacity: 1;
+  }
+  78% {
+    transform: perspective(360px) translateY(-1px) scale(1.01) rotateX(2deg) rotateZ(-0.5deg);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(360px) translateY(0) scale(1) rotateX(0deg) rotateZ(0deg);
+    opacity: 1;
+  }
 }
 
 .animate-dice-tumble {
-  animation: diceLand 0.24s cubic-bezier(0.2, 0, 0, 1) forwards;
+  animation: diceLand 0.34s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* Weighted tabletop dice rattle (replaces flat 360deg spinner wheel) */
+/* Smooth 3D weighted tabletop dice tumble (replaces jerky 2D steps rattle) */
 @keyframes diceRattle {
-  0% { transform: translate(0, 0) rotate(-7deg) scale(1.01); }
-  20% { transform: translate(3px, -4px) rotate(11deg) scale(0.97); }
-  40% { transform: translate(-4px, 2px) rotate(-13deg) scale(1.03); }
-  60% { transform: translate(2px, 3px) rotate(8deg) scale(0.98); }
-  80% { transform: translate(-3px, -3px) rotate(-10deg) scale(1.02); }
-  100% { transform: translate(0, 0) rotate(-7deg) scale(1.01); }
+  0% { transform: perspective(360px) translate3d(0, 0, 0) rotateX(0deg) rotateY(0deg) rotateZ(-8deg) scale(1); }
+  25% { transform: perspective(360px) translate3d(4px, -6px, 0) rotateX(26deg) rotateY(-22deg) rotateZ(12deg) scale(0.96); }
+  50% { transform: perspective(360px) translate3d(-5px, 2px, 0) rotateX(-24deg) rotateY(28deg) rotateZ(-14deg) scale(1.04); }
+  75% { transform: perspective(360px) translate3d(3px, 4px, 0) rotateX(18deg) rotateY(20deg) rotateZ(9deg) scale(0.98); }
+  100% { transform: perspective(360px) translate3d(0, 0, 0) rotateX(0deg) rotateY(0deg) rotateZ(-8deg) scale(1); }
 }
 
 .animate-dice-rolling {
-  animation: diceRattle 0.24s steps(5, end) infinite;
+  animation: diceRattle 0.32s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+
+/* Defender physical knockback recoil + crimson rim flash on hit */
+@keyframes defenderRecoil {
+  0% { transform: translateX(0); filter: brightness(1); }
+  22% { transform: translateX(14px) rotate(1.5deg); filter: brightness(1.22); border-color: rgba(214, 87, 91, 0.9); }
+  55% { transform: translateX(-4px) rotate(-0.4deg); filter: brightness(1.05); }
+  100% { transform: translateX(0) rotate(0deg); filter: brightness(1); }
+}
+
+.animate-defender-recoil {
+  animation: defenderRecoil 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Theatrical Turn / Boss / Location Herald Unfurl */
+@keyframes heraldUnfurl {
+  0% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.96);
+    letter-spacing: 0.24em;
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-herald-unfurl {
+  animation: heraldUnfurl 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes heraldRuleExpand {
+  0% { transform: scaleX(0); opacity: 0; }
+  100% { transform: scaleX(1); opacity: 1; }
+}
+
+.animate-herald-rule {
+  transform-origin: center;
+  animation: heraldRuleExpand 0.42s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Natural 20 Crit Ring Burst behind landed polyhedral die */
+@keyframes critRingBurst {
+  0% { transform: scale(0.55) rotate(0deg); opacity: 0.95; }
+  100% { transform: scale(1.65) rotate(24deg); opacity: 0; }
+}
+
+.animate-crit-burst {
+  animation: critRingBurst 0.72s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* One-shot metallic hover sheen on primary burnished brass buttons */
+.rpg-btn-primary::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 20%, rgba(255, 250, 230, 0.26) 48%, transparent 76%);
+  transform: translateX(-115%);
+  transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+
+.rpg-btn-primary:hover:not(:disabled)::after {
+  transform: translateX(115%);
 }
 
 @keyframes critShake {
@@ -524,26 +748,23 @@ body {
 }
 
 @keyframes deathPulse {
-  0%, 100% { box-shadow: 0 0 10px rgba(220, 38, 38, 0.35); }
-  50% { box-shadow: 0 0 18px rgba(220, 38, 38, 0.65); }
+  0%, 100% { box-shadow: 0 0 8px rgba(185, 28, 28, 0.35); }
+  50% { box-shadow: 0 0 16px rgba(185, 28, 28, 0.62); }
 }
 
 .animate-death-pulse {
   animation: deathPulse 2.4s ease-in-out infinite;
 }
 
-/* =========================================================
-   DELAYED GHOST HP BAR & SNAPPY MODAL ENTRY
-   ========================================================= */
 .hp-ghost-bar {
-  background: linear-gradient(90deg, #fde68a 0%, #f59e0b 100%);
+  background: linear-gradient(90deg, #f3d078 0%, #d4942a 100%);
   transition: width 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.14s;
 }
 
 @keyframes modalUnfurl {
   0% {
     opacity: 0;
-    transform: translateY(7px) scale(0.985);
+    transform: translateY(6px) scale(0.988);
   }
   100% {
     opacity: 1;
@@ -552,7 +773,7 @@ body {
 }
 
 .animate-modal-unfurl {
-  animation: modalUnfurl 0.15s cubic-bezier(0.2, 0, 0, 1) forwards;
+  animation: modalUnfurl 0.14s cubic-bezier(0.2, 0, 0, 1) forwards;
 }
 
 @keyframes attackerLunge {
@@ -576,10 +797,10 @@ body {
 
 @keyframes criticalNova {
   0% {
-    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.65), 0 22px 60px rgba(0, 0, 0, 0.9);
+    box-shadow: 0 0 0 0 rgba(216, 176, 86, 0.6), 0 22px 60px rgba(0, 0, 0, 0.9);
   }
   100% {
-    box-shadow: 0 0 0 22px rgba(250, 204, 21, 0), 0 22px 60px rgba(0, 0, 0, 0.9);
+    box-shadow: 0 0 0 20px rgba(216, 176, 86, 0), 0 22px 60px rgba(0, 0, 0, 0.9);
   }
 }
 
@@ -606,9 +827,7 @@ body {
   animation: bannerDrain 2.8s linear forwards;
 }
 
-/* =========================================================
-   AAA DARK-FANTASY TOKEN AURAS & CINEMATIC VIGNETTES
-   ========================================================= */
+/* Token Auras & Cinematic Vignettes */
 @keyframes auraSpinSlow {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
@@ -626,13 +845,13 @@ body {
 
 @keyframes critEdgeFlash {
   0% { opacity: 0; }
-  18% { opacity: 0.85; }
+  18% { opacity: 0.82; }
   100% { opacity: 0; }
 }
 
 @keyframes downedEdgeFlash {
   0% { opacity: 0; }
-  25% { opacity: 0.9; }
+  25% { opacity: 0.88; }
   100% { opacity: 0; }
 }
 
@@ -731,4 +950,198 @@ body {
 
 .animate-turn-banner {
   animation: turnBannerSlide 1.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* ============================================================================
+   AAA ANIME / DARK-FANTASY ULTIMATE CUT-IN, DOMAIN EXPANSION & RP SPOTLIGHT
+   ============================================================================ */
+
+@keyframes cutinBackdropFade {
+  0% { opacity: 0; }
+  10% { opacity: 1; }
+  84% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes cutinBandTear {
+  0% {
+    opacity: 0;
+    transform: translateY(-50%) scaleY(0.06) skewY(-3.5deg);
+    filter: brightness(2.2);
+  }
+  14% {
+    opacity: 1;
+    transform: translateY(-50%) scaleY(1.04) skewY(-3.5deg);
+    filter: brightness(1.25);
+  }
+  22% {
+    transform: translateY(-50%) scaleY(1) skewY(-3.5deg);
+    filter: brightness(1);
+  }
+  84% {
+    opacity: 1;
+    transform: translateY(-50%) scaleY(1) skewY(-3.5deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-50%) scaleY(0.12) skewY(-3.5deg);
+  }
+}
+
+@keyframes cutinPortraitGlide {
+  0% {
+    opacity: 0;
+    transform: translateX(-56px) scale(1.18);
+    filter: contrast(1.25) brightness(1.4);
+  }
+  18% {
+    opacity: 1;
+    transform: translateX(-6px) scale(1.06);
+    filter: contrast(1.08) brightness(1.05);
+  }
+  85% {
+    opacity: 1;
+    transform: translateX(14px) scale(1.01);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(34px) scale(1.04);
+  }
+}
+
+@keyframes cutinTitleSlam {
+  0% {
+    opacity: 0;
+    transform: translateX(52px) scale(1.16);
+    letter-spacing: 0.28em;
+    filter: blur(4px);
+  }
+  20% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+    letter-spacing: 0.08em;
+    filter: blur(0);
+  }
+  85% {
+    opacity: 1;
+    transform: translateX(-6px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-28px) scale(0.96);
+  }
+}
+
+@keyframes cutinSpeedLine {
+  0% { transform: translateX(-35%); opacity: 0.25; }
+  50% { opacity: 0.72; }
+  100% { transform: translateX(35%); opacity: 0.15; }
+}
+
+@keyframes domainVeilUnfurl {
+  0% { opacity: 0; transform: scale(0.88); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes domainRingBreathe {
+  0%, 100% { transform: translate(-50%, -50%) scale(0.96); opacity: 0.34; }
+  50% { transform: translate(-50%, -50%) scale(1.05); opacity: 0.62; }
+}
+
+@keyframes spotlightSlideLeft {
+  0% { opacity: 0; transform: translateX(-36px) scale(0.96); }
+  100% { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+@keyframes spotlightSlideRight {
+  0% { opacity: 0; transform: translateX(36px) scale(0.96); }
+  100% { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+.animate-cutin-backdrop {
+  animation: cutinBackdropFade 2.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-cutin-band {
+  animation: cutinBandTear 2.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-cutin-portrait {
+  animation: cutinPortraitGlide 2.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-cutin-title {
+  animation: cutinTitleSlam 2.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-cutin-speedline {
+  animation: cutinSpeedLine 1.1s linear infinite;
+}
+
+.animate-domain-unfurl {
+  animation: domainVeilUnfurl 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-domain-ring {
+  animation: domainRingBreathe 5.5s ease-in-out infinite;
+}
+
+.animate-spotlight-left {
+  animation: spotlightSlideLeft 0.38s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-spotlight-right {
+  animation: spotlightSlideRight 0.38s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes ultimateArtSlam {
+  0% {
+    opacity: 0;
+    transform: translateX(-64px) scale(1.24);
+  }
+  18% {
+    opacity: 1;
+    transform: translateX(0) scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(14px) scale(1);
+  }
+}
+
+@keyframes ultimateTitleSlam {
+  0% {
+    opacity: 0;
+    transform: translateX(72px) scale(1.18);
+    letter-spacing: 0.28em;
+    filter: blur(6px);
+  }
+  20% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+    letter-spacing: 0.06em;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(-8px) scale(1);
+  }
+}
+
+@keyframes riftCrackFlash {
+  0% { opacity: 0; transform: scale(0.72); }
+  25% { opacity: 1; transform: scale(1.03); }
+  100% { opacity: 0.88; transform: scale(1); }
+}
+
+.animate-ultimate-art-slam {
+  animation: ultimateArtSlam 2.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-ultimate-title-slam {
+  animation: ultimateTitleSlam 2.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-rift-crack {
+  animation: riftCrackFlash 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }

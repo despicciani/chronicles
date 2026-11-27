@@ -1,7 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { CheckCircle2, Dices, Flame, ShieldAlert, Sparkles, X } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
-import { buildPreviewDiceForFormula, RollAdvantageMode } from '../shared/rulesEngine';
+import {
+  buildPreviewDiceForFormula,
+  maskHiddenNameForRole,
+  maskHiddenNamesInText,
+  RollAdvantageMode,
+} from '../shared/rulesEngine';
 import { DiceSkin, RolledDieVisual } from '../shared/types';
 import { OrnateDivider, OrnateFrame } from './OrnateFrame';
 
@@ -56,7 +61,12 @@ export const PolyhedronShape: React.FC<{
   isFumbleDie?: boolean;
   onClick?: () => void;
 }> = ({ die, displayValue, skin, rolling, isCritDie, isFumbleDie, onClick }) => {
-  const palette = SKIN_STYLES[skin] || SKIN_STYLES.gold;
+  const uid = useId().replace(/:/g, '');
+  const basePalette = SKIN_STYLES[skin] || SKIN_STYLES.gold;
+  const palette = {
+    ...basePalette,
+    fill: `url(#${uid}-grad-${SKIN_STYLES[skin] ? skin : 'gold'})`,
+  };
   const strokeColor = isCritDie
     ? '#facc15'
     : isFumbleDie
@@ -222,38 +232,45 @@ export const PolyhedronShape: React.FC<{
           filter: isDiscarded
             ? 'none'
             : `drop-shadow(0 0 ${isCritDie ? '22px' : '12px'} ${
-                isCritDie ? 'rgba(250,204,21,0.95)' : palette.glow
+                isCritDie ? 'rgba(216,181,108,0.92)' : palette.glow
               })`,
         }}
       >
+        {/* Choreographed Crit / Fumble Impact Halo Ring on Landing */}
+        {!rolling && isCritDie && (
+          <div className="absolute inset-0 rounded-full border-2 border-[#f4de9e] pointer-events-none animate-crit-burst" />
+        )}
+        {!rolling && isFumbleDie && (
+          <div className="absolute inset-0 rounded-full border-2 border-[#d6575b] pointer-events-none animate-impact-ripple" />
+        )}
         <svg viewBox="0 0 100 100" className="w-full h-full">
           <defs>
-            <linearGradient id="grad-gold" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id={`${uid}-grad-gold`} x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#92400e" />
               <stop offset="50%" stopColor="#d97706" />
               <stop offset="100%" stopColor="#451a03" />
             </linearGradient>
-            <linearGradient id="grad-fire" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id={`${uid}-grad-fire`} x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#b91c1c" />
               <stop offset="55%" stopColor="#ea580c" />
               <stop offset="100%" stopColor="#431407" />
             </linearGradient>
-            <linearGradient id="grad-ice" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id={`${uid}-grad-ice`} x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#0284c7" />
               <stop offset="55%" stopColor="#0e7490" />
               <stop offset="100%" stopColor="#082f49" />
             </linearGradient>
-            <linearGradient id="grad-emerald" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id={`${uid}-grad-emerald`} x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#059669" />
               <stop offset="55%" stopColor="#047857" />
               <stop offset="100%" stopColor="#022c22" />
             </linearGradient>
-            <linearGradient id="grad-amethyst" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id={`${uid}-grad-amethyst`} x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#7e22ce" />
               <stop offset="55%" stopColor="#6b21a8" />
               <stop offset="100%" stopColor="#2e1065" />
             </linearGradient>
-            <linearGradient id="grad-blood" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id={`${uid}-grad-blood`} x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#991b1b" />
               <stop offset="55%" stopColor="#7f1d1d" />
               <stop offset="100%" stopColor="#1f0707" />
@@ -288,6 +305,9 @@ export const PolyhedronShape: React.FC<{
 
 export const PolyhedralDiceOverlay: React.FC = () => {
   const {
+    campaign,
+    role,
+    activeCutIn,
     latestRollForOverlay,
     dismissRollOverlay,
     pendingManualRoll,
@@ -305,23 +325,25 @@ export const PolyhedralDiceOverlay: React.FC = () => {
   }, [pendingManualRoll]);
 
   useEffect(() => {
-    if (!pendingManualRoll) return;
+    if (!pendingManualRoll || activeCutIn) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         cancelManualRoll();
       } else if (e.key === 'Enter' || e.key === ' ') {
         const tag = (e.target as HTMLElement | null)?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON' || tag === 'A') {
+          return;
+        }
         e.preventDefault();
         executeManualRoll(chosenManualMode);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [pendingManualRoll, chosenManualMode, cancelManualRoll, executeManualRoll]);
+  }, [pendingManualRoll, activeCutIn, chosenManualMode, cancelManualRoll, executeManualRoll]);
 
   useEffect(() => {
-    if (!latestRollForOverlay) return;
+    if (!latestRollForOverlay || activeCutIn) return;
     const dice = latestRollForOverlay.rolledDice || [];
     if (dice.length === 0) return;
 
@@ -344,7 +366,10 @@ export const PolyhedralDiceOverlay: React.FC = () => {
       window.clearTimeout(stopTimer);
       window.clearTimeout(autoClose);
     };
-  }, [latestRollForOverlay, dismissRollOverlay]);
+  }, [latestRollForOverlay, activeCutIn, dismissRollOverlay]);
+
+  // Wait for any active Ultimate Cut-In cinema to finish before unfurling dice trays
+  if (activeCutIn) return null;
 
   // MANUAL CLICK-TO-ROLL TRAY (Local to roller until they click to roll!)
   if (pendingManualRoll) {
@@ -356,8 +381,10 @@ export const PolyhedralDiceOverlay: React.FC = () => {
 
     return (
       <div
+        data-modal-overlay="true"
+        data-sub-overlay="true"
         onClick={cancelManualRoll}
-        className="fixed inset-0 z-[74] pointer-events-auto flex items-center justify-center bg-black/65 backdrop-blur-[3px] p-4"
+        className="fixed inset-0 z-[74] pointer-events-auto flex items-center justify-center bg-[#040508]/72 backdrop-blur-[3px] p-4"
       >
         <div
           onClick={(e) => e.stopPropagation()}
@@ -381,18 +408,18 @@ export const PolyhedralDiceOverlay: React.FC = () => {
                 style={{ color: auraColor }}
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>{pendingManualRoll.rollerName}</span>
+                <span>{maskHiddenNameForRole(pendingManualRoll.rollerName, role, campaign)}</span>
                 <Sparkles className="w-3.5 h-3.5" />
               </div>
               <h3 className="font-chronicle font-bold text-xl mt-1 chronicle-gold-text">
-                {pendingManualRoll.title}
+                {maskHiddenNamesInText(pendingManualRoll.title, role, campaign)}
               </h3>
               <div className="text-xs font-mono-dice text-amber-200/85 mt-1">
                 {pendingManualRoll.displayFormula || pendingManualRoll.formula}
               </div>
               {pendingManualRoll.subtitle && (
                 <p className="text-[11px] font-lore italic mt-1" style={{ color: 'var(--text-secondary)' }}>
-                  {pendingManualRoll.subtitle}
+                  {maskHiddenNamesInText(pendingManualRoll.subtitle, role, campaign)}
                 </p>
               )}
               <OrnateDivider className="mt-2.5 max-w-sm mx-auto" />
@@ -492,11 +519,11 @@ export const PolyhedralDiceOverlay: React.FC = () => {
         <div className="text-center w-full">
           <div className="flex items-center justify-center gap-2 text-[11px] font-display uppercase tracking-[0.22em] font-bold" style={{ color: auraColor }}>
             <Sparkles className="w-3.5 h-3.5" />
-            <span>{latestRollForOverlay.rollerName}</span>
+            <span>{maskHiddenNameForRole(latestRollForOverlay.rollerName, role, campaign)}</span>
             <Sparkles className="w-3.5 h-3.5" />
           </div>
           <h3 className="font-chronicle font-bold text-xl mt-1 chronicle-gold-text">
-            {latestRollForOverlay.title}
+            {maskHiddenNamesInText(latestRollForOverlay.title, role, campaign)}
           </h3>
           <OrnateDivider className="mt-2.5 max-w-sm mx-auto" />
         </div>
@@ -557,7 +584,17 @@ export const PolyhedralDiceOverlay: React.FC = () => {
 
             {latestRollForOverlay.targetName && latestRollForOverlay.hitStatus && (
               <div className="mt-1 flex items-center gap-2 text-xs">
-                <span>Alvo: <strong>{latestRollForOverlay.targetName}</strong></span>
+                <span>
+                  Alvo:{' '}
+                  <strong>
+                    {maskHiddenNameForRole(
+                      latestRollForOverlay.targetName,
+                      role,
+                      campaign,
+                      latestRollForOverlay.targetTokenId
+                    )}
+                  </strong>
+                </span>
                 {latestRollForOverlay.hitStatus === 'hit' ? (
                   <span className="text-emerald-400 font-bold flex items-center gap-1">
                     <CheckCircle2 className="w-4 h-4" /> ACERTOU!

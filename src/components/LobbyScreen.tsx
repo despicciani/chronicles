@@ -8,12 +8,10 @@ import {
   Download,
   Globe,
   Image as ImageIcon,
-  Moon,
   Plus,
   RefreshCw,
   Shield,
   Sparkles,
-  Sun,
   Swords,
   Trash2,
   Upload,
@@ -104,8 +102,6 @@ export const LobbyScreen: React.FC = () => {
     enterTableAsPlayer,
     myPlayerName,
     myPlayerColor,
-    theme,
-    setTheme,
     resolveAssetUrl,
   } = useCampaign();
 
@@ -130,6 +126,7 @@ export const LobbyScreen: React.FC = () => {
   const [attrBudget, setAttrBudget] = useState(15);
   const [maxSkills, setMaxSkills] = useState(4);
   const [creating, setCreating] = useState(false);
+  const [loadingCampaignId, setLoadingCampaignId] = useState<string | null>(null);
 
   // Join Campaign State (Player)
   const [playerNameInput, setPlayerNameInput] = useState(myPlayerName || '');
@@ -263,29 +260,17 @@ export const LobbyScreen: React.FC = () => {
       {screen !== 'title' && (
         <div className="relative z-10 flex items-center justify-between px-6 py-4">
           <button
+            type="button"
             onClick={() => setScreen('title')}
-            className="rpg-glass-panel px-3.5 py-2 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer hover:brightness-110 transition"
+            className="rpg-glass-panel px-3.5 py-2 rounded text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer hover:border-[#d4ad5c]/65 transition"
           >
-            <ArrowLeft className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+            <ArrowLeft className="w-4 h-4 text-[#d4ad5c]" />
             <span>Voltar ao Início</span>
           </button>
 
-          <button
-            onClick={() => setTheme(theme === 'dark-fantasy' ? 'bright-fantasy' : 'dark-fantasy')}
-            className="rpg-glass-panel px-3.5 py-2 rounded-md text-xs font-display font-semibold flex items-center gap-2 cursor-pointer"
-          >
-            {theme === 'dark-fantasy' ? (
-              <>
-                <Moon className="w-4 h-4 text-amber-400" />
-                <span>Dark Fantasy</span>
-              </>
-            ) : (
-              <>
-                <Sun className="w-4 h-4 text-amber-600" />
-                <span>Bright Fantasy</span>
-              </>
-            )}
-          </button>
+          <div className="text-[10px] font-chronicle tracking-[0.22em] text-[#a69b88] select-none">
+            CHRONICLES
+          </div>
         </div>
       )}
 
@@ -391,29 +376,10 @@ export const LobbyScreen: React.FC = () => {
                 type="button"
                 onClick={cycleScene}
                 title={`Cenário: ${currentScene.label} — clique para trocar`}
-                className="px-2.5 py-1.5 rounded-sm bg-[#0a0c12]/72 hover:bg-[#141724]/90 border border-white/15 hover:border-amber-400/50 text-[11px] font-display text-[#e6dec9] flex items-center gap-1.5 cursor-pointer transition backdrop-blur-xs"
+                className="px-2.5 py-1.5 rounded bg-[#0a0c12]/78 hover:bg-[#141724]/92 border border-[#b89146]/25 hover:border-[#d4ad5c]/55 text-[11px] font-display text-[#e6dec9] flex items-center gap-1.5 cursor-pointer transition backdrop-blur-xs"
               >
-                <ImageIcon className="w-3.5 h-3.5 text-amber-300/90" />
+                <ImageIcon className="w-3.5 h-3.5 text-[#d4ad5c]" />
                 <span className="hidden sm:inline">{currentScene.label}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTheme(theme === 'dark-fantasy' ? 'bright-fantasy' : 'dark-fantasy')}
-                title="Alternar tema da mesa (Dark / Bright Fantasy)"
-                className="px-2.5 py-1.5 rounded-sm bg-[#0a0c12]/72 hover:bg-[#141724]/90 border border-white/15 hover:border-amber-400/50 text-[11px] font-display text-[#e6dec9] flex items-center gap-1.5 cursor-pointer transition backdrop-blur-xs"
-              >
-                {theme === 'dark-fantasy' ? (
-                  <>
-                    <Moon className="w-3.5 h-3.5 text-amber-400" />
-                    <span className="hidden sm:inline">Dark</span>
-                  </>
-                ) : (
-                  <>
-                    <Sun className="w-3.5 h-3.5 text-amber-300" />
-                    <span className="hidden sm:inline">Bright</span>
-                  </>
-                )}
               </button>
             </div>
           </div>
@@ -465,12 +431,30 @@ export const LobbyScreen: React.FC = () => {
           </div>
 
           {gmTab === 'continue' && (
-            <OrnateFrame className="rpg-glass-panel rounded-2xl p-6 space-y-4">
+            <OrnateFrame className="rpg-glass-panel rounded-lg p-6 space-y-4">
+              {savedCampaigns.length === 0 ? (
+                <div className="rpg-well rounded p-8 text-center space-y-3">
+                  <BookOpen className="w-8 h-8 mx-auto text-[#d4ad5c] opacity-60" />
+                  <div className="font-display font-bold text-sm text-[#ece4d5]">
+                    Nenhuma campanha salva ainda
+                  </div>
+                  <p className="font-lore italic text-sm text-[#a69b88]">
+                    Forje sua primeira crônica para começar a mestrar.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setGmTab('create')}
+                    className="rpg-btn-primary px-5 py-2 rounded text-xs cursor-pointer"
+                  >
+                    Criar Nova Campanha
+                  </button>
+                </div>
+              ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {savedCampaigns.map((camp) => (
                   <div
                     key={camp.id}
-                    className="rpg-card rounded-xl overflow-hidden flex flex-col border hover:border-amber-400/70 transition group"
+                    className="rpg-card rounded-lg overflow-hidden flex flex-col border hover:border-[#d4ad5c]/65 transition group"
                   >
                     <div
                       className="h-40 relative flex items-end p-3.5 bg-cover bg-center"
@@ -481,41 +465,52 @@ export const LobbyScreen: React.FC = () => {
                       }}
                     >
                       <div className="min-w-0">
-                        <div className="text-[10px] uppercase tracking-widest text-amber-300 font-bold">
+                        <div className="text-[10px] uppercase tracking-widest text-[#d4ad5c] font-display font-bold">
                           Mestre: {camp.gmName}
                         </div>
-                        <h4 className="font-display font-bold text-base text-white truncate">
+                        <h4 className="font-display font-bold text-base text-[#ece4d5] truncate">
                           {camp.name}
                         </h4>
                       </div>
                     </div>
                     <div className="p-4 flex-1 flex flex-col justify-between gap-3 text-xs">
-                      <p className="font-lore text-base line-clamp-3 leading-snug" style={{ color: 'var(--text-secondary)' }}>
+                      <p className="font-lore text-base line-clamp-3 leading-snug text-[#a69b88]">
                         {camp.description || 'Sem descrição cadastrada.'}
                       </p>
-                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
-                        <span style={{ color: 'var(--text-muted)' }}>
+                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: 'var(--border-hairline)' }}>
+                        <span className="text-[#6c6457]">
                           {camp.characterCount} {camp.characterCount === 1 ? 'herói' : 'heróis'}
                         </span>
                         <div className="flex items-center gap-1.5">
                           {savedCampaigns.length > 1 && (
                             <button
+                              type="button"
+                              disabled={Boolean(loadingCampaignId)}
                               onClick={async () => {
                                 if (await openConfirmDialog(`Excluir a campanha "${camp.name}"?`, 'Excluir Campanha')) {
                                   deleteSavedCampaign(camp.id);
                                 }
                               }}
-                              className="p-1.5 rounded text-red-400 hover:bg-red-500/15 cursor-pointer"
+                              className="p-1.5 rounded text-[#d6575b] hover:bg-[#2d1012] cursor-pointer disabled:opacity-40"
                               title="Excluir campanha salva"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
                           <button
-                            onClick={() => loadSavedCampaign(camp.id)}
-                            className="rpg-btn-primary px-4 py-1.5 rounded-lg text-xs cursor-pointer"
+                            type="button"
+                            disabled={Boolean(loadingCampaignId)}
+                            onClick={async () => {
+                              setLoadingCampaignId(camp.id);
+                              try {
+                                await loadSavedCampaign(camp.id);
+                              } finally {
+                                setLoadingCampaignId(null);
+                              }
+                            }}
+                            className="rpg-btn-primary px-4 py-1.5 rounded text-xs cursor-pointer disabled:opacity-50"
                           >
-                            Continuar Mesa
+                            {loadingCampaignId === camp.id ? 'Abrindo...' : 'Continuar Mesa'}
                           </button>
                         </div>
                       </div>
@@ -523,6 +518,7 @@ export const LobbyScreen: React.FC = () => {
                   </div>
                 ))}
               </div>
+              )}
             </OrnateFrame>
           )}
 
@@ -746,10 +742,20 @@ export const LobbyScreen: React.FC = () => {
                           <button
                             type="button"
                             onClick={async () => {
-                              importSavedHeroIntoCampaign(ch);
-                              await loadSavedCampaign(campaign.id);
+                              const targetCampId =
+                                savedCampaigns.find((c) => c.id === campaign.id)?.id ||
+                                savedCampaigns[0]?.id;
+                              if (!targetCampId) {
+                                openAlertDialog(
+                                  'Crie ou selecione uma campanha salva primeiro para receber este herói.',
+                                  'Nenhuma Campanha Local'
+                                );
+                                return;
+                              }
+                              const ok = await loadSavedCampaign(targetCampId);
+                              if (ok) importSavedHeroIntoCampaign(ch);
                             }}
-                            className="rpg-btn-primary px-2.5 py-1 rounded-md text-[11px] font-display font-bold cursor-pointer"
+                            className="rpg-btn-primary px-2.5 py-1 rounded text-[11px] font-display font-bold cursor-pointer"
                             title="Inserir na campanha ativa e abrir mesa"
                           >
                             Enviar p/ Mesa Ativa
@@ -866,7 +872,7 @@ export const LobbyScreen: React.FC = () => {
                 <button
                   type="button"
                   onClick={scanRooms}
-                  className="rpg-card px-3 py-1 rounded-full flex items-center gap-1 cursor-pointer"
+                  className="rpg-card px-3 py-1 rounded flex items-center gap-1 cursor-pointer"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${scanning ? 'animate-spin' : ''}`} />
                   <span>Atualizar</span>
@@ -874,9 +880,9 @@ export const LobbyScreen: React.FC = () => {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {rooms.map((rm) => (
+                {rooms.map((rm, idx) => (
                   <div
-                    key={rm.url}
+                    key={rm.url || `${rm.roomCode}-${idx}`}
                     className="rpg-card rounded-xl p-3.5 flex items-center justify-between gap-3 border hover:border-sky-400/70 transition"
                   >
                     <div className="min-w-0">

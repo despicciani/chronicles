@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Upload } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
+import { openAlertDialog } from './PromptDialog';
 
 interface FileUploadButtonProps {
   accept: string;
@@ -19,36 +20,72 @@ export const FileUploadButton: React.FC<FileUploadButtonProps> = ({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
+    const isAudio = accept.includes('audio') || file.type.startsWith('audio/');
     setUploading(true);
-    const reader = new FileReader();
-    reader.onload = async () => {
+    try {
+      const base = (serverUrl || '').replace(/\/+$/, '');
+      // 1. Primary fast binary upload (zero base64 bloat, supports up to 120MB MP3/WAV/OGG & HD maps)
       try {
-        const dataUrl = String(reader.result);
-        const base = serverUrl || '';
-        const res = await fetch(`${base}/api/upload`, {
+        const rawRes = await fetch(`${base}/api/upload-raw`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: file.name, dataUrl }),
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'X-Filename': encodeURIComponent(file.name),
+          },
+          body: file,
         });
-        if (res.ok) {
-          const data = (await res.json()) as { url: string; filename: string };
+        if (rawRes.ok) {
+          const data = (await rawRes.json()) as { url: string; filename: string };
           onUploaded(data.url, data.filename);
-        } else {
-          // Fallback to dataUrl if offline
-          onUploaded(dataUrl, file.name);
+          return;
         }
       } catch {
-        onUploaded(String(reader.result), file.name);
-      } finally {
-        setUploading(false);
+        // Fallback to JSON upload below
       }
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+
+      // 2. Legacy base64 JSON upload fallback
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('Falha ao ler arquivo do PC.'));
+        reader.readAsDataURL(file);
+      });
+
+      const res = await fetch(`${base}/api/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, dataUrl }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { url: string; filename: string };
+        onUploaded(data.url, data.filename);
+        return;
+      }
+
+      // Never silently embed huge base64 audio into campaignState (it exceeds WebSocket limits and fails to persist!)
+      if (isAudio || file.size > 4 * 1024 * 1024) {
+        await openAlertDialog(
+          `Não foi possível enviar "${file.name}" ao servidor (HTTP ${res.status}). Verifique se o servidor está conectado ou tente um arquivo menor.`,
+          'Erro ao Salvar Arquivo'
+        );
+        return;
+      }
+      onUploaded(dataUrl, file.name);
+    } catch (err) {
+      if (isAudio || file.size > 4 * 1024 * 1024) {
+        await openAlertDialog(
+          `Não foi possível salvar "${file.name}" no servidor (${String(err)}). Verifique a conexão com a mesa.`,
+          'Erro ao Salvar Arquivo'
+        );
+      }
+    } finally {
+      setUploading(false);
+    }
   };
 
   return (

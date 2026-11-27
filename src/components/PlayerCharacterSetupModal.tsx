@@ -30,6 +30,8 @@ export const PlayerCharacterSetupModal: React.FC = () => {
   const {
     campaign,
     setInLobby,
+    hasGmPrivilege,
+    setRole,
     myPlayerId,
     myPlayerName,
     myPlayerColor,
@@ -137,17 +139,27 @@ export const PlayerCharacterSetupModal: React.FC = () => {
       if (pointsRemaining <= 0 || current >= 20) return;
       setAttributes((prev) => ({ ...prev, [attrId]: current + 1 }));
     } else {
-      if (current <= 0) return;
-      setAttributes((prev) => ({ ...prev, [attrId]: current - 1 }));
+      if (current <= 8) return;
+      setAttributes((prev) => ({ ...prev, [attrId]: Math.max(8, current - 1) }));
     }
   };
 
+  const savingThrowDefs = campaign.compendium.skills.filter((s) => s.isSavingThrow);
+  const regularSkillDefs = campaign.compendium.skills.filter((s) => !s.isSavingThrow);
+  const savingThrowIdSet = new Set(savingThrowDefs.map((s) => s.id));
+  const regularTrainedCount = trainedSkillIds.filter((id) => !savingThrowIdSet.has(id)).length;
+
   const toggleSkill = (skillId: string) => {
+    const isSave = savingThrowIdSet.has(skillId);
     setTrainedSkillIds((prev) => {
       if (prev.includes(skillId)) {
         return prev.filter((id) => id !== skillId);
       }
-      if (prev.length >= maxSkills) return prev;
+      // Saving Throws do NOT consume the regular trained skills cap (D&D 5e)
+      if (!isSave) {
+        const currentRegularCount = prev.filter((id) => !savingThrowIdSet.has(id)).length;
+        if (currentRegularCount >= maxSkills) return prev;
+      }
       return [...prev, skillId];
     });
   };
@@ -254,19 +266,34 @@ export const PlayerCharacterSetupModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-[65] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+    <div
+      data-modal-overlay="true"
+      className="fixed inset-0 z-[65] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
+    >
       <OrnateFrame className="rpg-glass-panel rounded-lg max-w-4xl w-full p-6 my-auto animate-modal-unfurl relative">
-        <button
-          type="button"
-          onClick={() => {
-            if (pendingHeroJoinRequest) cancelHeroJoinRequest();
-            setInLobby(true);
-          }}
-          className="absolute top-4 right-4 z-20 rpg-card p-1.5 rounded-md text-amber-200/80 hover:text-amber-100 hover:border-amber-400/70 cursor-pointer transition"
-          title="Voltar ao Lobby"
-        >
-          <X className="w-4 h-4" />
-        </button>
+        <div className="absolute top-4 right-4 z-20 flex items-center gap-1.5">
+          {hasGmPrivilege && (
+            <button
+              type="button"
+              onClick={() => setRole('gm')}
+              className="rpg-btn-primary px-2.5 py-1.5 rounded-md text-[11px] font-display font-bold cursor-pointer"
+              title="Voltar imediatamente para o modo Mestre"
+            >
+              Voltar ao Modo Mestre
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (pendingHeroJoinRequest) cancelHeroJoinRequest();
+              setInLobby(true);
+            }}
+            className="rpg-card p-1.5 rounded-md text-amber-200/80 hover:text-amber-100 hover:border-amber-400/70 cursor-pointer transition"
+            title="Voltar ao Lobby"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
         <div className="text-center space-y-1">
           <div className="inline-flex items-center gap-1.5 text-amber-300 font-display font-bold uppercase tracking-widest text-[11px]">
             <Sparkles className="w-3.5 h-3.5" />
@@ -628,7 +655,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
               <div className="rpg-card rounded-xl p-3 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-display font-bold text-xs">
-                    Distribuição de Atributos (Base 10 • Faixa 0 a 20 + Bônus Racial)
+                    Distribuição de Atributos (Base 10 • Faixa 8 a 20 + Bônus Racial)
                   </span>
                   <span
                     className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
@@ -663,7 +690,7 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => adjustAttr(a.id, -1)}
-                            disabled={baseVal <= 0}
+                            disabled={baseVal <= 8}
                             className="w-5 h-5 rounded bg-black/40 flex items-center justify-center cursor-pointer disabled:opacity-30"
                           >
                             <Minus className="w-3 h-3" />
@@ -684,7 +711,47 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                 </div>
               </div>
 
-              {/* Skill Selection with GM Limit */}
+              {/* Saving Throws (Separate from Skills, does not consume maxSkills limit) */}
+              {savingThrowDefs.length > 0 && (
+                <div className="rpg-card rounded-xl p-3 space-y-2 border border-sky-500/25">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-display font-bold text-xs text-sky-200">
+                      Testes de Resistência (Salvaguardas)
+                    </span>
+                    <span className="text-[10px] text-sky-300/80">
+                      Separadas das perícias (não gastam o limite)
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {savingThrowDefs.map((sk) => {
+                      const active = trainedSkillIds.includes(sk.id);
+                      const attrShort =
+                        campaign.compendium.attributes.find((a) => a.id === sk.defaultAttributeId)
+                          ?.shortName || sk.defaultAttributeId.toUpperCase();
+                      return (
+                        <button
+                          key={sk.id}
+                          type="button"
+                          onClick={() => toggleSkill(sk.id)}
+                          className={`px-2.5 py-1 rounded-full text-[11px] border cursor-pointer transition ${
+                            active
+                              ? 'bg-sky-700/80 text-white border-sky-300/70 font-bold'
+                              : 'rpg-card opacity-80 hover:opacity-100'
+                          }`}
+                        >
+                          {active ? '✓ ' : ''}
+                          <span className="font-mono-dice text-[10px] opacity-85 mr-1">
+                            {attrShort}
+                          </span>
+                          {sk.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Regular Skill Selection with GM Limit */}
               <div className="rpg-card rounded-xl p-3 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-display font-bold text-xs">
@@ -692,19 +759,19 @@ export const PlayerCharacterSetupModal: React.FC = () => {
                   </span>
                   <span
                     className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                      trainedSkillIds.length < maxSkills
+                      regularTrainedCount < maxSkills
                         ? 'bg-sky-500/20 text-sky-300 border border-sky-400/50'
                         : 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
                     }`}
                   >
-                    Escolhidas: {trainedSkillIds.length} / {maxSkills}
+                    Escolhidas: {regularTrainedCount} / {maxSkills}
                   </span>
                 </div>
 
                 <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-1">
-                  {campaign.compendium.skills.map((sk) => {
+                  {regularSkillDefs.map((sk) => {
                     const active = trainedSkillIds.includes(sk.id);
-                    const disabled = !active && trainedSkillIds.length >= maxSkills;
+                    const disabled = !active && regularTrainedCount >= maxSkills;
                     return (
                       <button
                         key={sk.id}

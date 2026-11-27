@@ -20,10 +20,14 @@ export const MapWeatherCanvas: React.FC<MapWeatherCanvasProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const scale = Math.min(window.devicePixelRatio || 1, 1.5);
-    canvas.width = Math.max(1, Math.floor(width * scale));
-    canvas.height = Math.max(1, Math.floor(height * scale));
-    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const MAX_CANVAS_DIM = 4096;
+    const scaleX = Math.min(dpr, MAX_CANVAS_DIM / Math.max(1, width));
+    const scaleY = Math.min(dpr, MAX_CANVAS_DIM / Math.max(1, height));
+    const safeScale = Math.min(scaleX, scaleY);
+    canvas.width = Math.max(1, Math.min(MAX_CANVAS_DIM, Math.floor(width * safeScale)));
+    canvas.height = Math.max(1, Math.min(MAX_CANVAS_DIM, Math.floor(height * safeScale)));
+    ctx.setTransform(canvas.width / width, 0, 0, canvas.height / height, 0, 0);
 
     const areaFactor = Math.max(0.5, Math.min(2.2, (width * height) / (1100 * 750)));
     let lastTime = performance.now();

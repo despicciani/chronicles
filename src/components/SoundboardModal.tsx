@@ -1,59 +1,74 @@
 import React, { useEffect, useState } from 'react';
 import {
+  CloudRain,
+  Coins,
+  Compass,
+  Crown,
+  Dices,
+  DoorOpen,
+  Flame,
+  FlaskConical,
+  Heart,
   Music,
   Pause,
   Play,
   Repeat,
+  Shield,
   Shuffle,
   SkipBack,
   SkipForward,
+  Skull,
   Sparkles,
   Square,
+  Swords,
+  Target,
   Trash2,
   Volume2,
   VolumeX,
-  X,
+  Wand2,
+  Zap,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import { MusicPlaybackSnapshot, soundEngine } from '../utils/soundEngine';
 import { FileUploadButton } from './FileUploadButton';
+import { GrimoireModal } from './GrimoireModal';
 
 interface SoundboardModalProps {
   onClose: () => void;
 }
 
-const AMBIENTS = [
-  { key: 'tavern', name: 'Taverna & Lareira', icon: '🍺' },
-  { key: 'dungeon', name: 'Masmorra Sombria', icon: '🕯️' },
-  { key: 'exploration', name: 'Exploração & Mistério', icon: '🌲' },
-  { key: 'rain', name: 'Chuva Noturna', icon: '🌧️' },
-  { key: 'boss', name: 'Tensão / Combate Boss', icon: '🔥' },
+const AMBIENTS: Array<{ key: string; name: string; icon: React.ReactNode }> = [
+  { key: 'tavern', name: 'Taverna & Lareira', icon: <Flame className="w-4 h-4 text-[#d4ad5c]" /> },
+  { key: 'dungeon', name: 'Masmorra Sombria', icon: <Skull className="w-4 h-4 text-[#a69b88]" /> },
+  { key: 'exploration', name: 'Exploração & Mistério', icon: <Compass className="w-4 h-4 text-[#74c997]" /> },
+  { key: 'rain', name: 'Chuva Noturna', icon: <CloudRain className="w-4 h-4 text-[#7cb4e8]" /> },
+  { key: 'boss', name: 'Tensão / Chefe', icon: <Swords className="w-4 h-4 text-[#e07a7d]" /> },
 ];
 
-const SFX_PADS = [
-  { key: 'sword', name: 'Golpe de Espada', icon: '⚔️' },
-  { key: 'shield', name: 'Escudo / Bloqueio', icon: '🛡️' },
-  { key: 'arrow', name: 'Flecha / Arco', icon: '🏹' },
-  { key: 'crit', name: 'Crítico Épico', icon: '💥' },
-  { key: 'fireball', name: 'Explosão / Fogo', icon: '🔥' },
-  { key: 'thunder', name: 'Trovão', icon: '⚡' },
-  { key: 'spell', name: 'Magia Arcana', icon: '🔮' },
-  { key: 'heal', name: 'Cura Divina', icon: '✨' },
-  { key: 'roar', name: 'Rugido de Monstro', icon: '🐉' },
-  { key: 'potion', name: 'Poção / Beber', icon: '🧪' },
-  { key: 'coin', name: 'Ouro / Tesouro', icon: '🪙' },
-  { key: 'levelup', name: 'Level Up / Vitória', icon: '👑' },
-  { key: 'door', name: 'Porta Pesada', icon: '🚪' },
-  { key: 'dice', name: 'Dados na Mesa', icon: '🎲' },
+const SFX_PADS: Array<{ key: string; name: string; icon: React.ReactNode }> = [
+  { key: 'sword', name: 'Espada', icon: <Swords className="w-4 h-4 text-[#ece4d5]" /> },
+  { key: 'shield', name: 'Escudo', icon: <Shield className="w-4 h-4 text-[#d4ad5c]" /> },
+  { key: 'arrow', name: 'Flecha', icon: <Target className="w-4 h-4 text-[#c2b8a6]" /> },
+  { key: 'crit', name: 'Crítico', icon: <Zap className="w-4 h-4 text-[#e8c683]" /> },
+  { key: 'fireball', name: 'Fogo', icon: <Flame className="w-4 h-4 text-[#e07b42]" /> },
+  { key: 'thunder', name: 'Trovão', icon: <Zap className="w-4 h-4 text-[#7cb4e8]" /> },
+  { key: 'spell', name: 'Magia', icon: <Wand2 className="w-4 h-4 text-[#c9a8f0]" /> },
+  { key: 'heal', name: 'Cura', icon: <Heart className="w-4 h-4 text-[#74c997]" /> },
+  { key: 'roar', name: 'Rugido', icon: <Skull className="w-4 h-4 text-[#e07a7d]" /> },
+  { key: 'potion', name: 'Poção', icon: <FlaskConical className="w-4 h-4 text-[#6fd49a]" /> },
+  { key: 'coin', name: 'Ouro', icon: <Coins className="w-4 h-4 text-[#e8c683]" /> },
+  { key: 'levelup', name: 'Vitória', icon: <Crown className="w-4 h-4 text-[#d4ad5c]" /> },
+  { key: 'door', name: 'Porta', icon: <DoorOpen className="w-4 h-4 text-[#b89146]" /> },
+  { key: 'dice', name: 'Dados', icon: <Dices className="w-4 h-4 text-[#ece4d5]" /> },
 ];
 
 const TRACK_CATEGORIES = [
   { id: 'all', label: 'Todas' },
-  { id: 'combat', label: '⚔️ Combate' },
-  { id: 'ambient', label: '🌲 Exploração' },
-  { id: 'tavern', label: '🍺 Taverna' },
-  { id: 'boss', label: '👑 Chefe' },
-  { id: 'drama', label: '🎭 Drama' },
+  { id: 'combat', label: 'Combate' },
+  { id: 'ambient', label: 'Exploração' },
+  { id: 'tavern', label: 'Taverna' },
+  { id: 'boss', label: 'Chefe' },
+  { id: 'drama', label: 'Drama' },
 ] as const;
 
 function formatTime(sec: number): string {
@@ -77,7 +92,7 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
   const [sfxVol, setSfxVol] = useState(Math.round(soundEngine.getSfxVolume() * 100));
   const [muted, setMuted] = useState(soundEngine.getMuted());
   const [loopOne, setLoopOne] = useState(soundEngine.getLoop());
-  const [shuffleMode, setShuffleMode] = useState(false);
+  const [shuffleMode, setShuffleMode] = useState(soundEngine.getShuffle());
   const [playbackRate, setPlaybackRate] = useState(soundEngine.getPlaybackRate());
   const [snap, setSnap] = useState<MusicPlaybackSnapshot>(() => soundEngine.getPlaybackSnapshot());
 
@@ -134,14 +149,23 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
   }, []);
 
   useEffect(() => {
-    if (role !== 'gm') return;
-    soundEngine.setOnTrackEnded(() => {
-      if (!soundEngine.getLoop() && tracks.length > 0) {
-        playNextTrack();
+    if (role !== 'gm') {
+      soundEngine.configurePlaylist([], null);
+      return;
+    }
+    soundEngine.configurePlaylist(
+      tracks.map((t) => ({ title: t.title, url: t.url })),
+      (trk) => {
+        triggerSound({
+          action: 'ambient',
+          presetKey: 'custom',
+          name: trk.title,
+          customUrl: trk.url,
+        });
       }
-    });
-    return () => soundEngine.setOnTrackEnded(null);
-  });
+    );
+    // Keep playlist auto-advance alive even after SoundboardModal closes!
+  }, [role, tracks, triggerSound]);
 
   const handleMusicVolChange = (val: number) => {
     setMusicVol(val);
@@ -173,70 +197,59 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
   const heroesWithThemes = campaign.characters.filter((c) => Boolean(c.themeMusicUrl));
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="rpg-glass-panel rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
-        {/* Header */}
-        <div
-          className="px-4 py-3 border-b flex items-center justify-between shrink-0"
-          style={{ borderColor: 'var(--border-subtle)' }}
+    <GrimoireModal
+      title="Mesa de Som & Trilha Sonora"
+      subtitle={
+        activeAmbientName
+          ? `Tocando agora: ${activeAmbientName}`
+          : 'Nenhuma trilha ambiente ativa'
+      }
+      icon={<Volume2 className="w-4 h-4" />}
+      onClose={onClose}
+      size="xl"
+      bodyClassName="p-4 sm:p-5 space-y-4 text-xs"
+    >
+      {/* Dual Volume Controls (Music vs SFX) + Mute */}
+      <div className="rpg-card rounded-md p-3 grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+        <button
+          type="button"
+          onClick={toggleMute}
+          className={`md:col-span-3 px-3 py-1.5 rounded flex items-center justify-center gap-1.5 font-semibold cursor-pointer ${
+            muted ? 'rpg-btn-crimson' : 'rpg-btn-primary'
+          }`}
         >
+          {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          <span>{muted ? 'Mutado (Local)' : 'Som Ativo'}</span>
+        </button>
+        <div className="md:col-span-9 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div className="flex items-center gap-2">
-            <Volume2 className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
-            <div>
-              <h2 className="font-display font-bold text-base leading-none">
-                Mesa de Som &amp; Player Musical
-              </h2>
-              <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                {activeAmbientName
-                  ? `Tocando agora: ${activeAmbientName}`
-                  : 'Nenhuma trilha ambiente ativa'}
-              </p>
-            </div>
+            <Music className="w-3.5 h-3.5 text-[#d4ad5c] shrink-0" />
+            <span className="shrink-0 font-display font-semibold text-[#ece4d5]">Música</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={musicVol}
+              onChange={(e) => handleMusicVolChange(Number(e.target.value))}
+              className="flex-1 accent-[#d4ad5c] cursor-pointer"
+            />
+            <span className="w-8 text-right font-mono-dice text-[#a69b88]">{musicVol}%</span>
           </div>
-          <button onClick={onClose} className="rpg-card p-1.5 rounded cursor-pointer">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <Zap className="w-3.5 h-3.5 text-[#7cb4e8] shrink-0" />
+            <span className="shrink-0 font-display font-semibold text-[#ece4d5]">Efeitos</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={sfxVol}
+              onChange={(e) => handleSfxVolChange(Number(e.target.value))}
+              className="flex-1 accent-[#4a90d9] cursor-pointer"
+            />
+            <span className="w-8 text-right font-mono-dice text-[#a69b88]">{sfxVol}%</span>
+          </div>
         </div>
-
-        <div className="p-4 space-y-4 text-xs overflow-y-auto flex-1 min-h-0">
-          {/* Dual Volume Controls (Music vs SFX) + Mute */}
-          <div className="rpg-card rounded-xl p-3 grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
-            <button
-              onClick={toggleMute}
-              className={`md:col-span-3 px-3 py-1.5 rounded flex items-center justify-center gap-1.5 font-semibold cursor-pointer ${
-                muted ? 'rpg-btn-crimson' : 'rpg-btn-primary'
-              }`}
-            >
-              {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-              <span>{muted ? 'Mutado (Local)' : 'Som Ativo'}</span>
-            </button>
-            <div className="md:col-span-9 grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="flex items-center gap-2">
-                <span className="shrink-0 font-semibold text-amber-200">🎵 Música:</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={musicVol}
-                  onChange={(e) => handleMusicVolChange(Number(e.target.value))}
-                  className="flex-1 accent-amber-500 cursor-pointer"
-                />
-                <span className="w-8 text-right font-mono-dice">{musicVol}%</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="shrink-0 font-semibold text-sky-200">⚡ Efeitos:</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={sfxVol}
-                  onChange={(e) => handleSfxVolChange(Number(e.target.value))}
-                  className="flex-1 accent-sky-400 cursor-pointer"
-                />
-                <span className="w-8 text-right font-mono-dice">{sfxVol}%</span>
-              </div>
-            </div>
-          </div>
+      </div>
 
           {role !== 'gm' ? (
             <div className="text-center py-6" style={{ color: 'var(--text-secondary)' }}>
@@ -317,9 +330,9 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
                       onClick={() => {
                         const next = !shuffleMode;
                         setShuffleMode(next);
+                        soundEngine.setShuffle(next);
                         if (next && loopOne) {
                           setLoopOne(false);
-                          soundEngine.setLoop(false);
                         }
                       }}
                       className={`p-1.5 rounded border cursor-pointer transition ${
@@ -482,12 +495,12 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
                           }`}
                         >
                           <div className="min-w-0">
-                            <div className="font-semibold truncate text-amber-100">
-                              {isThisPlaying ? '🎵 ' : ''}
-                              {trk.title}
+                            <div className="font-semibold truncate text-[#ece4d5] flex items-center gap-1.5">
+                              {isThisPlaying && <Music className="w-3 h-3 text-[#d4ad5c] shrink-0" />}
+                              <span className="truncate">{trk.title}</span>
                             </div>
-                            <div className="text-[10px] opacity-65">
-                              {TRACK_CATEGORIES.find((c) => c.id === trk.category)?.label || '🌲 Exploração'}
+                            <div className="text-[10px] text-[#8c8374]">
+                              {TRACK_CATEGORIES.find((c) => c.id === trk.category)?.label || 'Exploração'}
                             </div>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
@@ -564,14 +577,15 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
               )}
 
               {/* Improved Studio-Quality SFX Pads (14 Foley Presets) */}
-              <div className="space-y-2 pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
-                <h3 className="font-display font-bold text-sm">
-                  Efeitos Sonoros Instantâneos — Foley Aprimorado ({SFX_PADS.length})
+              <div className="space-y-2 pt-3 border-t" style={{ borderColor: 'var(--border-hairline)' }}>
+                <h3 className="font-display font-bold text-xs uppercase tracking-[0.14em] text-[#a69b88]">
+                  Efeitos Sonoros Instantâneos ({SFX_PADS.length})
                 </h3>
                 <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
                   {SFX_PADS.map((sfx) => (
                     <button
                       key={sfx.key}
+                      type="button"
                       onClick={() =>
                         triggerSound({
                           action: 'sfx',
@@ -579,24 +593,29 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
                           name: sfx.name,
                         })
                       }
-                      className="rpg-card p-2 rounded-xl text-center hover:border-amber-400/70 active:scale-95 transition cursor-pointer"
+                      className="rpg-hotbar-slot p-2.5 rounded flex flex-col items-center justify-center gap-1.5 cursor-pointer"
                     >
-                      <div className="text-lg">{sfx.icon}</div>
-                      <div className="font-semibold text-[10px] mt-1 leading-tight">{sfx.name}</div>
+                      <span>{sfx.icon}</span>
+                      <span className="font-display font-semibold text-[10px] leading-tight text-[#ece4d5]">
+                        {sfx.name}
+                      </span>
                     </button>
                   ))}
                 </div>
               </div>
 
               {/* Ambient Loops */}
-              <div className="space-y-2 pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
-                <h3 className="font-display font-bold text-sm">Trilhas Ambiente Geradas (Zero Config)</h3>
+              <div className="space-y-2 pt-3 border-t" style={{ borderColor: 'var(--border-hairline)' }}>
+                <h3 className="font-display font-bold text-xs uppercase tracking-[0.14em] text-[#a69b88]">
+                  Trilhas Ambiente Sintetizadas
+                </h3>
                 <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                   {AMBIENTS.map((amb) => {
                     const isPlaying = activeAmbientName === amb.name;
                     return (
                       <button
                         key={amb.key}
+                        type="button"
                         onClick={() =>
                           triggerSound({
                             action: 'ambient',
@@ -604,12 +623,14 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
                             name: amb.name,
                           })
                         }
-                        className={`p-2 rounded-xl border text-left flex items-center gap-1.5 cursor-pointer transition ${
-                          isPlaying ? 'rpg-btn-primary' : 'rpg-card hover:opacity-85'
+                        className={`p-2.5 rounded border text-left flex items-center gap-2 cursor-pointer transition ${
+                          isPlaying ? 'rpg-btn-primary' : 'rpg-card'
                         }`}
                       >
-                        <span className="text-base">{amb.icon}</span>
-                        <span className="font-semibold text-[11px] leading-tight">{amb.name}</span>
+                        <span className="shrink-0">{amb.icon}</span>
+                        <span className="font-display font-semibold text-[11px] leading-tight">
+                          {amb.name}
+                        </span>
                       </button>
                     );
                   })}
@@ -617,8 +638,10 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
               </div>
 
               {/* External Audio URL */}
-              <div className="space-y-1.5 pt-2 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
-                <label className="font-semibold block">Link Direto de Áudio Externo (.mp3 / .ogg)</label>
+              <div className="space-y-1.5 pt-3 border-t" style={{ borderColor: 'var(--border-hairline)' }}>
+                <label className="font-display font-semibold text-xs uppercase tracking-[0.12em] text-[#a69b88] block">
+                  Link Direto de Áudio Externo (.mp3 / .ogg)
+                </label>
                 <div className="flex gap-2">
                   <input
                     value={customUrl}
@@ -627,25 +650,42 @@ export const SoundboardModal: React.FC<SoundboardModalProps> = ({ onClose }) => 
                     className="rpg-input flex-1"
                   />
                   <button
+                    type="button"
                     onClick={() => {
-                      if (!customUrl.trim()) return;
+                      const trimmed = customUrl.trim();
+                      if (!trimmed) return;
+                      const title = newTrackTitle.trim() || 'Trilha Externa';
+                      updateCampaign((p) => ({
+                        ...p,
+                        customMusicTracks: (p.customMusicTracks || []).some((x) => x.url === trimmed)
+                          ? p.customMusicTracks
+                          : [
+                              ...(p.customMusicTracks || []),
+                              {
+                                id: `trk-${Date.now()}`,
+                                title,
+                                url: trimmed,
+                                category: newTrackCat as 'ambient' | 'combat' | 'tavern' | 'boss' | 'drama',
+                              },
+                            ],
+                      }));
                       triggerSound({
                         action: 'ambient',
                         presetKey: 'custom',
-                        name: 'Trilha Customizada',
-                        customUrl: customUrl.trim(),
+                        name: title,
+                        customUrl: trimmed,
                       });
+                      setCustomUrl('');
+                      setNewTrackTitle('');
                     }}
                     className="rpg-btn-primary px-3 py-1.5 rounded cursor-pointer"
                   >
-                    Tocar Loop
+                    Salvar e Tocar
                   </button>
                 </div>
               </div>
             </>
           )}
-        </div>
-      </div>
-    </div>
+    </GrimoireModal>
   );
 };

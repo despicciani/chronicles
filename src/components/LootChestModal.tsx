@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Coins, Package, Plus, Sparkles, Trash2, Users, X } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import { OrnateFrame } from './OrnateFrame';
@@ -9,23 +9,59 @@ export const LootChestModal: React.FC = () => {
   const [addItemId, setAddItemId] = useState(campaign.compendium.items[0]?.id || '');
   const [addQty, setAddQty] = useState(1);
   const [addGold, setAddGold] = useState(50);
+  const [minimizedChestId, setMinimizedChestId] = useState<string | null>(null);
 
   const chest = campaign.activeLootChest;
+
+  useEffect(() => {
+    const items = campaign.compendium.items;
+    if (items.length > 0 && !items.some((i) => i.id === addItemId)) {
+      setAddItemId(items[0].id);
+    }
+  }, [campaign.compendium.items, addItemId]);
+
+  useEffect(() => {
+    if (!chest || !chest.open) {
+      setMinimizedChestId(null);
+      return;
+    }
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape' && minimizedChestId !== chest.id) {
+        if (role !== 'gm') setMinimizedChestId(chest.id);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [chest, minimizedChestId, role]);
+
   if (!chest || !chest.open) return null;
+
+  if (role !== 'gm' && minimizedChestId === chest.id) {
+    return (
+      <button
+        type="button"
+        onClick={() => setMinimizedChestId(null)}
+        className="fixed bottom-20 right-4 z-[60] rpg-btn-primary px-3.5 py-2 rounded-lg text-xs font-display font-bold flex items-center gap-2 shadow-2xl cursor-pointer animate-ui-enter"
+        title="Reabrir Baú de Saque"
+      >
+        <Sparkles className="w-4 h-4" />
+        <span>Abrir {chest.title}</span>
+      </button>
+    );
+  }
 
   const canClaim = role === 'player' && Boolean(myCharacter);
 
   const claimItem = (lootItemId: string) => {
     if (!myCharacter) return;
-    const target = chest.items.find((i) => i.id === lootItemId);
-    if (!target || target.claimedBy) return;
-    const itemDef = campaign.compendium.items.find((i) => i.id === target.itemId);
-
-    soundEngine.playSfxPreset('coin');
+    let claimedQty = 0;
+    let claimedItemId = '';
     updateCampaign((prev) => {
-      if (!prev.activeLootChest) return prev;
+      if (!prev.activeLootChest || !prev.activeLootChest.open) return prev;
       const curItem = prev.activeLootChest.items.find((i) => i.id === lootItemId);
       if (!curItem || curItem.claimedBy) return prev;
+      claimedQty = curItem.quantity;
+      claimedItemId = curItem.itemId;
       return {
         ...prev,
         characters: prev.characters.map((c) => {
@@ -59,52 +95,92 @@ export const LootChestModal: React.FC = () => {
       };
     });
 
-    pushCombatLog({
-      category: 'system',
-      actorName: myCharacter.name,
-      actorKind: 'hero',
-      actorColor: myCharacter.playerColor || myCharacter.tokenColor,
-      summary: `pegou ${target.quantity}× ${itemDef?.name || 'Item'} do ${chest.title}`,
-    });
-  };
-
-  const claimGold = (splitParty: boolean) => {
-    if (chest.gold <= 0 || chest.goldClaimedBy) return;
-    soundEngine.playSfxPreset('coin');
-
-    if (splitParty && campaign.characters.length > 0) {
-      const share = Math.max(1, Math.floor(chest.gold / campaign.characters.length));
-      updateCampaign((prev) => ({
-        ...prev,
-        characters: prev.characters.map((c) => ({ ...c, gold: (c.gold || 0) + share })),
-        activeLootChest: prev.activeLootChest
-          ? { ...prev.activeLootChest, gold: 0, goldClaimedBy: `Dividido (+${share} PO cada)` }
-          : null,
-      }));
-      pushCombatLog({
-        category: 'system',
-        actorName: 'Grupo',
-        actorKind: 'system',
-        summary: `dividiu ${chest.gold} PO do ${chest.title} (+${share} PO para cada herói)`,
-      });
-    } else if (myCharacter) {
-      const amt = chest.gold;
-      updateCampaign((prev) => ({
-        ...prev,
-        characters: prev.characters.map((c) =>
-          c.id === myCharacter.id ? { ...c, gold: (c.gold || 0) + amt } : c
-        ),
-        activeLootChest: prev.activeLootChest
-          ? { ...prev.activeLootChest, gold: 0, goldClaimedBy: myCharacter.name }
-          : null,
-      }));
+    if (claimedQty > 0) {
+      soundEngine.playSfxPreset('coin');
+      const itemDef = campaign.compendium.items.find((i) => i.id === claimedItemId);
       pushCombatLog({
         category: 'system',
         actorName: myCharacter.name,
         actorKind: 'hero',
         actorColor: myCharacter.playerColor || myCharacter.tokenColor,
-        summary: `pegou ${amt} PO do ${chest.title}`,
+        summary: `pegou ${claimedQty}× ${itemDef?.name || 'Item'} do ${chest.title}`,
       });
+    }
+  };
+
+  const claimGold = (splitParty: boolean) => {
+    if (chest.gold <= 0 || chest.goldClaimedBy) return;
+
+    if (splitParty && campaign.characters.length > 0) {
+      let claimedTotal = 0;
+      let baseShare = 0;
+      let rem = 0;
+      updateCampaign((prev) => {
+        if (!prev.activeLootChest || prev.activeLootChest.gold <= 0 || prev.activeLootChest.goldClaimedBy) {
+          return prev;
+        }
+        const n = prev.characters.length;
+        if (n <= 0) return prev;
+        claimedTotal = prev.activeLootChest.gold;
+        baseShare = Math.floor(claimedTotal / n);
+        rem = claimedTotal % n;
+        const splitLabel =
+          rem > 0
+            ? `Dividido (${claimedTotal} PO • ${baseShare}–${baseShare + 1} PO)`
+            : `Dividido (+${baseShare} PO cada)`;
+        return {
+          ...prev,
+          characters: prev.characters.map((c, idx) => ({
+            ...c,
+            gold: (c.gold || 0) + baseShare + (idx < rem ? 1 : 0),
+          })),
+          activeLootChest: {
+            ...prev.activeLootChest,
+            gold: 0,
+            goldClaimedBy: splitLabel,
+          },
+        };
+      });
+      if (claimedTotal > 0) {
+        soundEngine.playSfxPreset('coin');
+        pushCombatLog({
+          category: 'system',
+          actorName: 'Grupo',
+          actorKind: 'system',
+          summary: `dividiu ${claimedTotal} PO do ${chest.title} (${
+            rem > 0 ? `${baseShare} a ${baseShare + 1}` : `+${baseShare}`
+          } PO por herói)`,
+        });
+      }
+    } else if (myCharacter) {
+      let claimedTotal = 0;
+      updateCampaign((prev) => {
+        if (!prev.activeLootChest || prev.activeLootChest.gold <= 0 || prev.activeLootChest.goldClaimedBy) {
+          return prev;
+        }
+        claimedTotal = prev.activeLootChest.gold;
+        return {
+          ...prev,
+          characters: prev.characters.map((c) =>
+            c.id === myCharacter.id ? { ...c, gold: (c.gold || 0) + claimedTotal } : c
+          ),
+          activeLootChest: {
+            ...prev.activeLootChest,
+            gold: 0,
+            goldClaimedBy: myCharacter.name,
+          },
+        };
+      });
+      if (claimedTotal > 0) {
+        soundEngine.playSfxPreset('coin');
+        pushCombatLog({
+          category: 'system',
+          actorName: myCharacter.name,
+          actorKind: 'hero',
+          actorColor: myCharacter.playerColor || myCharacter.tokenColor,
+          summary: `pegou ${claimedTotal} PO do ${chest.title}`,
+        });
+      }
     }
   };
 
@@ -113,15 +189,20 @@ export const LootChestModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-[72] bg-black/65 backdrop-blur-xs flex items-center justify-center p-4 pointer-events-auto">
+    <div
+      data-modal-overlay="true"
+      data-sub-overlay="true"
+      className="fixed inset-0 z-[72] bg-[#040508]/80 backdrop-blur-[3px] flex items-center justify-center p-4 pointer-events-auto"
+    >
       <div className="w-full max-w-lg animate-modal-unfurl">
         <OrnateFrame
-          accentColor="#eab308"
-          className="rpg-glass-panel rounded-xl overflow-hidden flex flex-col shadow-[0_24px_70px_rgba(0,0,0,0.92)]"
+          accentColor="#b89146"
+          cornerSize={16}
+          className="rpg-panel rpg-grain rounded-lg overflow-hidden flex flex-col"
         >
           {/* Header */}
           <div
-            className="px-4 py-3 border-b flex items-center justify-between gap-2 bg-gradient-to-r from-amber-950/60 via-black/40 to-amber-950/60"
+            className="px-4 py-3 border-b flex items-center justify-between gap-2 bg-[#0d0f16]"
             style={{ borderColor: 'var(--border-subtle)' }}
           >
             <div className="flex items-center gap-2 min-w-0">
@@ -137,12 +218,21 @@ export const LootChestModal: React.FC = () => {
                 </p>
               </div>
             </div>
-            {role === 'gm' && (
+            {role === 'gm' ? (
               <button
                 type="button"
                 onClick={closeChest}
                 className="rpg-card p-1.5 rounded text-amber-200 hover:border-amber-400 cursor-pointer"
                 title="Fechar Baú para todos"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setMinimizedChestId(chest.id)}
+                className="rpg-card p-1.5 rounded text-amber-200 hover:border-amber-400 cursor-pointer"
+                title="Minimizar Baú localmente (Esc)"
               >
                 <X className="w-4 h-4" />
               </button>

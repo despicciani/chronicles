@@ -1,12 +1,11 @@
-import React, { useState } from 'react';
-import { X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Eye, X } from 'lucide-react';
 import { CampaignProvider, useCampaign } from './context/CampaignContext';
 import { ActiveModalType, TopHeader } from './components/TopHeader';
 import { InitiativeBar } from './components/InitiativeBar';
 import { StageCanvas } from './components/StageCanvas';
 import { RightSidebar } from './components/RightSidebar';
 import { CharacterSheetModal } from './components/CharacterSheetModal';
-import { CombatLogWidget } from './components/CombatLogWidget';
 import { InspectEntityModal } from './components/InspectEntityModal';
 import { LootChestModal } from './components/LootChestModal';
 import { CompendiumModal } from './components/CompendiumModal';
@@ -22,81 +21,164 @@ import { CombatDuelOverlay } from './components/CombatDuelOverlay';
 import { InitiativeCeremonyOverlay } from './components/InitiativeCeremonyOverlay';
 import { PlayerActionHUD } from './components/PlayerActionHUD';
 import { EntitySheetHost } from './components/EntitySheetModal';
+import { OrnateFrame } from './components/OrnateFrame';
 import { PromptDialogHost } from './components/PromptDialog';
 
 const HandoutOverlay: React.FC = () => {
   const { activeHandout, dismissHandout, resolveAssetUrl } = useCampaign();
+
+  useEffect(() => {
+    if (!activeHandout) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dismissHandout();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeHandout, dismissHandout]);
+
   if (!activeHandout) return null;
+
+  const isSecret = Boolean(
+    activeHandout.targetPlayerName ||
+      (activeHandout.recipientCharacterIds &&
+        activeHandout.recipientCharacterIds.length > 0)
+  );
 
   return (
     <div
-      className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+      data-modal-overlay="true"
+      data-sub-overlay="true"
+      className="fixed inset-0 z-[65] bg-[#040508]/82 backdrop-blur-[3px] flex items-center justify-center p-4"
       onClick={dismissHandout}
     >
-      <div
-        className="rpg-glass-panel rounded-2xl max-w-xl w-full p-5 space-y-3 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
+      <OrnateFrame
+        accentColor={isSecret ? '#9561ce' : '#b89146'}
+        cornerSize={16}
+        className="rpg-panel rpg-grain rounded-lg max-w-xl w-full overflow-hidden animate-modal-unfurl"
       >
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            {(activeHandout.targetPlayerName ||
-              (activeHandout.recipientCharacterIds &&
-                activeHandout.recipientCharacterIds.length > 0)) && (
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-purple-500/25 text-purple-200 border border-purple-400/50 font-display font-bold">
-                👁️ Sussurro Secreto — Somente você percebeu isso
-                {activeHandout.targetPlayerName ? ` (${activeHandout.targetPlayerName})` : ''}
-              </span>
-            )}
-            <h3 className="font-display font-bold text-xl mt-1" style={{ color: 'var(--accent-primary)' }}>
-              {activeHandout.title}
-            </h3>
-          </div>
-          <button onClick={dismissHandout} className="rpg-card p-1.5 rounded cursor-pointer">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {activeHandout.imageUrl && (
-          <div className="rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border-subtle)' }}>
-            <img
-              src={resolveAssetUrl(activeHandout.imageUrl)}
-              alt={activeHandout.title}
-              className="w-full max-h-[55vh] object-contain bg-black/40"
-            />
-          </div>
-        )}
-
-        {activeHandout.text && (
-          <div className="rpg-card rounded-lg p-4 text-sm leading-relaxed whitespace-pre-wrap">
-            {activeHandout.text}
-          </div>
-        )}
-
-        <div className="flex justify-end">
-          <button
-            onClick={dismissHandout}
-            className="rpg-btn-primary px-4 py-1.5 rounded text-xs cursor-pointer"
+        <div onClick={(e) => e.stopPropagation()}>
+          <div
+            className="px-5 py-3.5 border-b flex items-start justify-between gap-3 bg-[#0d0f16]"
+            style={{ borderColor: 'var(--border-subtle)' }}
           >
-            Fechar Pista
-          </button>
+            <div className="min-w-0">
+              {isSecret && (
+                <span className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.14em] px-2 py-0.5 rounded bg-[#231934] text-[#d5bdf5] border border-[#9561ce]/45 font-display font-semibold mb-1.5">
+                  <Eye className="w-3 h-3" />
+                  <span>
+                    Sussurro Secreto — Somente você percebeu
+                    {activeHandout.targetPlayerName ? ` (${activeHandout.targetPlayerName})` : ''}
+                  </span>
+                </span>
+              )}
+              <h3 className="font-display font-bold text-lg chronicle-gold-text">
+                {activeHandout.title}
+              </h3>
+            </div>
+            <button
+              type="button"
+              onClick={dismissHandout}
+              className="rpg-card w-8 h-8 rounded flex items-center justify-center text-[#a69b88] hover:text-[#ece4d5] cursor-pointer shrink-0"
+              title="Fechar (Esc)"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="p-5 space-y-4 bg-[#090b10]">
+            {activeHandout.imageUrl && (
+              <div
+                className="rounded overflow-hidden border bg-black/50"
+                style={{ borderColor: 'var(--border-hairline)' }}
+              >
+                <img
+                  src={resolveAssetUrl(activeHandout.imageUrl)}
+                  alt={activeHandout.title}
+                  className="w-full max-h-[54vh] object-contain"
+                />
+              </div>
+            )}
+
+            {activeHandout.text && (
+              <div className="rpg-well rounded p-4 font-lore text-base leading-relaxed whitespace-pre-wrap text-[#ece4d5]">
+                {activeHandout.text}
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={dismissHandout}
+                className="rpg-btn-primary px-4 py-1.5 rounded text-xs cursor-pointer"
+              >
+                Fechar Pista
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      </OrnateFrame>
     </div>
   );
 };
 
 const TabletopWorkspace: React.FC = () => {
   const [activeModal, setActiveModal] = useState<ActiveModalType>(null);
-  const [diceDrawerOpen, setDiceDrawerOpen] = useState(false);
-  const { loading, inLobby, role, myCharacter } = useCampaign();
+  const [chronicleOpen, setChronicleOpen] = useState(false);
+  const { loading, inLobby, role, hasGmPrivilege, myCharacter, pendingManualRoll, activeHandout } =
+    useCampaign();
+
+  // Global desktop RPG shortcuts: C = Sheet, Tab = Chronicle Drawer, Esc = Close Modal
+  useEffect(() => {
+    if (loading || inLobby) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isEditable =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+
+      if (e.key === 'Escape' && activeModal) {
+        if (
+          pendingManualRoll ||
+          activeHandout ||
+          document.querySelector('[data-prompt-dialog="true"], [data-sub-overlay="true"]')
+        ) {
+          return;
+        }
+        e.preventDefault();
+        setActiveModal(null);
+        return;
+      }
+
+      if (isEditable || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (document.querySelector('[data-prompt-dialog="true"]')) return;
+
+      if (e.key === 'Tab' && !activeModal) {
+        if (document.querySelector('[data-modal-overlay="true"]')) return;
+        e.preventDefault();
+        setChronicleOpen((v) => !v);
+        return;
+      }
+
+      if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
+        if (!activeModal && document.querySelector('[data-modal-overlay="true"]')) return;
+        e.preventDefault();
+        setActiveModal((curr) => (curr === 'sheet' ? null : 'sheet'));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [loading, inLobby, activeModal, pendingManualRoll, activeHandout]);
 
   if (loading) {
     return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center gap-2 bg-[#06070c]">
-        <div className="font-chronicle font-black text-3xl tracking-[0.22em] chronicle-gold-text">
+      <div className="h-screen w-screen flex flex-col items-center justify-center gap-2.5 bg-[#08090d]">
+        <div className="font-chronicle font-black text-3xl tracking-[0.24em] chronicle-gold-text">
           CHRONICLES
         </div>
-        <div className="font-lore italic text-sm text-amber-200/70">
+        <div className="font-lore italic text-sm text-[#a69b88]">
           Abrindo os tomos da campanha...
         </div>
       </div>
@@ -107,25 +189,35 @@ const TabletopWorkspace: React.FC = () => {
     return <LobbyScreen />;
   }
 
-  const needsCharacterOnboarding = role === 'player' && !myCharacter;
+  const needsCharacterOnboarding = role === 'player' && !hasGmPrivilege && !myCharacter;
 
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden relative">
-      <TopHeader activeModal={activeModal} setActiveModal={setActiveModal} />
-      <InitiativeBar />
-
-      <main className="flex-1 flex min-h-0 overflow-hidden relative z-10">
+    <div className="h-screen w-screen overflow-hidden relative bg-[#07080c]">
+      {/* Full-bleed tactical map fills 100% of the viewport */}
+      <main className="fixed inset-0 flex overflow-hidden">
         <StageCanvas />
       </main>
 
-      <RightSidebar open={diceDrawerOpen} onClose={() => setDiceDrawerOpen(false)} />
+      {/* Slim anchored 44px top chrome */}
+      <TopHeader activeModal={activeModal} setActiveModal={setActiveModal} />
 
+      {/* Floating Initiative Rail (renders only during active combat) */}
+      <InitiativeBar />
+
+      {/* Unified Right Chronicle Drawer (Combat Log + Dice + RP Chat) */}
+      <RightSidebar
+        open={chronicleOpen}
+        onOpen={() => setChronicleOpen(true)}
+        onClose={() => setChronicleOpen(false)}
+      />
+
+      {/* Bottom Anchored Action Hotbar (Player) / Tactical Command Dock (GM) */}
       <PlayerActionHUD
         onOpenSheet={() => setActiveModal('sheet')}
-        diceDrawerOpen={diceDrawerOpen}
-        onToggleDiceDrawer={() => setDiceDrawerOpen((v) => !v)}
+        diceDrawerOpen={chronicleOpen}
+        onToggleDiceDrawer={() => setChronicleOpen((v) => !v)}
       />
-      <CombatLogWidget />
+
       <LootChestModal />
       <InspectEntityModal />
 

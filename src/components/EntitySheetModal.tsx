@@ -15,13 +15,14 @@ import {
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
 import {
-  DAMAGE_TYPE_OPTIONS,
+  buildMonsterAttackFromAbility,
   formatSigned,
   getAttrMod,
   getCampaignDamageTypes,
 } from '../shared/rulesEngine';
 import { MonsterAttack, MonsterDef, NpcEntry } from '../shared/types';
 import { FileUploadButton } from './FileUploadButton';
+import { openInspectNpc } from './InspectEntityModal';
 import { OrnateFrame } from './OrnateFrame';
 import { TokenPortrait } from './TokenPortrait';
 
@@ -45,6 +46,45 @@ const DEFAULT_ATTRS: Record<string, number> = {
   car: 10,
 };
 
+const SignedIntInput: React.FC<{
+  value: number;
+  disabled?: boolean;
+  onChange: (val: number) => void;
+  className?: string;
+}> = ({ value, disabled, onChange, className }) => {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+  return (
+    <input
+      disabled={disabled}
+      type="text"
+      inputMode="numeric"
+      value={draft}
+      onChange={(e) => {
+        const raw = e.target.value;
+        if (!/^-?\d*$/.test(raw)) return;
+        setDraft(raw);
+        if (raw !== '' && raw !== '-') {
+          const parsed = parseInt(raw, 10);
+          if (!Number.isNaN(parsed)) onChange(parsed);
+        }
+      }}
+      onBlur={() => {
+        const parsed = parseInt(draft, 10);
+        if (Number.isNaN(parsed)) {
+          setDraft(String(value));
+        } else {
+          setDraft(String(parsed));
+          if (parsed !== value) onChange(parsed);
+        }
+      }}
+      className={className}
+    />
+  );
+};
+
 export const EntitySheetHost: React.FC = () => {
   const { campaign, role, updateCampaign, quickRollFormula } = useCampaign();
   const [target, setTarget] = useState<EntitySheetTarget | null>(null);
@@ -52,24 +92,34 @@ export const EntitySheetHost: React.FC = () => {
 
   useEffect(() => {
     entitySheetListener = (next) => {
+      if (next && role !== 'gm') {
+        if (next.kind === 'npc') {
+          openInspectNpc(next.id);
+        }
+        setTarget(null);
+        return;
+      }
       setTarget(next);
       setTab('combat');
     };
     return () => {
       entitySheetListener = null;
     };
-  }, []);
+  }, [role]);
 
   useEffect(() => {
     if (!target) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setTarget(null);
+      if (e.key === 'Escape') {
+        if (document.querySelector('[data-prompt-dialog="true"]')) return;
+        setTarget(null);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [target]);
 
-  if (!target) return null;
+  if (!target || role !== 'gm') return null;
 
   const isMonster = target.kind === 'monster';
   const monster: MonsterDef | undefined = isMonster
@@ -98,29 +148,33 @@ export const EntitySheetHost: React.FC = () => {
 
   const patchMonster = (patch: Partial<MonsterDef>) => {
     if (!monster) return;
-    updateCampaign((prev) => ({
-      ...prev,
-      compendium: {
-        ...prev.compendium,
-        monsters: prev.compendium.monsters.map((m) =>
-          m.id === monster.id ? { ...m, ...patch } : m
-        ),
-      },
-      maps: prev.maps.map((mp) => ({
+    updateCampaign((prev) => {
+      const updatedTokenNames = new Map<string, string>();
+      const nextMaps = prev.maps.map((mp) => ({
         ...mp,
         tokens: mp.tokens.map((t) => {
           if (t.type !== 'monster' || t.referenceId !== monster.id) return t;
           const nextMax = patch.maxHp ?? t.maxHp;
+          const numSuffix = t.name.match(/\s+#\d+$/)?.[0] || '';
+          const nextName =
+            patch.name !== undefined ? `${patch.name}${numSuffix}` : t.name;
+          updatedTokenNames.set(t.id, nextName);
           return {
             ...t,
-            name: patch.name !== undefined ? patch.name : t.name,
+            name: nextName,
             maxHp: nextMax,
             hp: Math.min(t.hp, nextMax),
             defense: patch.defense ?? t.defense,
             color: patch.tokenColor ?? t.color,
             imageUrl: patch.imageUrl !== undefined ? patch.imageUrl : t.imageUrl,
+            hideNameFromPlayers:
+              patch.hideNameFromPlayers !== undefined
+                ? patch.hideNameFromPlayers
+                : t.hideNameFromPlayers,
             hideAcFromPlayers:
               patch.hideAcFromPlayers !== undefined ? patch.hideAcFromPlayers : t.hideAcFromPlayers,
+            hideHpFromPlayers:
+              patch.hideHpFromPlayers !== undefined ? patch.hideHpFromPlayers : t.hideHpFromPlayers,
             isBoss: patch.isBoss !== undefined ? patch.isBoss : t.isBoss,
             bossTitle: patch.bossTitle !== undefined ? patch.bossTitle : t.bossTitle,
             bossPhase2HpPct:
@@ -137,8 +191,35 @@ export const EntitySheetHost: React.FC = () => {
                 : t.legendaryResistancesMax,
           };
         }),
-      })),
-    }));
+      }));
+      return {
+        ...prev,
+        compendium: {
+          ...prev.compendium,
+          monsters: prev.compendium.monsters.map((m) =>
+            m.id === monster.id ? { ...m, ...patch } : m
+          ),
+        },
+        maps: nextMaps,
+        combat: {
+          ...prev.combat,
+          combatants: prev.combat.combatants.map((cb) => {
+            if (cb.type !== 'monster' || cb.referenceId !== monster.id) return cb;
+            const nextMax = patch.maxHp ?? cb.maxHp;
+            const tokName = cb.tokenId ? updatedTokenNames.get(cb.tokenId) : undefined;
+            const numSuffix = cb.name.match(/\s+#\d+$/)?.[0] || '';
+            return {
+              ...cb,
+              name: tokName ?? (patch.name !== undefined ? `${patch.name}${numSuffix}` : cb.name),
+              maxHp: nextMax,
+              hp: Math.min(cb.hp, nextMax),
+              speedMeters: patch.speed ?? cb.speedMeters,
+              color: patch.tokenColor ?? cb.color,
+            };
+          }),
+        },
+      };
+    });
   };
 
   const patchNpc = (patch: Partial<NpcEntry>) => {
@@ -163,9 +244,36 @@ export const EntitySheetHost: React.FC = () => {
             defense: effectivePatch.defense ?? t.defense,
             color: effectivePatch.tokenColor ?? t.color,
             imageUrl: effectivePatch.imageUrl !== undefined ? effectivePatch.imageUrl : t.imageUrl,
+            hideNameFromPlayers:
+              effectivePatch.hideNameFromPlayers !== undefined
+                ? effectivePatch.hideNameFromPlayers
+                : t.hideNameFromPlayers,
+            hideAcFromPlayers:
+              effectivePatch.hideAcFromPlayers !== undefined
+                ? effectivePatch.hideAcFromPlayers
+                : t.hideAcFromPlayers,
+            hideHpFromPlayers:
+              effectivePatch.hideHpFromPlayers !== undefined
+                ? effectivePatch.hideHpFromPlayers
+                : t.hideHpFromPlayers,
           };
         }),
       })),
+      combat: {
+        ...prev.combat,
+        combatants: prev.combat.combatants.map((cb) => {
+          if (cb.type === 'character' || cb.referenceId !== npc.id) return cb;
+          const nextMax = effectivePatch.maxHp ?? cb.maxHp;
+          return {
+            ...cb,
+            name: effectivePatch.name !== undefined ? effectivePatch.name : cb.name,
+            maxHp: nextMax,
+            hp: Math.min(cb.hp, nextMax),
+            speedMeters: effectivePatch.speed ?? cb.speedMeters,
+            color: effectivePatch.tokenColor ?? cb.color,
+          };
+        }),
+      },
     }));
   };
 
@@ -199,7 +307,9 @@ export const EntitySheetHost: React.FC = () => {
 
   return (
     <div
-      className="fixed inset-0 z-[95] bg-black/78 backdrop-blur-xs flex items-center justify-center p-3 md:p-6"
+      data-modal-overlay="true"
+      data-sub-overlay="true"
+      className="fixed inset-0 z-[95] bg-[#040508]/80 backdrop-blur-[3px] flex items-center justify-center p-3 md:p-5"
       onClick={() => setTarget(null)}
     >
       <div
@@ -207,12 +317,13 @@ export const EntitySheetHost: React.FC = () => {
         onClick={(e) => e.stopPropagation()}
       >
         <OrnateFrame
-          accentColor={monster?.isBoss ? '#dc2626' : '#d4aa48'}
-          className="rpg-glass-panel rounded-xl w-full h-full flex flex-col overflow-hidden"
+          accentColor={monster?.isBoss ? '#9e2427' : '#b89146'}
+          cornerSize={16}
+          className="rpg-panel rpg-grain rounded-lg w-full h-full flex flex-col overflow-hidden"
         >
           {/* Header with top-right pinned Close X */}
           <div
-            className="px-5 py-3.5 border-b flex items-center justify-between gap-3 shrink-0"
+            className="px-5 py-3.5 border-b flex items-center justify-between gap-3 shrink-0 bg-[#0d0f16]"
             style={{ borderColor: 'var(--border-subtle)' }}
           >
             <div className="flex items-center gap-3 min-w-0">
@@ -330,6 +441,49 @@ export const EntitySheetHost: React.FC = () => {
                       />
                     )}
                   </div>
+                  {canEdit && (
+                    <div className="sm:col-span-4 grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-white/10">
+                      <label className="rpg-socket rounded px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] cursor-pointer select-none">
+                        <span className="text-[#d6ccb8]">Ocultar Nome p/ Jogadores (???)</span>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(monster ? monster.hideNameFromPlayers : npc?.hideNameFromPlayers)}
+                          onChange={(e) =>
+                            isMonster
+                              ? patchMonster({ hideNameFromPlayers: e.target.checked })
+                              : patchNpc({ hideNameFromPlayers: e.target.checked })
+                          }
+                          className="accent-[#a855f7]"
+                        />
+                      </label>
+                      <label className="rpg-socket rounded px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] cursor-pointer select-none">
+                        <span className="text-[#d6ccb8]">Ocultar C.A. dos Jogadores</span>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(monster ? monster.hideAcFromPlayers : npc?.hideAcFromPlayers)}
+                          onChange={(e) =>
+                            isMonster
+                              ? patchMonster({ hideAcFromPlayers: e.target.checked })
+                              : patchNpc({ hideAcFromPlayers: e.target.checked })
+                          }
+                          className="accent-[#d4ad5c]"
+                        />
+                      </label>
+                      <label className="rpg-socket rounded px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] cursor-pointer select-none">
+                        <span className="text-[#d6ccb8]">Ocultar Vida (PV)</span>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(monster ? monster.hideHpFromPlayers : npc?.hideHpFromPlayers)}
+                          onChange={(e) =>
+                            isMonster
+                              ? patchMonster({ hideHpFromPlayers: e.target.checked })
+                              : patchNpc({ hideHpFromPlayers: e.target.checked })
+                          }
+                          className="accent-[#d4ad5c]"
+                        />
+                      </label>
+                    </div>
+                  )}
                 </div>
 
                 {/* Vitals & Combat Stats */}
@@ -371,11 +525,10 @@ export const EntitySheetHost: React.FC = () => {
                   <div className="rpg-card rounded-lg p-3 text-center">
                     <div className="text-[10px] uppercase opacity-75 mb-1">Iniciativa</div>
                     <div className="flex items-center gap-1">
-                      <input
+                      <SignedIntInput
                         disabled={!canEdit}
-                        type="number"
                         value={(monster ? monster.initiativeBonus : npc!.initiativeBonus) ?? 0}
-                        onChange={(e) => patchCommon({ initiativeBonus: Number(e.target.value) || 0 })}
+                        onChange={(v) => patchCommon({ initiativeBonus: v })}
                         className="rpg-input w-full text-center font-mono-dice font-bold text-base"
                       />
                       <button
@@ -463,13 +616,12 @@ export const EntitySheetHost: React.FC = () => {
                         <div key={sv.key} className="rpg-socket rounded-lg p-2 flex items-center justify-between gap-1.5">
                           <span className="font-display font-bold text-[10px] truncate">{sv.label}</span>
                           <div className="flex items-center gap-1 shrink-0">
-                            <input
+                            <SignedIntInput
                               disabled={!canEdit}
-                              type="number"
                               value={val}
-                              onChange={(e) =>
+                              onChange={(v) =>
                                 patchCommon({
-                                  saves: { ...saves, [sv.key]: Number(e.target.value) || 0 },
+                                  saves: { ...saves, [sv.key]: v },
                                 })
                               }
                               className="rpg-input w-12 text-center py-0.5 font-mono-dice font-bold"
@@ -519,7 +671,7 @@ export const EntitySheetHost: React.FC = () => {
                     <div key={grp.key} className="space-y-1">
                       <div className="text-[10px] uppercase opacity-75">{grp.label}</div>
                       <div className="flex flex-wrap gap-1">
-                        {DAMAGE_TYPE_OPTIONS.map((dt) => {
+                        {getCampaignDamageTypes(campaign).map((dt) => {
                           const active = grp.list.includes(dt);
                           return (
                             <button
@@ -576,6 +728,7 @@ export const EntitySheetHost: React.FC = () => {
                               type="button"
                               disabled={!canEdit || matchingTokens.length === 0}
                               onClick={() => {
+                                const shouldAdd = !isActive;
                                 updateCampaign((prev) => ({
                                   ...prev,
                                   maps: prev.maps.map((m) =>
@@ -590,12 +743,14 @@ export const EntitySheetHost: React.FC = () => {
                                             ) {
                                               return t;
                                             }
-                                            const has = (t.activeConditionIds || []).includes(cond.id);
+                                            const cur = t.activeConditionIds || [];
                                             return {
                                               ...t,
-                                              activeConditionIds: has
-                                                ? t.activeConditionIds.filter((id) => id !== cond.id)
-                                                : [...(t.activeConditionIds || []), cond.id],
+                                              activeConditionIds: shouldAdd
+                                                ? cur.includes(cond.id)
+                                                  ? cur
+                                                  : [...cur, cond.id]
+                                                : cur.filter((id) => id !== cond.id),
                                             };
                                           }),
                                         }
@@ -652,20 +807,10 @@ export const EntitySheetHost: React.FC = () => {
                             } else if (kind === 'ability') {
                               const ab = campaign.compendium.abilities.find((a) => a.id === refId);
                               if (!ab) return;
-                              const hasNoDamage = !ab.damageType;
-                              const isHeal = ab.damageType?.toLowerCase() === 'cura';
-                              const nextAtk: MonsterAttack = {
-                                name: ab.name,
-                                attackBonus: hasNoDamage || isHeal ? 0 : Math.max(2, Math.floor(((attrs.int ?? 10) - 10) / 2) + 2),
-                                damageFormula: hasNoDamage
-                                  ? ''
-                                  : (ab.damageFormula || '1d8').replace(/@\w+/g, '0').replace(/\+\s*0\b/g, '').trim() || '1d8',
-                                damageType: ab.damageType || '',
-                                range: ab.range || 'Pessoal',
-                                sourceAbilityId: ab.id,
-                                applyConditionId: ab.applyConditionId,
-                                conditionDurationRounds: ab.conditionDurationRounds,
-                              };
+                              const nextAtk = buildMonsterAttackFromAbility(
+                                ab,
+                                Math.max(2, Math.floor(((attrs.int ?? 10) - 10) / 2) + 2)
+                              );
                               patchCommon({ attacks: [...attacks, nextAtk] });
                             }
                           }}
@@ -835,6 +980,128 @@ export const EntitySheetHost: React.FC = () => {
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
+                            )}
+                          </div>
+                          {/* Optional AoE & Saving Throw Row (editable on custom attacks, synced on Compendium abilities) */}
+                          <div className="sm:col-span-12 pt-1.5 border-t border-white/10 grid grid-cols-2 sm:grid-cols-12 gap-1.5 items-center text-[10px]">
+                            <select
+                              disabled={!canEdit || isLinked}
+                              value={atk.aoeShape || ''}
+                              onChange={(e) => {
+                                const shapeVal = (e.target.value || undefined) as MonsterAttack['aoeShape'];
+                                patchCommon({
+                                  attacks: attacks.map((a, i) =>
+                                    i === idx
+                                      ? {
+                                          ...a,
+                                          aoeShape: shapeVal,
+                                          aoeSizeMeters: shapeVal ? a.aoeSizeMeters || 6 : undefined,
+                                          range:
+                                            shapeVal && (!a.range || a.range === '1,5m')
+                                              ? 'Distância Média (18m)'
+                                              : a.range,
+                                        }
+                                      : a
+                                  ),
+                                });
+                              }}
+                              className="rpg-input sm:col-span-3 py-0.5 text-[10px] disabled:opacity-70"
+                              title="Forma de Área de Efeito (AoE)"
+                            >
+                              <option value="">Área: Alvo Único</option>
+                              <option value="sphere">Área: Esfera / Círculo</option>
+                              <option value="cone">Área: Cone</option>
+                              <option value="line">Área: Linha</option>
+                              <option value="cube">Área: Cubo</option>
+                            </select>
+                            {atk.aoeShape && (
+                              <>
+                                <input
+                                  disabled={!canEdit || isLinked}
+                                  type="number"
+                                  min={1.5}
+                                  step={1.5}
+                                  value={atk.aoeSizeMeters ?? 6}
+                                  onChange={(e) =>
+                                    patchCommon({
+                                      attacks: attacks.map((a, i) =>
+                                        i === idx
+                                          ? {
+                                              ...a,
+                                              aoeSizeMeters: Math.max(1.5, Number(e.target.value) || 6),
+                                            }
+                                          : a
+                                      ),
+                                    })
+                                  }
+                                  placeholder="6m"
+                                  title="Diâmetro (Esfera) ou Comprimento em metros"
+                                  className="rpg-input sm:col-span-2 py-0.5 text-center font-mono-dice text-[10px] disabled:opacity-70"
+                                />
+                                <label className="sm:col-span-2 flex items-center gap-1 cursor-pointer select-none opacity-85">
+                                  <input
+                                    disabled={!canEdit || isLinked}
+                                    type="checkbox"
+                                    checked={Boolean(atk.aoePersistent)}
+                                    onChange={(e) =>
+                                      patchCommon({
+                                        attacks: attacks.map((a, i) =>
+                                          i === idx ? { ...a, aoePersistent: e.target.checked } : a
+                                        ),
+                                      })
+                                    }
+                                    className="accent-amber-400"
+                                  />
+                                  <span>Manter no mapa</span>
+                                </label>
+                              </>
+                            )}
+                            <select
+                              disabled={!canEdit || isLinked}
+                              value={atk.saveSkillId || ''}
+                              onChange={(e) =>
+                                patchCommon({
+                                  attacks: attacks.map((a, i) =>
+                                    i === idx
+                                      ? {
+                                          ...a,
+                                          saveSkillId: e.target.value || undefined,
+                                          saveDcFormula:
+                                            e.target.value && !a.saveDcFormula ? '13' : a.saveDcFormula,
+                                        }
+                                      : a
+                                  ),
+                                })
+                              }
+                              className={`rpg-input py-0.5 text-[10px] disabled:opacity-70 ${
+                                atk.aoeShape ? 'sm:col-span-3' : 'sm:col-span-5'
+                              }`}
+                              title="Teste de Resistência (Salvaguarda) do alvo"
+                            >
+                              <option value="">Salvaguarda: Nenhuma</option>
+                              {campaign.compendium.skills
+                                .filter((s) => s.isSavingThrow)
+                                .map((s) => (
+                                  <option key={s.id} value={s.id}>
+                                    🛡️ {s.name}
+                                  </option>
+                                ))}
+                            </select>
+                            {atk.saveSkillId && (
+                              <input
+                                disabled={!canEdit || isLinked}
+                                value={atk.saveDcFormula || ''}
+                                onChange={(e) =>
+                                  patchCommon({
+                                    attacks: attacks.map((a, i) =>
+                                      i === idx ? { ...a, saveDcFormula: e.target.value } : a
+                                    ),
+                                  })
+                                }
+                                placeholder="CD (ex: 14)"
+                                title="CD da Salvaguarda (número fixo ou fórmula como 8 + @prof + @int)"
+                                className="rpg-input sm:col-span-2 py-0.5 text-center font-mono-dice text-[10px] disabled:opacity-70"
+                              />
                             )}
                           </div>
                         </div>

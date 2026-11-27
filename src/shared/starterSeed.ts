@@ -447,8 +447,11 @@ export function createStarterCampaign(): CampaignState {
           costMp: 5,
           range: '36m (Raio de 6m)',
           duration: 'Instantâneo',
-          description: 'Explosão flamejante em área. Alvos fazem Reflexos para metade do dano.',
-          attackFormula: '1d20 + @int + @prof',
+          aoeShape: 'sphere',
+          aoeSizeMeters: 12,
+          aoeColor: '#f97316',
+          createsSurface: 'fire',
+          description: 'Explosão flamejante em área de 6m de raio. Alvos fazem Reflexos para metade do dano.',
           damageFormula: '8d6',
           damageType: 'Fogo',
           saveSkillId: 'reflexos',
@@ -703,7 +706,7 @@ export function createStarterCampaign(): CampaignState {
           description: 'Manto tecido nas florestas ancestrais. Concede +1 na Defesa (CA) e +1 em Furtividade.',
           defenseBonus: 1,
           modifiers: [
-            { target: 'skill', targetId: 'per-furtividade', value: 1, label: 'Manto Élfico' },
+            { target: 'skill', targetId: 'furtividade', value: 1, label: 'Manto Élfico' },
           ],
         },
         {

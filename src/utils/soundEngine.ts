@@ -11,16 +11,45 @@ export interface MusicPlaybackSnapshot {
 class SoundEngine {
   private ctx: AudioContext | null = null;
   private reverbNode: ConvolverNode | null = null;
+  private sfxMasterGain: GainNode | null = null;
+  private sfxLimiter: DynamicsCompressorNode | null = null;
+  private ambientGainNode: GainNode | null = null;
   private ambientStopper: (() => void) | null = null;
   private activeAudioEl: HTMLAudioElement | null = null;
   private activeAudioUrl = '';
-  private musicVolume = 0.45;
-  private sfxVolume = 0.55;
-  private muted = false;
+  private musicVolume = (() => {
+    try {
+      const v = Number(localStorage.getItem('chronicle_music_vol'));
+      return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.38;
+    } catch {
+      return 0.38;
+    }
+  })();
+  private sfxVolume = (() => {
+    try {
+      const v = Number(localStorage.getItem('chronicle_sfx_vol'));
+      return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.24;
+    } catch {
+      return 0.24;
+    }
+  })();
+  private muted = (() => {
+    try {
+      return localStorage.getItem('chronicle_muted') === '1';
+    } catch {
+      return false;
+    }
+  })();
   private loopEnabled = true;
+  private shuffleEnabled = false;
   private playbackRate = 1.0;
   private fadeTimer: number | null = null;
+  private duckTimer: number | null = null;
+  private duckRestoreTimer: number | null = null;
+  private preDomainMusicUrl: string | null = null;
   private onTrackEndedCb: (() => void) | null = null;
+  private playlistTracks: Array<{ title: string; url: string }> = [];
+  private playlistTrigger: ((track: { title: string; url: string }) => void) | null = null;
 
   private getCtx(): AudioContext {
     if (!this.ctx) {
@@ -30,6 +59,29 @@ class SoundEngine {
       this.ctx.resume().catch(() => {});
     }
     return this.ctx;
+  }
+
+  private getSfxOutput(ctx: AudioContext): GainNode {
+    if (this.sfxMasterGain && this.sfxMasterGain.context === ctx) {
+      this.sfxMasterGain.gain.value = this.muted ? 0 : 0.55;
+      return this.sfxMasterGain;
+    }
+    // Master SFX bus with soft-knee DynamicsCompressor limiter so layered SFX never clip/distort
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -14;
+    limiter.knee.value = 12;
+    limiter.ratio.value = 12;
+    limiter.attack.value = 0.003;
+    limiter.release.value = 0.16;
+    limiter.connect(ctx.destination);
+
+    const bus = ctx.createGain();
+    bus.gain.value = this.muted ? 0 : 0.55;
+    bus.connect(limiter);
+
+    this.sfxLimiter = limiter;
+    this.sfxMasterGain = bus;
+    return bus;
   }
 
   private getReverb(ctx: AudioContext): ConvolverNode {
@@ -66,8 +118,16 @@ class SoundEngine {
 
   setMusicVolume(vol: number) {
     this.musicVolume = Math.max(0, Math.min(1, vol));
+    try {
+      localStorage.setItem('chronicle_music_vol', String(this.musicVolume));
+    } catch {
+      // ignore
+    }
     if (this.activeAudioEl && !this.fadeTimer) {
       this.activeAudioEl.volume = this.muted ? 0 : this.musicVolume;
+    }
+    if (this.ambientGainNode) {
+      this.ambientGainNode.gain.value = this.muted ? 0 : this.musicVolume * 0.22;
     }
   }
 
@@ -77,6 +137,11 @@ class SoundEngine {
 
   setSfxVolume(vol: number) {
     this.sfxVolume = Math.max(0, Math.min(1, vol));
+    try {
+      localStorage.setItem('chronicle_sfx_vol', String(this.sfxVolume));
+    } catch {
+      // ignore
+    }
   }
 
   getSfxVolume() {
@@ -92,6 +157,39 @@ class SoundEngine {
 
   getLoop() {
     return this.loopEnabled;
+  }
+
+  setShuffle(shuffle: boolean) {
+    this.shuffleEnabled = shuffle;
+    if (shuffle && this.loopEnabled) {
+      this.setLoop(false);
+    }
+  }
+
+  getShuffle() {
+    return this.shuffleEnabled;
+  }
+
+  configurePlaylist(
+    tracks: Array<{ title: string; url: string }>,
+    trigger: ((track: { title: string; url: string }) => void) | null
+  ) {
+    this.playlistTracks = tracks;
+    this.playlistTrigger = trigger;
+  }
+
+  playNextInPlaylist() {
+    if (!this.playlistTrigger || this.playlistTracks.length === 0) return;
+    const curIdx = this.playlistTracks.findIndex(
+      (t) => this.activeAudioUrl && this.activeAudioUrl.includes(t.url)
+    );
+    let nextIdx = curIdx >= 0 ? (curIdx + 1) % this.playlistTracks.length : 0;
+    if (this.shuffleEnabled && this.playlistTracks.length > 1) {
+      let rand = Math.floor(Math.random() * this.playlistTracks.length);
+      if (rand === curIdx) rand = (rand + 1) % this.playlistTracks.length;
+      nextIdx = rand;
+    }
+    this.playlistTrigger(this.playlistTracks[nextIdx]);
   }
 
   setPlaybackRate(rate: number) {
@@ -111,11 +209,24 @@ class SoundEngine {
 
   setMuted(muted: boolean) {
     this.muted = muted;
+    try {
+      localStorage.setItem('chronicle_muted', muted ? '1' : '0');
+    } catch {
+      // ignore
+    }
+    this.clearFade();
+    // Keep music & ambient alive at volume 0 so unmuting resumes smoothly right where it was!
     if (this.activeAudioEl) {
       this.activeAudioEl.volume = muted ? 0 : this.musicVolume;
+      if (!muted && this.activeAudioEl.paused && this.activeAudioUrl) {
+        this.activeAudioEl.play().catch(() => {});
+      }
     }
-    if (muted) {
-      this.stopAmbient();
+    if (this.ambientGainNode) {
+      this.ambientGainNode.gain.value = muted ? 0 : this.musicVolume * 0.22;
+    }
+    if (this.sfxMasterGain) {
+      this.sfxMasterGain.gain.value = muted ? 0 : 0.55;
     }
   }
 
@@ -136,6 +247,7 @@ class SoundEngine {
       this.ambientStopper();
       this.ambientStopper = null;
     }
+    this.ambientGainNode = null;
     if (this.activeAudioEl) {
       this.activeAudioEl.onended = null;
       this.activeAudioEl.pause();
@@ -210,28 +322,37 @@ class SoundEngine {
   }
 
   playCustomUrl(url: string, loop: boolean) {
-    if (this.muted) return;
+    if (!loop && this.muted) return;
     if (loop) this.stopAmbient();
     const audio = new Audio(url);
     audio.loop = loop ? this.loopEnabled : false;
     audio.playbackRate = this.playbackRate;
-    audio.volume = 0.01;
+    audio.volume = this.muted ? 0 : loop ? 0.01 : Math.min(0.75, this.sfxVolume * 0.72);
     audio.onended = () => {
-      if (!audio.loop && this.onTrackEndedCb) {
-        this.onTrackEndedCb();
+      if (!audio.loop) {
+        if (this.onTrackEndedCb) {
+          this.onTrackEndedCb();
+        } else if (loop && this.playlistTracks.length > 0 && this.playlistTrigger) {
+          this.playNextInPlaylist();
+        }
       }
     };
     audio.play().catch(() => {});
     if (loop) {
       this.activeAudioEl = audio;
       this.activeAudioUrl = url;
+      if (this.muted) {
+        audio.volume = 0;
+        return;
+      }
       // Gentle 450ms fade-in
-      const targetVol = this.muted ? 0 : this.musicVolume;
+      const targetVol = this.musicVolume;
       let step = 0;
       this.clearFade();
       this.fadeTimer = window.setInterval(() => {
         step++;
-        if (!this.activeAudioEl || this.activeAudioEl !== audio) {
+        if (!this.activeAudioEl || this.activeAudioEl !== audio || this.muted) {
+          if (this.muted && this.activeAudioEl === audio) audio.volume = 0;
           this.clearFade();
           return;
         }
@@ -240,18 +361,16 @@ class SoundEngine {
           this.clearFade();
         }
       }, 45);
-    } else {
-      audio.volume = this.muted ? 0 : this.sfxVolume;
     }
   }
 
   playAmbientPreset(presetKey: string) {
     this.stopAmbient();
-    if (this.muted) return;
     const ctx = this.getCtx();
     const gain = ctx.createGain();
-    gain.gain.value = this.musicVolume * 0.25;
+    gain.gain.value = this.muted ? 0 : this.musicVolume * 0.22;
     gain.connect(ctx.destination);
+    this.ambientGainNode = gain;
 
     let stopped = false;
 
@@ -329,7 +448,7 @@ class SoundEngine {
         pGain.gain.exponentialRampToValueAtTime(this.musicVolume * 0.12, ctx.currentTime + 0.1);
         pGain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.8);
         ping.connect(pGain);
-        pGain.connect(ctx.destination);
+        pGain.connect(gain);
         ping.start();
         ping.stop(ctx.currentTime + 1.9);
       }, 2400);
@@ -347,20 +466,21 @@ class SoundEngine {
   }
 
   playSfxPreset(presetKey: string) {
-    if (this.muted) return;
+    if (this.muted || this.sfxVolume <= 0.005) return;
     const ctx = this.getCtx();
     const now = ctx.currentTime;
-    const vol = Math.max(0.05, this.sfxVolume);
+    const vol = Math.max(0.02, Math.min(0.65, this.sfxVolume * 0.65));
     const reverb = this.getReverb(ctx);
+    const sfxOut = this.getSfxOutput(ctx);
 
-    const connectWithReverb = (node: AudioNode, wetAmount = 0.25) => {
-      node.connect(ctx.destination);
+    const connectWithReverb = (node: AudioNode, wetAmount = 0.2) => {
+      node.connect(sfxOut);
       if (wetAmount > 0) {
         const wet = ctx.createGain();
         wet.gain.value = wetAmount;
         node.connect(reverb);
         reverb.connect(wet);
-        wet.connect(ctx.destination);
+        wet.connect(sfxOut);
       }
     };
 
@@ -381,7 +501,7 @@ class SoundEngine {
           dg.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.038);
           src.connect(bp);
           bp.connect(dg);
-          dg.connect(ctx.destination);
+          dg.connect(sfxOut);
           src.start(now + offset);
         });
         break;
@@ -429,7 +549,7 @@ class SoundEngine {
         tg.gain.setValueAtTime(vol * 0.36, now + 0.03);
         tg.gain.exponentialRampToValueAtTime(0.001, now + 0.17);
         thud.connect(tg);
-        tg.connect(ctx.destination);
+        tg.connect(sfxOut);
         thud.start(now + 0.03);
         thud.stop(now + 0.18);
         break;
@@ -459,9 +579,45 @@ class SoundEngine {
         thg.gain.setValueAtTime(vol * 0.45, now);
         thg.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
         thump.connect(thg);
-        thg.connect(ctx.destination);
+        thg.connect(sfxOut);
         thump.start(now);
         thump.stop(now + 0.22);
+        break;
+      }
+
+      case 'teleport': {
+        // Ethereal Misty Step Whoosh + Arcane Spatial Shimmer + Arrival Pop
+        const mist = ctx.createBufferSource();
+        mist.buffer = this.createNoiseBuffer(ctx, 0.55);
+        const mf = ctx.createBiquadFilter();
+        mf.type = 'bandpass';
+        mf.frequency.setValueAtTime(650, now);
+        mf.frequency.exponentialRampToValueAtTime(2800, now + 0.22);
+        mf.frequency.exponentialRampToValueAtTime(480, now + 0.52);
+        mf.Q.value = 2.4;
+        const mg = ctx.createGain();
+        mg.gain.setValueAtTime(0.001, now);
+        mg.gain.linearRampToValueAtTime(vol * 0.28, now + 0.12);
+        mg.gain.exponentialRampToValueAtTime(0.0008, now + 0.54);
+        mist.connect(mf);
+        mf.connect(mg);
+        connectWithReverb(mg, 0.45);
+        mist.start(now);
+
+        const shimmerFreqs = [523.25, 783.99, 1046.5, 1318.5];
+        shimmerFreqs.forEach((f, idx) => {
+          const osc = ctx.createOscillator();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(f * 0.85, now + idx * 0.035);
+          osc.frequency.exponentialRampToValueAtTime(f * 1.15, now + idx * 0.035 + 0.28);
+          const sg = ctx.createGain();
+          sg.gain.setValueAtTime(vol * 0.11, now + idx * 0.035);
+          sg.gain.exponentialRampToValueAtTime(0.0008, now + idx * 0.035 + 0.34);
+          osc.connect(sg);
+          connectWithReverb(sg, 0.4);
+          osc.start(now + idx * 0.035);
+          osc.stop(now + idx * 0.035 + 0.36);
+        });
         break;
       }
 
@@ -475,7 +631,7 @@ class SoundEngine {
         twg.gain.setValueAtTime(vol * 0.28, now);
         twg.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
         twang.connect(twg);
-        twg.connect(ctx.destination);
+        twg.connect(sfxOut);
         twang.start(now);
         twang.stop(now + 0.14);
 
@@ -491,7 +647,7 @@ class SoundEngine {
         zg.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
         zip.connect(zf);
         zf.connect(zg);
-        zg.connect(ctx.destination);
+        zg.connect(sfxOut);
         zip.start(now + 0.03);
         break;
       }
@@ -700,7 +856,7 @@ class SoundEngine {
           pg.gain.setValueAtTime(vol * 0.24, now + off);
           pg.gain.exponentialRampToValueAtTime(0.001, now + off + 0.075);
           osc.connect(pg);
-          pg.connect(ctx.destination);
+          pg.connect(sfxOut);
           osc.start(now + off);
           osc.stop(now + off + 0.08);
         });
@@ -946,6 +1102,838 @@ class SoundEngine {
         thud.stop(now + 0.3);
       }
     }
+  }
+
+  /**
+   * Temporarily ducks background music / ambient down to ~14% during an Ultimate Cut-In,
+   * then smoothly restores it so the Ultimate commands the entire room.
+   */
+  duckMusicTemporarily(durationMs = 3100, targetRatio = 0.14) {
+    if (this.muted) return;
+    if (this.duckTimer !== null) {
+      window.clearInterval(this.duckTimer);
+      this.duckTimer = null;
+    }
+    if (this.duckRestoreTimer !== null) {
+      window.clearTimeout(this.duckRestoreTimer);
+      this.duckRestoreTimer = null;
+    }
+    const audio = this.activeAudioEl;
+    const amb = this.ambientGainNode;
+    const origMusicVol = this.musicVolume;
+    const duckedMusicVol = Math.max(0.01, origMusicVol * targetRatio);
+
+    if (audio) {
+      audio.volume = duckedMusicVol;
+    }
+    if (amb) {
+      amb.gain.value = duckedMusicVol * 0.22;
+    }
+
+    this.duckRestoreTimer = window.setTimeout(() => {
+      this.duckRestoreTimer = null;
+      let step = 0;
+      const steps = 14;
+      this.duckTimer = window.setInterval(() => {
+        step++;
+        const t = Math.min(1, step / steps);
+        const curVol = this.muted
+          ? 0
+          : duckedMusicVol + (this.musicVolume - duckedMusicVol) * t;
+        if (this.activeAudioEl) {
+          this.activeAudioEl.volume = curVol;
+        }
+        if (this.ambientGainNode) {
+          this.ambientGainNode.gain.value = curVol * 0.22;
+        }
+        if (step >= steps && this.duckTimer !== null) {
+          window.clearInterval(this.duckTimer);
+          this.duckTimer = null;
+        }
+      }, 48);
+    }, Math.max(400, durationMs - 680));
+  }
+
+  pushDomainMusic(url: string) {
+    if (!url || !url.trim()) return;
+    if (this.preDomainMusicUrl === null && this.activeAudioUrl && this.activeAudioUrl !== url) {
+      this.preDomainMusicUrl = this.activeAudioUrl;
+    }
+    this.playCustomUrl(url, true);
+  }
+
+  popDomainMusic() {
+    const prev = this.preDomainMusicUrl;
+    this.preDomainMusicUrl = null;
+    if (prev) {
+      this.playCustomUrl(prev, true);
+    }
+  }
+
+  /**
+   * 3-Beat Cinema Ultimate SFX Synthesizer (Riser -> Silence Breath -> Sub-Bass Drop + Impact!)
+   * OR plays a custom uploaded MP3/WAV SFX with automatic background music ducking.
+   */
+  playUltimateSfx(
+    preset:
+      | 'bass-drop'
+      | 'sonic-boom'
+      | 'anime-slash'
+      | 'dimension-rift'
+      | 'demonic-roar'
+      | 'time-stop'
+      | 'celestial-choir'
+      | 'inferno-nova' = 'bass-drop',
+    customAudioUrl?: string
+  ) {
+    if (this.muted) return;
+    this.duckMusicTemporarily(3200, 0.14);
+
+    if (customAudioUrl && customAudioUrl.trim()) {
+      const audio = new Audio(customAudioUrl);
+      audio.volume = Math.min(1, Math.max(0.68, this.sfxVolume * 2.4));
+      audio.play().catch(() => {});
+      return;
+    }
+
+    const ctx = this.getCtx();
+    const now = ctx.currentTime;
+    const vol = Math.min(0.95, Math.max(0.42, this.sfxVolume * 2.1));
+    const sfxOut = this.getSfxOutput(ctx);
+    const reverb = this.getReverb(ctx);
+
+    const routeWet = (node: AudioNode, wet = 0.45) => {
+      node.connect(sfxOut);
+      if (wet > 0) {
+        const wg = ctx.createGain();
+        wg.gain.value = wet;
+        node.connect(wg);
+        wg.connect(reverb);
+        reverb.connect(sfxOut);
+      }
+    };
+
+    // Soft-clipping warmth waveshaper for cinematic sub-bass punch
+    const shaper = ctx.createWaveShaper();
+    const curve = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+      const x = (i * 2) / 256 - 1;
+      curve[i] = ((3 + 10) * x * 20 * (Math.PI / 180)) / (Math.PI + 10 * Math.abs(x));
+    }
+    shaper.curve = curve;
+
+    const dropAt = now + 0.46; // Synced to the 440-460ms Impact Frame!
+
+    if (preset === 'sonic-boom') {
+      // BEAT 1 (0.00 -> 0.40s): Harmonic Resonance Swell
+      const riserOsc = ctx.createOscillator();
+      riserOsc.type = 'sine';
+      riserOsc.frequency.setValueAtTime(280, now);
+      riserOsc.frequency.exponentialRampToValueAtTime(1650, now + 0.39);
+      const riserGain = ctx.createGain();
+      riserGain.gain.setValueAtTime(0.001, now);
+      riserGain.gain.exponentialRampToValueAtTime(vol * 0.36, now + 0.36);
+      riserGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.41);
+      riserOsc.connect(riserGain);
+      routeWet(riserGain, 0.5);
+      riserOsc.start(now);
+      riserOsc.stop(now + 0.42);
+
+      // BEAT 2 (0.46s): ACOUSTIC SHOCKWAVE BOOM + SUB DROP + HARMONIC CHORD
+      const sub = ctx.createOscillator();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(124, dropAt);
+      sub.frequency.exponentialRampToValueAtTime(28, dropAt + 1.35);
+      const subGain = ctx.createGain();
+      subGain.gain.setValueAtTime(0.001, dropAt);
+      subGain.gain.linearRampToValueAtTime(vol * 0.95, dropAt + 0.025);
+      subGain.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.65);
+      sub.connect(shaper);
+      shaper.connect(subGain);
+      routeWet(subGain, 0.25);
+      sub.start(dropAt);
+      sub.stop(dropAt + 1.7);
+
+      const noise = ctx.createBufferSource();
+      noise.buffer = this.createNoiseBuffer(ctx, 1.3);
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.Q.value = 3.2;
+      bp.frequency.setValueAtTime(2800, dropAt);
+      bp.frequency.exponentialRampToValueAtTime(75, dropAt + 0.95);
+      const ng = ctx.createGain();
+      ng.gain.setValueAtTime(vol * 0.72, dropAt);
+      ng.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.2);
+      noise.connect(bp);
+      bp.connect(ng);
+      routeWet(ng, 0.55);
+      noise.start(dropAt);
+
+      [261.63, 392.0, 587.33, 783.99].forEach((freq, idx) => {
+        const chordOsc = ctx.createOscillator();
+        chordOsc.type = idx % 2 === 0 ? 'triangle' : 'sine';
+        chordOsc.frequency.setValueAtTime(freq, dropAt + idx * 0.015);
+        const cg = ctx.createGain();
+        cg.gain.setValueAtTime(0.001, dropAt + idx * 0.015);
+        cg.gain.linearRampToValueAtTime(vol * 0.16, dropAt + 0.08 + idx * 0.015);
+        cg.gain.exponentialRampToValueAtTime(0.0008, dropAt + 1.9);
+        chordOsc.connect(cg);
+        routeWet(cg, 0.75);
+        chordOsc.start(dropAt + idx * 0.015);
+        chordOsc.stop(dropAt + 1.95);
+      });
+      return;
+    }
+
+    if (preset === 'anime-slash') {
+      // BEAT 1: Katana metallic ring + electric charge
+      const steel = ctx.createOscillator();
+      steel.type = 'sawtooth';
+      steel.frequency.setValueAtTime(2200, now);
+      steel.frequency.exponentialRampToValueAtTime(4400, now + 0.36);
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'bandpass';
+      hp.frequency.value = 3400;
+      hp.Q.value = 6;
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(0.001, now);
+      sg.gain.exponentialRampToValueAtTime(vol * 0.34, now + 0.32);
+      sg.gain.exponentialRampToValueAtTime(0.0008, now + 0.4);
+      steel.connect(hp);
+      hp.connect(sg);
+      routeWet(sg, 0.5);
+      steel.start(now);
+      steel.stop(now + 0.41);
+
+      // BEAT 2: Double Lightning Katana Slash + Heavy Thunder Sub
+      [0, 0.15].forEach((offset, idx) => {
+        const t = dropAt + offset;
+        const slashNoise = ctx.createBufferSource();
+        slashNoise.buffer = this.createNoiseBuffer(ctx, 0.55);
+        const sf = ctx.createBiquadFilter();
+        sf.type = 'bandpass';
+        sf.Q.value = 1.6;
+        sf.frequency.setValueAtTime(idx === 0 ? 4200 : 3200, t);
+        sf.frequency.exponentialRampToValueAtTime(160, t + 0.35);
+        const sng = ctx.createGain();
+        sng.gain.setValueAtTime(vol * (idx === 0 ? 0.85 : 0.62), t);
+        sng.gain.exponentialRampToValueAtTime(0.001, t + 0.48);
+        slashNoise.connect(sf);
+        sf.connect(sng);
+        routeWet(sng, 0.5);
+        slashNoise.start(t);
+      });
+
+      const sub = ctx.createOscillator();
+      sub.type = 'triangle';
+      sub.frequency.setValueAtTime(105, dropAt);
+      sub.frequency.exponentialRampToValueAtTime(26, dropAt + 1.15);
+      const subG = ctx.createGain();
+      subG.gain.setValueAtTime(vol * 0.95, dropAt);
+      subG.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.35);
+      sub.connect(shaper);
+      shaper.connect(subG);
+      routeWet(subG, 0.35);
+      sub.start(dropAt);
+      sub.stop(dropAt + 1.4);
+      return;
+    }
+
+    if (preset === 'dimension-rift') {
+      // BEAT 1: Eerie abyssal beating hum
+      [62, 66.5].forEach((f) => {
+        const o = ctx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(f, now);
+        o.frequency.linearRampToValueAtTime(f * 1.45, now + 0.39);
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.setValueAtTime(260, now);
+        lp.frequency.exponentialRampToValueAtTime(1400, now + 0.39);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.001, now);
+        g.gain.linearRampToValueAtTime(vol * 0.25, now + 0.35);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.41);
+        o.connect(lp);
+        lp.connect(g);
+        routeWet(g, 0.6);
+        o.start(now);
+        o.stop(now + 0.42);
+      });
+
+      // BEAT 2: Reality Glass Shatter Cascade + Abyssal Sub Drop
+      [1980, 2640, 3320, 4180, 2960, 4860].forEach((freq, i) => {
+        const t = dropAt + i * 0.032;
+        const shard = ctx.createOscillator();
+        shard.type = 'triangle';
+        shard.frequency.setValueAtTime(freq, t);
+        shard.frequency.exponentialRampToValueAtTime(freq * 0.72, t + 0.45);
+        const sg = ctx.createGain();
+        sg.gain.setValueAtTime(vol * 0.24, t);
+        sg.gain.exponentialRampToValueAtTime(0.0008, t + 0.55);
+        shard.connect(sg);
+        routeWet(sg, 0.75);
+        shard.start(t);
+        shard.stop(t + 0.58);
+      });
+
+      const sub = ctx.createOscillator();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(84, dropAt);
+      sub.frequency.exponentialRampToValueAtTime(22, dropAt + 1.85);
+      const subG = ctx.createGain();
+      subG.gain.setValueAtTime(0.001, dropAt);
+      subG.gain.linearRampToValueAtTime(vol * 1.0, dropAt + 0.03);
+      subG.gain.exponentialRampToValueAtTime(0.001, dropAt + 2.1);
+      sub.connect(shaper);
+      shaper.connect(subG);
+      routeWet(subG, 0.4);
+      sub.start(dropAt);
+      sub.stop(dropAt + 2.15);
+      return;
+    }
+
+    if (preset === 'demonic-roar') {
+      // BEAT 1 (0.00 -> 0.40s): Dark abyssal inhale + low sub dread groan
+      const inhale = ctx.createBufferSource();
+      inhale.buffer = this.createNoiseBuffer(ctx, 0.42);
+      const ihf = ctx.createBiquadFilter();
+      ihf.type = 'bandpass';
+      ihf.frequency.setValueAtTime(180, now);
+      ihf.frequency.exponentialRampToValueAtTime(980, now + 0.38);
+      ihf.Q.value = 2.6;
+      const ihg = ctx.createGain();
+      ihg.gain.setValueAtTime(0.001, now);
+      ihg.gain.exponentialRampToValueAtTime(vol * 0.42, now + 0.36);
+      ihg.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+      inhale.connect(ihf);
+      ihf.connect(ihg);
+      routeWet(ihg, 0.55);
+      inhale.start(now);
+
+      // BEAT 2 (0.46s): COLOSSAL DEMONIC ROAR + FM VOCAL GROWL + TRITONE WAR HORN
+      const growl = ctx.createOscillator();
+      const lfo = ctx.createOscillator();
+      const lfoGain = ctx.createGain();
+      growl.type = 'sawtooth';
+      growl.frequency.setValueAtTime(142, dropAt);
+      growl.frequency.exponentialRampToValueAtTime(46, dropAt + 1.75);
+      lfo.type = 'sine';
+      lfo.frequency.setValueAtTime(34, dropAt);
+      lfo.frequency.linearRampToValueAtTime(18, dropAt + 1.7);
+      lfoGain.gain.setValueAtTime(32, dropAt);
+      lfoGain.gain.exponentialRampToValueAtTime(6, dropAt + 1.7);
+      lfo.connect(lfoGain);
+      lfoGain.connect(growl.frequency);
+
+      const formant = ctx.createBiquadFilter();
+      formant.type = 'bandpass';
+      formant.frequency.setValueAtTime(620, dropAt);
+      formant.frequency.exponentialRampToValueAtTime(195, dropAt + 1.65);
+      formant.Q.value = 2.4;
+
+      const gg = ctx.createGain();
+      gg.gain.setValueAtTime(0.001, dropAt);
+      gg.gain.linearRampToValueAtTime(vol * 0.85, dropAt + 0.05);
+      gg.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.9);
+      growl.connect(shaper);
+      shaper.connect(formant);
+      formant.connect(gg);
+      routeWet(gg, 0.65);
+      growl.start(dropAt);
+      lfo.start(dropAt);
+      growl.stop(dropAt + 1.95);
+      lfo.stop(dropAt + 1.95);
+
+      // Breath snarl noise burst
+      const snarl = ctx.createBufferSource();
+      snarl.buffer = this.createNoiseBuffer(ctx, 1.55);
+      const sf = ctx.createBiquadFilter();
+      sf.type = 'bandpass';
+      sf.frequency.setValueAtTime(950, dropAt);
+      sf.frequency.exponentialRampToValueAtTime(210, dropAt + 1.4);
+      sf.Q.value = 1.6;
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(vol * 0.68, dropAt);
+      sg.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.5);
+      snarl.connect(sf);
+      sf.connect(sg);
+      routeWet(sg, 0.6);
+      snarl.start(dropAt);
+
+      // Hellish Tritone Doom Brass + Sub Earthquake
+      [55, 77.78, 110].forEach((freq, idx) => {
+        const horn = ctx.createOscillator();
+        horn.type = idx === 0 ? 'sine' : 'sawtooth';
+        horn.frequency.setValueAtTime(freq, dropAt);
+        horn.frequency.exponentialRampToValueAtTime(freq * 0.84, dropAt + 1.95);
+        const hlp = ctx.createBiquadFilter();
+        hlp.type = 'lowpass';
+        hlp.frequency.setValueAtTime(idx === 0 ? 180 : 620, dropAt);
+        const hg = ctx.createGain();
+        hg.gain.setValueAtTime(0.001, dropAt);
+        hg.gain.linearRampToValueAtTime(vol * (idx === 0 ? 0.92 : 0.2), dropAt + 0.04);
+        hg.gain.exponentialRampToValueAtTime(0.001, dropAt + 2.05);
+        horn.connect(hlp);
+        hlp.connect(hg);
+        routeWet(hg, 0.7);
+        horn.start(dropAt);
+        horn.stop(dropAt + 2.1);
+      });
+      return;
+    }
+
+    if (preset === 'time-stop') {
+      // BEAT 1 (0.00 -> 0.40s): Rapid clockwork ticks slowing/pitching down into stillness
+      const tickOffsets = [0.0, 0.09, 0.19, 0.31];
+      tickOffsets.forEach((off, idx) => {
+        const t = now + off;
+        const tick = ctx.createOscillator();
+        tick.type = 'triangle';
+        const baseF = 1600 - idx * 240;
+        tick.frequency.setValueAtTime(baseF, t);
+        tick.frequency.exponentialRampToValueAtTime(baseF * 0.45, t + 0.045);
+        const tg = ctx.createGain();
+        tg.gain.setValueAtTime(vol * (0.34 + idx * 0.05), t);
+        tg.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+        tick.connect(tg);
+        routeWet(tg, 0.4);
+        tick.start(t);
+        tick.stop(t + 0.055);
+      });
+
+      // BEAT 2 (0.46s): ICONIC TIME-STOP HEAVY PITCH-WARP BASS DIVE + STASIS RING
+      const warp = ctx.createOscillator();
+      warp.type = 'sawtooth';
+      warp.frequency.setValueAtTime(240, dropAt);
+      warp.frequency.exponentialRampToValueAtTime(23, dropAt + 1.55);
+      const wlp = ctx.createBiquadFilter();
+      wlp.type = 'lowpass';
+      wlp.frequency.setValueAtTime(2200, dropAt);
+      wlp.frequency.exponentialRampToValueAtTime(85, dropAt + 1.45);
+      const wg = ctx.createGain();
+      wg.gain.setValueAtTime(0.001, dropAt);
+      wg.gain.linearRampToValueAtTime(vol * 0.92, dropAt + 0.025);
+      wg.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.85);
+      warp.connect(shaper);
+      shaper.connect(wlp);
+      wlp.connect(wg);
+      routeWet(wg, 0.55);
+      warp.start(dropAt);
+      warp.stop(dropAt + 1.9);
+
+      // Sub-sine drop punch
+      const sub = ctx.createOscillator();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(118, dropAt);
+      sub.frequency.exponentialRampToValueAtTime(24, dropAt + 1.6);
+      const subG = ctx.createGain();
+      subG.gain.setValueAtTime(vol * 0.96, dropAt);
+      subG.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.9);
+      sub.connect(subG);
+      routeWet(subG, 0.35);
+      sub.start(dropAt);
+      sub.stop(dropAt + 1.95);
+
+      // Frozen crystalline stasis overtone
+      [1046.5, 1567.98, 2093.0].forEach((f, idx) => {
+        const chime = ctx.createOscillator();
+        chime.type = 'sine';
+        chime.frequency.setValueAtTime(f, dropAt + 0.04);
+        chime.frequency.exponentialRampToValueAtTime(f * 0.985, dropAt + 1.95);
+        const cg = ctx.createGain();
+        cg.gain.setValueAtTime(0.001, dropAt + 0.04);
+        cg.gain.linearRampToValueAtTime(vol * (0.14 / (idx + 1)), dropAt + 0.14);
+        cg.gain.exponentialRampToValueAtTime(0.0008, dropAt + 2.05);
+        chime.connect(cg);
+        routeWet(cg, 0.8);
+        chime.start(dropAt + 0.04);
+        chime.stop(dropAt + 2.1);
+      });
+      return;
+    }
+
+    if (preset === 'celestial-choir') {
+      // BEAT 1 (0.00 -> 0.40s): Ascending angelic harp arpeggio
+      const arp = [523.25, 659.25, 783.99, 1046.5, 1318.5, 1567.98];
+      arp.forEach((f, idx) => {
+        const t = now + idx * 0.055;
+        const o = ctx.createOscillator();
+        o.type = 'triangle';
+        o.frequency.value = f;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.001, t);
+        g.gain.linearRampToValueAtTime(vol * 0.2, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0008, t + 0.36);
+        o.connect(g);
+        routeWet(g, 0.65);
+        o.start(t);
+        o.stop(t + 0.38);
+      });
+
+      // BEAT 2 (0.46s): CATHEDRAL BELL STRIKE + RADIANT CHOIR CHORD + ORGAN SUB PEDAL
+      [261.63, 523.25, 783.99, 1046.5, 1567.98].forEach((freq, idx) => {
+        const bell = ctx.createOscillator();
+        bell.type = idx % 2 === 0 ? 'sine' : 'triangle';
+        bell.frequency.setValueAtTime(freq, dropAt);
+        const bg = ctx.createGain();
+        bg.gain.setValueAtTime(vol * (0.28 / (idx * 0.55 + 1)), dropAt);
+        bg.gain.exponentialRampToValueAtTime(0.0008, dropAt + 2.2);
+        bell.connect(bg);
+        routeWet(bg, 0.8);
+        bell.start(dropAt);
+        bell.stop(dropAt + 2.25);
+      });
+
+      // Radiant detuned Major-9th choir pad (C4 - G4 - B4 - D5 - E5)
+      [261.63, 392.0, 493.88, 587.33, 659.25].forEach((freq) => {
+        [-4, 4].forEach((detune) => {
+          const voice = ctx.createOscillator();
+          voice.type = 'triangle';
+          voice.frequency.value = freq;
+          voice.detune.value = detune;
+          const vbp = ctx.createBiquadFilter();
+          vbp.type = 'lowpass';
+          vbp.frequency.setValueAtTime(1800, dropAt);
+          vbp.frequency.exponentialRampToValueAtTime(650, dropAt + 2.2);
+          const vg = ctx.createGain();
+          vg.gain.setValueAtTime(0.001, dropAt);
+          vg.gain.linearRampToValueAtTime(vol * 0.085, dropAt + 0.14);
+          vg.gain.exponentialRampToValueAtTime(0.0008, dropAt + 2.3);
+          voice.connect(vbp);
+          vbp.connect(vg);
+          routeWet(vg, 0.85);
+          voice.start(dropAt);
+          voice.stop(dropAt + 2.35);
+        });
+      });
+
+      // Deep Cathedral Organ Bass Pedal
+      const organ = ctx.createOscillator();
+      organ.type = 'sine';
+      organ.frequency.setValueAtTime(65.41, dropAt);
+      const og = ctx.createGain();
+      og.gain.setValueAtTime(0.001, dropAt);
+      og.gain.linearRampToValueAtTime(vol * 0.78, dropAt + 0.05);
+      og.gain.exponentialRampToValueAtTime(0.001, dropAt + 2.1);
+      organ.connect(shaper);
+      shaper.connect(og);
+      routeWet(og, 0.5);
+      organ.start(dropAt);
+      organ.stop(dropAt + 2.15);
+      return;
+    }
+
+    if (preset === 'inferno-nova') {
+      // BEAT 1 (0.00 -> 0.40s): Imploding Vacuum Flame Suction
+      const suck = ctx.createBufferSource();
+      suck.buffer = this.createNoiseBuffer(ctx, 0.42);
+      const slp = ctx.createBiquadFilter();
+      slp.type = 'bandpass';
+      slp.frequency.setValueAtTime(3200, now);
+      slp.frequency.exponentialRampToValueAtTime(220, now + 0.38);
+      slp.Q.value = 1.8;
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(0.001, now);
+      sg.gain.exponentialRampToValueAtTime(vol * 0.48, now + 0.36);
+      sg.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+      suck.connect(slp);
+      slp.connect(sg);
+      routeWet(sg, 0.45);
+      suck.start(now);
+
+      // BEAT 2 (0.46s): PYROCLASTIC SUPERNOVA DETONATION + SEISMIC SHOCK + ROARING FIRE TAIL
+      const sub = ctx.createOscillator();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(132, dropAt);
+      sub.frequency.exponentialRampToValueAtTime(22, dropAt + 1.55);
+      const subG = ctx.createGain();
+      subG.gain.setValueAtTime(vol * 1.0, dropAt);
+      subG.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.85);
+      sub.connect(shaper);
+      shaper.connect(subG);
+      routeWet(subG, 0.35);
+      sub.start(dropAt);
+      sub.stop(dropAt + 1.9);
+
+      const blast = ctx.createBufferSource();
+      blast.buffer = this.createNoiseBuffer(ctx, 2.0);
+      const blp = ctx.createBiquadFilter();
+      blp.type = 'lowpass';
+      blp.frequency.setValueAtTime(3600, dropAt);
+      blp.frequency.exponentialRampToValueAtTime(140, dropAt + 1.85);
+      const bg = ctx.createGain();
+      bg.gain.setValueAtTime(vol * 0.92, dropAt);
+      bg.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.95);
+      blast.connect(blp);
+      blp.connect(bg);
+      routeWet(bg, 0.65);
+      blast.start(dropAt);
+
+      // Fiery brass flare overtone
+      [110, 164.81, 220].forEach((freq, idx) => {
+        const flare = ctx.createOscillator();
+        flare.type = 'sawtooth';
+        flare.frequency.setValueAtTime(freq, dropAt);
+        flare.frequency.exponentialRampToValueAtTime(freq * 0.72, dropAt + 1.6);
+        const flp = ctx.createBiquadFilter();
+        flp.type = 'lowpass';
+        flp.frequency.setValueAtTime(1100, dropAt);
+        flp.frequency.exponentialRampToValueAtTime(180, dropAt + 1.55);
+        const fg = ctx.createGain();
+        fg.gain.setValueAtTime(vol * (0.22 / (idx + 1)), dropAt);
+        fg.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.65);
+        flare.connect(flp);
+        flp.connect(fg);
+        routeWet(fg, 0.7);
+        flare.start(dropAt);
+        flare.stop(dropAt + 1.7);
+      });
+      return;
+    }
+
+    // DEFAULT: 'bass-drop' (Monumental Domain Expansion / Time-Stop Bass Drop!)
+    // BEAT 1 (0.00 -> 0.40s): Vacuum Riser Noise + Sub Tension Climb
+    const riserNoise = ctx.createBufferSource();
+    riserNoise.buffer = this.createNoiseBuffer(ctx, 0.45);
+    const rlp = ctx.createBiquadFilter();
+    rlp.type = 'lowpass';
+    rlp.frequency.setValueAtTime(180, now);
+    rlp.frequency.exponentialRampToValueAtTime(4200, now + 0.39);
+    const rng = ctx.createGain();
+    rng.gain.setValueAtTime(0.001, now);
+    rng.gain.exponentialRampToValueAtTime(vol * 0.44, now + 0.37);
+    rng.gain.exponentialRampToValueAtTime(0.001, now + 0.41);
+    riserNoise.connect(rlp);
+    rlp.connect(rng);
+    routeWet(rng, 0.4);
+    riserNoise.start(now);
+
+    const climb = ctx.createOscillator();
+    climb.type = 'triangle';
+    climb.frequency.setValueAtTime(48, now);
+    climb.frequency.exponentialRampToValueAtTime(128, now + 0.39);
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(0.001, now);
+    cg.gain.exponentialRampToValueAtTime(vol * 0.36, now + 0.37);
+    cg.gain.exponentialRampToValueAtTime(0.001, now + 0.41);
+    climb.connect(cg);
+    routeWet(cg, 0.3);
+    climb.start(now);
+    climb.stop(now + 0.42);
+
+    // BEAT 2 (0.46s after 60ms dead-air breath): COLOSSAL SUB-BASS DROP + POWER FIFTH CHORD
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(102, dropAt);
+    sub.frequency.exponentialRampToValueAtTime(26, dropAt + 1.65);
+    const subGain = ctx.createGain();
+    subGain.gain.setValueAtTime(0.001, dropAt);
+    subGain.gain.linearRampToValueAtTime(vol * 1.0, dropAt + 0.02);
+    subGain.gain.exponentialRampToValueAtTime(0.001, dropAt + 1.95);
+    sub.connect(shaper);
+    shaper.connect(subGain);
+    routeWet(subGain, 0.32);
+    sub.start(dropAt);
+    sub.stop(dropAt + 2.0);
+
+    // Sharp Impact Crack at exact drop
+    const punchNoise = ctx.createBufferSource();
+    punchNoise.buffer = this.createNoiseBuffer(ctx, 0.65);
+    const plp = ctx.createBiquadFilter();
+    plp.type = 'lowpass';
+    plp.frequency.setValueAtTime(2400, dropAt);
+    plp.frequency.exponentialRampToValueAtTime(90, dropAt + 0.55);
+    const png = ctx.createGain();
+    png.gain.setValueAtTime(vol * 0.78, dropAt);
+    png.gain.exponentialRampToValueAtTime(0.001, dropAt + 0.6);
+    punchNoise.connect(plp);
+    plp.connect(png);
+    routeWet(png, 0.6);
+    punchNoise.start(dropAt);
+
+    // Dark Cathedral Power-Fifth Chord Ringing Out
+    [73.42, 110.0, 146.83, 220.0].forEach((freq, idx) => {
+      const pad = ctx.createOscillator();
+      pad.type = idx < 2 ? 'sawtooth' : 'triangle';
+      pad.frequency.setValueAtTime(freq, dropAt);
+      const padFilter = ctx.createBiquadFilter();
+      padFilter.type = 'lowpass';
+      padFilter.frequency.setValueAtTime(920, dropAt);
+      padFilter.frequency.exponentialRampToValueAtTime(220, dropAt + 2.0);
+      const pg = ctx.createGain();
+      pg.gain.setValueAtTime(0.001, dropAt);
+      pg.gain.linearRampToValueAtTime(vol * 0.14, dropAt + 0.09);
+      pg.gain.exponentialRampToValueAtTime(0.0008, dropAt + 2.2);
+      pad.connect(padFilter);
+      padFilter.connect(pg);
+      routeWet(pg, 0.8);
+      pad.start(dropAt);
+      pad.stop(dropAt + 2.25);
+    });
+  }
+
+  /**
+   * Visceral Jujutsu-style BLACK FLASH (Kokusen) SFX:
+   * Razor electric snap -> 45ms vacuum silence -> Distorted sub-bass slam + crimson lightning whip!
+   */
+  playBlackFlashSfx() {
+    if (this.muted) return;
+    this.duckMusicTemporarily(1150, 0.18);
+    const ctx = this.getCtx();
+    const now = ctx.currentTime;
+    const vol = Math.min(0.95, Math.max(0.48, this.sfxVolume * 2.2));
+    const sfxOut = this.getSfxOutput(ctx);
+    const reverb = this.getReverb(ctx);
+
+    const routeWet = (node: AudioNode, wet = 0.45) => {
+      node.connect(sfxOut);
+      if (wet > 0) {
+        const wg = ctx.createGain();
+        wg.gain.value = wet;
+        node.connect(wg);
+        wg.connect(reverb);
+        reverb.connect(sfxOut);
+      }
+    };
+
+    const shaper = ctx.createWaveShaper();
+    const curve = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+      const x = (i * 2) / 256 - 1;
+      curve[i] = Math.tanh(x * 3.8);
+    }
+    shaper.curve = curve;
+
+    // 1) Initial sharp electric spatial snap (0.00 -> 0.06s)
+    const snap = ctx.createBufferSource();
+    snap.buffer = this.createNoiseBuffer(ctx, 0.07);
+    const shp = ctx.createBiquadFilter();
+    shp.type = 'highpass';
+    shp.frequency.value = 2400;
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(vol * 0.72, now);
+    sg.gain.exponentialRampToValueAtTime(0.001, now + 0.065);
+    snap.connect(shp);
+    shp.connect(sg);
+    routeWet(sg, 0.35);
+    snap.start(now);
+
+    // 2) 45ms dead-air breath -> BLACK FLASH DISTORTED SUB-BASS SLAM + ELECTRIC CRACKLE (0.105s)
+    const hitAt = now + 0.105;
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(148, hitAt);
+    sub.frequency.exponentialRampToValueAtTime(24, hitAt + 0.72);
+    const subG = ctx.createGain();
+    subG.gain.setValueAtTime(vol * 1.0, hitAt);
+    subG.gain.exponentialRampToValueAtTime(0.001, hitAt + 0.85);
+    sub.connect(shaper);
+    shaper.connect(subG);
+    routeWet(subG, 0.35);
+    sub.start(hitAt);
+    sub.stop(hitAt + 0.88);
+
+    // Jagged lightning whip sweep
+    const whip = ctx.createBufferSource();
+    whip.buffer = this.createNoiseBuffer(ctx, 0.45);
+    const wbp = ctx.createBiquadFilter();
+    wbp.type = 'bandpass';
+    wbp.Q.value = 2.2;
+    wbp.frequency.setValueAtTime(5200, hitAt);
+    wbp.frequency.exponentialRampToValueAtTime(240, hitAt + 0.38);
+    const wg = ctx.createGain();
+    wg.gain.setValueAtTime(vol * 0.85, hitAt);
+    wg.gain.exponentialRampToValueAtTime(0.001, hitAt + 0.44);
+    whip.connect(wbp);
+    wbp.connect(wg);
+    routeWet(wg, 0.6);
+    whip.start(hitAt);
+
+    // Dark crimson metallic tritone sting
+    [311.13, 440.0, 880.0].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      osc.type = idx === 0 ? 'sawtooth' : 'triangle';
+      osc.frequency.setValueAtTime(freq, hitAt);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.82, hitAt + 0.55);
+      const og = ctx.createGain();
+      og.gain.setValueAtTime(vol * (0.2 / (idx + 1)), hitAt);
+      og.gain.exponentialRampToValueAtTime(0.0008, hitAt + 0.6);
+      osc.connect(og);
+      routeWet(og, 0.65);
+      osc.start(hitAt);
+      osc.stop(hitAt + 0.62);
+    });
+  }
+
+  /**
+   * Visceral EXECUTION ("COMO VOCÊ QUER FAZER ISSO?") SFX:
+   * Heavy fatal steel cleave + visceral impact boom (+ dark cathedral bell on Boss execution!)
+   */
+  playExecutionSfx(isBoss = false) {
+    if (this.muted) return;
+    this.duckMusicTemporarily(isBoss ? 2200 : 1400, 0.18);
+    const ctx = this.getCtx();
+    const now = ctx.currentTime;
+    const vol = Math.min(0.95, Math.max(0.45, this.sfxVolume * 2.1));
+    const sfxOut = this.getSfxOutput(ctx);
+    const reverb = this.getReverb(ctx);
+
+    const routeWet = (node: AudioNode, wet = 0.5) => {
+      node.connect(sfxOut);
+      if (wet > 0) {
+        const wg = ctx.createGain();
+        wg.gain.value = wet;
+        node.connect(wg);
+        wg.connect(reverb);
+        reverb.connect(sfxOut);
+      }
+    };
+
+    // 1) Heavy executioner blade cleave whoosh
+    const cleave = ctx.createBufferSource();
+    cleave.buffer = this.createNoiseBuffer(ctx, 0.42);
+    const cbp = ctx.createBiquadFilter();
+    cbp.type = 'bandpass';
+    cbp.Q.value = 1.9;
+    cbp.frequency.setValueAtTime(3800, now);
+    cbp.frequency.exponentialRampToValueAtTime(190, now + 0.34);
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(vol * 0.78, now);
+    cg.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+    cleave.connect(cbp);
+    cbp.connect(cg);
+    routeWet(cg, 0.5);
+    cleave.start(now);
+
+    // 2) Visceral fatal sub impact at 0.08s
+    const boomAt = now + 0.08;
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(isBoss ? 112 : 130, boomAt);
+    sub.frequency.exponentialRampToValueAtTime(isBoss ? 22 : 30, boomAt + (isBoss ? 1.45 : 0.75));
+    const subG = ctx.createGain();
+    subG.gain.setValueAtTime(vol * (isBoss ? 0.98 : 0.82), boomAt);
+    subG.gain.exponentialRampToValueAtTime(0.001, boomAt + (isBoss ? 1.65 : 0.85));
+    sub.connect(subG);
+    routeWet(subG, 0.45);
+    sub.start(boomAt);
+    sub.stop(boomAt + (isBoss ? 1.7 : 0.9));
+
+    // 3) Metallic execution bell toll (richer cathedral chord for Boss kills!)
+    const partials = isBoss ? [146.83, 293.66, 440.0, 587.33, 880.0] : [220.0, 440.0, 659.25];
+    partials.forEach((freq, idx) => {
+      const bell = ctx.createOscillator();
+      bell.type = idx % 2 === 0 ? 'triangle' : 'sine';
+      bell.frequency.setValueAtTime(freq, boomAt);
+      const bg = ctx.createGain();
+      bg.gain.setValueAtTime(vol * ((isBoss ? 0.24 : 0.16) / (idx * 0.65 + 1)), boomAt);
+      bg.gain.exponentialRampToValueAtTime(0.0008, boomAt + (isBoss ? 2.0 : 1.1));
+      bell.connect(bg);
+      routeWet(bg, 0.75);
+      bell.start(boomAt);
+      bell.stop(boomAt + (isBoss ? 2.05 : 1.15));
+    });
   }
 }
 

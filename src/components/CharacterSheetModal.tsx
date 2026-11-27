@@ -19,6 +19,7 @@ import {
   Shield,
   Skull,
   Sparkles,
+  Star,
   Swords,
   Trash2,
   Upload,
@@ -27,9 +28,9 @@ import {
 } from 'lucide-react';
 import { triggerHeroJsonDownload, useCampaign } from '../context/CampaignContext';
 import {
+  applyCharacterRestToState,
   ATTACK_RANGE_OPTIONS,
   computeCharacterStats,
-  DAMAGE_TYPE_OPTIONS,
   EQUIP_SLOT_LABELS,
   evaluateFormula,
   extractItemDefenseBonus,
@@ -37,28 +38,28 @@ import {
   formatSigned,
   getAttributePointsGainedAtLevel,
   getCampaignDamageTypes,
+  getCharacterAttacksPerAction,
   getConditionGrantedAbilities,
   getCharacterCustomResourceState,
   getHeroInspirationPoints,
   getInventoryChargedAbilities,
   getNextLevelXp,
+  normalizeActionEconomyCost,
   parseHeroPayloadFromJson,
   PLAYER_COLOR_PALETTE,
   resolveItemEquipSlot,
 } from '../shared/rulesEngine';
 import {
   ActionEconomyCost,
-  CardRarity,
   Character,
   CharacterCustomAbility,
-  CharacterCustomAttack,
+  CharacterForm,
   DiceSkin,
+  DomainThemePreset,
   TokenFrameStyle,
 } from '../shared/types';
-import { DraggablePanel, DragGripBadge } from './DraggablePanel';
 import { EquipmentPaperdoll } from './EquipmentPaperdoll';
 import { FileUploadButton } from './FileUploadButton';
-import { FormulaBuilderInput } from './FormulaBuilderInput';
 import { OrnateFrame, SculptedHealthBar } from './OrnateFrame';
 import { openAlertDialog, openConfirmDialog, openTextPrompt } from './PromptDialog';
 import { TokenPortrait } from './TokenPortrait';
@@ -88,8 +89,8 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     adjustHeroInspiration,
     spendHeroInspiration,
     useChargedItemAbility,
+    useConsumable,
     sendRoll,
-    grantCardReward,
     playCharacterTheme,
     sendPlayerRequest,
     saveCharacterToVault,
@@ -99,6 +100,8 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     resolveAssetUrl,
     setCharacterConcentration,
     pushCombatLog,
+    switchCharacterForm,
+    triggerUltimateCutIn,
   } = useCampaign();
 
   const heroFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -117,21 +120,18 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     campaign.compendium.items[0]?.id || ''
   );
 
-  // GM Custom Attack / Ability Forging State
-  const [forgeMode, setForgeMode] = useState<'attack' | 'ability'>('attack');
-  const [forgeName, setForgeName] = useState('');
-  const [forgeAttack, setForgeAttack] = useState('1d20 + FOR + PROF');
-  const [forgeDamage, setForgeDamage] = useState('1d8 + FOR');
-  const [forgeDamageType, setForgeDamageType] = useState('Corte');
-  const [forgeRange, setForgeRange] = useState('Corpo a Corpo (1,5m)');
-  const [forgeCostMp, setForgeCostMp] = useState(2);
-  const [forgeActionType, setForgeActionType] = useState<CharacterCustomAbility['actionType']>('Padrão');
-  const [forgeRarity, setForgeRarity] = useState<CardRarity>('raro');
-  const [forgeDesc, setForgeDesc] = useState('');
-  const [forgeImageUrl, setForgeImageUrl] = useState('');
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [editingAbilityId, setEditingAbilityId] = useState<string | null>(null);
+  const [editingCutInAbilityId, setEditingCutInAbilityId] = useState<string | null>(null);
   const [editingAttackId, setEditingAttackId] = useState<string | null>(null);
+  // Alternate Forms / Transformations creator state
+  const [newFormName, setNewFormName] = useState('');
+  const [newFormPortrait, setNewFormPortrait] = useState('');
+  const [newFormColor, setNewFormColor] = useState('#38bdf8');
+  const [newFormFrame, setNewFormFrame] = useState<TokenFrameStyle>('arcane');
+  const [newFormCatchphrase, setNewFormCatchphrase] = useState('');
+  const [newFormBonusAc, setNewFormBonusAc] = useState(0);
+  const [newFormBonusSpeed, setNewFormBonusSpeed] = useState(0);
   const campaignDamageTypes = getCampaignDamageTypes(campaign);
 
   const handleCreateCharacter = async () => {
@@ -220,10 +220,56 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
   const charColor = character.playerColor || character.tokenColor || '#e0b84c';
 
   const updateChar = (updater: (c: Character) => Character) => {
-    updateCampaign((prev) => ({
-      ...prev,
-      characters: prev.characters.map((c) => (c.id === character.id ? updater(c) : c)),
-    }));
+    updateCampaign((prev) => {
+      let updatedChar: Character | undefined;
+      const nextChars = prev.characters.map((c) => {
+        if (c.id !== character.id) return c;
+        updatedChar = updater(c);
+        return updatedChar;
+      });
+      if (!updatedChar) return prev;
+      const nextDraft = { ...prev, characters: nextChars };
+      const derived = computeCharacterStats(updatedChar, nextDraft);
+      const nextColor = updatedChar.playerColor || updatedChar.tokenColor;
+      const nextFrame = updatedChar.tokenFrameStyle || 'gold';
+      return {
+        ...nextDraft,
+        maps: prev.maps.map((m) => ({
+          ...m,
+          tokens: m.tokens.map((t) =>
+            t.type === 'character' && t.referenceId === updatedChar!.id
+              ? {
+                  ...t,
+                  name: updatedChar!.name.split(' ')[0] || updatedChar!.name,
+                  hp: Math.min(derived.maxHp, updatedChar!.hp),
+                  maxHp: derived.maxHp,
+                  defense: derived.defense,
+                  color: nextColor,
+                  frameStyle: nextFrame,
+                  imageUrl: updatedChar!.portraitUrl,
+                  activeConditionIds: updatedChar!.activeConditionIds,
+                }
+              : t
+          ),
+        })),
+        combat: {
+          ...prev.combat,
+          combatants: prev.combat.combatants.map((cb) =>
+            cb.type === 'character' && cb.referenceId === updatedChar!.id
+              ? {
+                  ...cb,
+                  name: updatedChar!.name,
+                  hp: Math.min(derived.maxHp, updatedChar!.hp),
+                  maxHp: derived.maxHp,
+                  defense: derived.defense,
+                  speedMeters: derived.speed,
+                  color: nextColor,
+                }
+              : cb
+          ),
+        },
+      };
+    });
   };
 
   const getAvailableAttributePoints = (c: Character): number => {
@@ -255,9 +301,12 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     };
     const nextStats = computeCharacterStats(nextCharDraft, campaign);
 
+    const isDeadOrDowned =
+      character.hp <= 0 ||
+      Boolean(character.deathSaves?.dead || (character.deathSaves?.failures ?? 0) >= 3);
     updateChar(() => ({
       ...nextCharDraft,
-      hp: nextStats.maxHp,
+      hp: isDeadOrDowned ? character.hp : nextStats.maxHp,
       mp: nextStats.maxMp,
     }));
 
@@ -295,128 +344,39 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     const healFormula = `1d${charClass?.hitDie || 8} + ${stats.attributes['con']?.mod || 0}`;
     const res = evaluateFormula(healFormula, stats, character);
     const healed = Math.max(1, res.total);
-    const nextHp = Math.min(stats.maxHp, character.hp + healed);
-    const nextMp = Math.min(stats.maxMp, character.mp + Math.ceil(stats.maxMp / 3));
 
-    const resetUses: Record<string, number> = { ...character.abilityUsesRemaining };
-    character.knownAbilityIds.forEach((aid) => {
-      const ab = campaign.compendium.abilities.find((a) => a.id === aid);
-      if (ab?.maxUsesPerRest && ab.restType === 'curto') {
-        resetUses[aid] = ab.maxUsesPerRest;
-      }
+    updateCampaign((prev) => {
+      const restResult = applyCharacterRestToState(prev, character.id, 'short', {
+        shortRestHealedHp: healed,
+      });
+      return restResult ? restResult.nextState : prev;
     });
 
-    updateCampaign((prev) => ({
-      ...prev,
-      characters: prev.characters.map((c) =>
-        c.id !== character.id
-          ? c
-          : {
-              ...c,
-              hp: nextHp,
-              mp: nextMp,
-              abilityUsesRemaining: resetUses,
-              resourceTrackers: (c.resourceTrackers || []).map((tr) =>
-                tr.resetOn === 'short' ? { ...tr, current: tr.max } : tr
-              ),
-              customResourceValues: (() => {
-                const next = { ...(c.customResourceValues || {}) };
-                (prev.compendium.customResources || []).forEach((resDef) => {
-                  if (resDef.resetOn === 'short') {
-                    const st = getCharacterCustomResourceState(c, resDef);
-                    next[resDef.id] = { ...(next[resDef.id] || {}), current: st.max };
-                  }
-                });
-                return next;
-              })(),
-              deathSaves: { successes: 0, failures: 0 },
-            }
-      ),
-      maps: prev.maps.map((m) => ({
-        ...m,
-        tokens: m.tokens.map((t) =>
-          t.type === 'character' && t.referenceId === character.id
-            ? { ...t, hp: Math.min(t.maxHp, nextHp) }
-            : t
-        ),
-      })),
-      combat: {
-        ...prev.combat,
-        combatants: prev.combat.combatants.map((cb) =>
-          cb.referenceId === character.id ? { ...cb, hp: Math.min(cb.maxHp, nextHp) } : cb
-        ),
-      },
-    }));
-
-    quickRollFormula('Descanso Curto (Dado de Vida)', healFormula, character.name);
+    sendRoll({
+      rollerName: character.name,
+      rollerRole: role,
+      rollerColor: charColor,
+      diceSkin: character.diceSkin || 'emerald',
+      title: 'Descanso Curto (Dado de Vida)',
+      formula: res.resolvedFormula,
+      individualRolls: res.individualRolls,
+      rolledDice: res.rolledDice,
+      total: healed,
+      isCrit: false,
+      isFumble: false,
+      isSecret: false,
+      details: `Recuperou +${healed} PV (${res.details}) e recarregou recursos de Descanso Curto.`,
+    });
   };
 
   const handleLongRest = () => {
     if (character.hp <= 0 || character.deathSaves?.dead || (character.deathSaves?.failures || 0) >= 3) {
       return;
     }
-    const resetUses: Record<string, number> = {};
-    character.knownAbilityIds.forEach((aid) => {
-      const ab = campaign.compendium.abilities.find((a) => a.id === aid);
-      if (ab?.maxUsesPerRest) {
-        resetUses[aid] = ab.maxUsesPerRest;
-      }
+    updateCampaign((prev) => {
+      const restResult = applyCharacterRestToState(prev, character.id, 'long');
+      return restResult ? restResult.nextState : prev;
     });
-    if (character.concentratingSpell) {
-      setCharacterConcentration(character.id, null);
-    }
-    updateCampaign((prev) => ({
-      ...prev,
-      characters: prev.characters.map((c) =>
-        c.id !== character.id
-          ? c
-          : {
-              ...c,
-              hp: stats.maxHp,
-              mp: stats.maxMp,
-              tempHp: 0,
-              abilityUsesRemaining: resetUses,
-              resourceTrackers: (c.resourceTrackers || []).map((tr) =>
-                tr.resetOn === 'short' || tr.resetOn === 'long' ? { ...tr, current: tr.max } : tr
-              ),
-              customResourceValues: (() => {
-                const next = { ...(c.customResourceValues || {}) };
-                (prev.compendium.customResources || []).forEach((resDef) => {
-                  if (resDef.resetOn === 'short' || resDef.resetOn === 'long') {
-                    const st = getCharacterCustomResourceState(c, resDef);
-                    next[resDef.id] = { ...(next[resDef.id] || {}), current: st.max };
-                  }
-                });
-                return next;
-              })(),
-              activeConditionIds: c.activeConditionIds.filter((id) => id !== 'cond-exausto'),
-              deathSaves: { successes: 0, failures: 0 },
-            }
-      ),
-      maps: prev.maps.map((m) => ({
-        ...m,
-        tokens: m.tokens.map((t) =>
-          t.type === 'character' && t.referenceId === character.id
-            ? {
-                ...t,
-                hp: stats.maxHp,
-                maxHp: stats.maxHp,
-                activeConditionIds: (t.activeConditionIds || []).filter(
-                  (id) => id !== 'cond-exausto'
-                ),
-              }
-            : t
-        ),
-      })),
-      combat: {
-        ...prev.combat,
-        combatants: prev.combat.combatants.map((cb) =>
-          cb.referenceId === character.id
-            ? { ...cb, hp: stats.maxHp, maxHp: stats.maxHp }
-            : cb
-        ),
-      },
-    }));
   };
 
   const handleDeathSaveRoll = () => {
@@ -457,67 +417,6 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     });
   };
 
-  const handleForgeSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!forgeName.trim()) return;
-
-    if (forgeMode === 'attack') {
-      const atk: CharacterCustomAttack = {
-        id: `catk-${Date.now()}`,
-        name: forgeName.trim(),
-        attackBonusFormula: forgeAttack.trim() || '1d20 + @for + @prof',
-        damageFormula: forgeDamage.trim() || '1d8 + @for',
-        damageType: forgeDamageType.trim() || 'Corte',
-        range: forgeRange.trim() || 'Corpo a Corpo',
-        rarity: forgeRarity,
-        notes: forgeDesc.trim(),
-        imageUrl: forgeImageUrl.trim() || undefined,
-      };
-      updateChar((c) => ({
-        ...c,
-        customAttacks: [...(c.customAttacks || []), atk],
-      }));
-      grantCardReward({
-        targetCharacterId: character.id,
-        characterName: character.name,
-        cardTitle: atk.name,
-        cardSubtitle: `Ataque: ${atk.attackBonusFormula} | Dano: ${atk.damageFormula} (${atk.damageType})`,
-        rarity: atk.rarity,
-        description: atk.notes || 'Novo ataque forjado pelo Mestre para sua ficha!',
-      });
-    } else {
-      const abil: CharacterCustomAbility = {
-        id: `cabil-${Date.now()}`,
-        name: forgeName.trim(),
-        actionType: forgeActionType,
-        costMp: forgeActionType === 'Passiva' ? 0 : forgeCostMp,
-        attackFormula: forgeAttack.trim() || undefined,
-        damageFormula: forgeDamage.trim() || undefined,
-        damageType: forgeDamageType.trim() || 'Arcano',
-        range: forgeRange.trim() || '18m',
-        rarity: forgeRarity,
-        description: forgeDesc.trim() || 'Poder especial concedido pelo Mestre.',
-        imageUrl: forgeImageUrl.trim() || undefined,
-      };
-      updateChar((c) => ({
-        ...c,
-        customAbilities: [...(c.customAbilities || []), abil],
-      }));
-      grantCardReward({
-        targetCharacterId: character.id,
-        characterName: character.name,
-        cardTitle: abil.name,
-        cardSubtitle: `${abil.actionType} • ${abil.costMp > 0 ? `${abil.costMp} ${campaign.settings.resourceShort}` : 'Sem Custo'} • ${abil.damageFormula || 'Efeito'}`,
-        rarity: abil.rarity,
-        description: abil.description,
-      });
-    }
-
-    setForgeName('');
-    setForgeDesc('');
-    setForgeImageUrl('');
-  };
-
   const toggleCondition = (condId: string) => {
     if (role !== 'gm') return;
     const isRemoving = character.activeConditionIds.includes(condId);
@@ -550,6 +449,20 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     }));
   };
 
+  const toggleSkillFavorite = (skillId: string) => {
+    updateChar((c) => {
+      const validRegularSkillIds = new Set(
+        campaign.compendium.skills.filter((s) => !s.isSavingThrow).map((s) => s.id)
+      );
+      const current = (c.favoriteSkillIds || []).filter((id) => validRegularSkillIds.has(id));
+      if (current.includes(skillId)) {
+        return { ...c, favoriteSkillIds: current.filter((id) => id !== skillId) };
+      }
+      if (current.length >= 6) return c;
+      return { ...c, favoriteSkillIds: [...current, skillId] };
+    });
+  };
+
   const equippedWeapons = character.inventory
     .filter((inv) => inv.equipped)
     .map((inv) => ({
@@ -559,18 +472,22 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
     .filter((x) => x.item && x.item.attackFormula);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 md:p-6">
-      <DraggablePanel
-        storageKey="character-sheet-modal"
-        className="w-full max-w-6xl h-[92vh] flex flex-col"
-      >
+    <div
+      data-modal-overlay="true"
+      className="fixed inset-0 z-50 bg-[#040508]/80 backdrop-blur-[3px] flex items-center justify-center p-3 md:p-5"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-6xl h-[90vh] flex flex-col">
         <OrnateFrame
           accentColor={charColor}
-          className="rpg-glass-panel rounded-lg w-full h-full flex flex-col overflow-hidden animate-modal-unfurl"
+          cornerSize={16}
+          className="rpg-panel rpg-grain rounded-lg w-full h-full flex flex-col overflow-hidden animate-modal-unfurl"
         >
         {/* Modal Header (Close X permanently pinned top-right!) */}
         <div
-          className="px-4 py-3 border-b relative shrink-0 space-y-2.5"
+          className="px-4 sm:px-5 py-3 border-b relative shrink-0 space-y-2.5 bg-[#0d0f16]"
           style={{ borderColor: 'var(--border-subtle)' }}
         >
           <div className="flex items-start justify-between gap-3">
@@ -651,15 +568,14 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
           </div>
 
           <div className="flex items-center gap-1.5 flex-wrap">
-            <DragGripBadge label="Mover" />
             {(() => {
               const inspPts = getHeroInspirationPoints(character);
               return (
                 <div
                   className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-display font-bold border ${
                     inspPts > 0
-                      ? 'bg-amber-500/20 border-amber-400/75 text-amber-200 shadow-[0_0_10px_rgba(251,191,36,0.3)]'
-                      : 'rpg-card text-amber-200/60'
+                      ? 'bg-[#241d11] border-[#d4ad5c]/70 text-[#e8c683]'
+                      : 'rpg-card text-[#8c8374]'
                   }`}
                   title="Pontos de Inspiração Heroica (0 a 3) — Use para ganhar Vantagem ou re-rolar um d20 ruim!"
                 >
@@ -778,6 +694,90 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                 />
               </>
             )}
+            {/* Prominent Level & XP Progress Pill — visible to BOTH Player and GM */}
+            {(() => {
+              const curXp = character.xp ?? 0;
+              const nextXp = getNextLevelXp(character.level, campaign.settings.xpThresholds);
+              const prevLevelXp =
+                character.level > 1
+                  ? getNextLevelXp(character.level - 1, campaign.settings.xpThresholds) ?? 0
+                  : 0;
+              const xpPct =
+                nextXp && nextXp > prevLevelXp
+                  ? Math.max(0, Math.min(100, ((curXp - prevLevelXp) / (nextXp - prevLevelXp)) * 100))
+                  : 100;
+              return (
+                <div
+                  className="inline-flex flex-col justify-center px-2.5 py-1 rounded bg-[#141722] border border-[#b89146]/45 min-w-[142px]"
+                  title={`Nível ${character.level} • Experiência: ${curXp}${nextXp ? ` / ${nextXp} XP para o Nível ${character.level + 1}` : ' XP (Nível Máximo)'}`}
+                >
+                  <div className="flex items-center justify-between gap-2 text-[10px] font-display font-bold leading-none">
+                    <span className="text-[#f0cf7b]">Nível {character.level}</span>
+                    <span className="font-mono-dice text-[#cfc5b4]">
+                      {curXp} / {nextXp ?? 'MAX'} XP
+                    </span>
+                  </div>
+                  <div className="h-1 w-full rounded-full bg-black/70 overflow-hidden mt-1">
+                    <div
+                      className="h-full rounded-full transition-all duration-300"
+                      style={{
+                        width: `${xpPct}%`,
+                        background: 'linear-gradient(90deg, #b88928 0%, #f5d47a 100%)',
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })()}
+            {/* D&D 5e Attacks per Action (Extra Attack) pill — auto from class/level, GM-editable */}
+            {(() => {
+              const attacksPerAct = getCharacterAttacksPerAction(character);
+              const isCustom = typeof character.extraAttacksOverride === 'number';
+              return (
+                <div
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#141722] border border-[#b89146]/40 text-[10px] font-display font-bold"
+                  title={
+                    role === 'gm'
+                      ? `Ataques por Ação Padrão (Ataque Extra D&D 5e). Atual: ${attacksPerAct}${isCustom ? ' (customizado)' : ' (automático pela classe/nível)'}. Use -/+ para ajustar.`
+                      : `Ataques por Ação Padrão (Ataque Extra D&D 5e): ${attacksPerAct}`
+                  }
+                >
+                  <Swords className="w-3 h-3 text-[#e8c683]" />
+                  <span className="text-[#cfc5b4]">Atq/Ação:</span>
+                  {role === 'gm' && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateChar((c) => ({
+                          ...c,
+                          extraAttacksOverride: Math.max(1, attacksPerAct - 1),
+                        }))
+                      }
+                      disabled={attacksPerAct <= 1}
+                      className="px-1 rounded bg-black/40 hover:bg-black/70 text-[#e8c683] disabled:opacity-30 cursor-pointer"
+                    >
+                      −
+                    </button>
+                  )}
+                  <span className="font-mono-dice text-[#f0cf7b] px-0.5">{attacksPerAct}</span>
+                  {role === 'gm' && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateChar((c) => ({
+                          ...c,
+                          extraAttacksOverride: Math.min(5, attacksPerAct + 1),
+                        }))
+                      }
+                      disabled={attacksPerAct >= 5}
+                      className="px-1 rounded bg-black/40 hover:bg-black/70 text-[#e8c683] disabled:opacity-30 cursor-pointer"
+                    >
+                      +
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
             {role === 'gm' ? (
               <>
                 <button
@@ -915,14 +915,16 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   {[0, 1, 2].map((i) => (
                     <button
                       key={i}
-                      disabled={role !== 'gm' && myCharacter?.id !== character.id}
+                      disabled={role !== 'gm'}
                       onClick={() => {
+                        if (role !== 'gm') return;
                         const nextSucc = i + 1 === (ds.successes || 0) ? i : i + 1;
                         setDeathSaveManual(character.id, {
                           successes: nextSucc,
                           stabilized: nextSucc >= 3,
                         });
                       }}
+                      title={role === 'gm' ? 'Ajustar sucessos contra a Morte (Mestre)' : 'Apenas o Mestre pode ajustar manualmente'}
                       className={`w-4 h-4 rounded-full border cursor-pointer disabled:cursor-default ${
                         i < (ds.successes || 0)
                           ? 'bg-emerald-400 border-emerald-200 shadow-[0_0_8px_#34d399]'
@@ -936,14 +938,16 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   {[0, 1, 2].map((i) => (
                     <button
                       key={i}
-                      disabled={role !== 'gm' && myCharacter?.id !== character.id}
+                      disabled={role !== 'gm'}
                       onClick={() => {
+                        if (role !== 'gm') return;
                         const nextFail = i + 1 === (ds.failures || 0) ? i : i + 1;
                         setDeathSaveManual(character.id, {
                           failures: nextFail,
                           dead: nextFail >= 3,
                         });
                       }}
+                      title={role === 'gm' ? 'Ajustar falhas contra a Morte (Mestre)' : 'Apenas o Mestre pode ajustar manualmente'}
                       className={`w-4 h-4 rounded-full border cursor-pointer disabled:cursor-default ${
                         i < (ds.failures || 0)
                           ? 'bg-red-500 border-red-200 shadow-[0_0_8px_#ef4444]'
@@ -953,15 +957,55 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   ))}
                 </div>
 
-                {!isCharDead && !isCharStabilized && (role === 'gm' || myCharacter?.id === character.id) && (
-                  <button
-                    onClick={handleDeathSaveRoll}
-                    className="rpg-btn-crimson px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Dices className="w-4 h-4" />
-                    <span>{ds.assistedBy ? 'Rolar com Vantagem (2d20)' : 'Rolar Destino (d20)'}</span>
-                  </button>
-                )}
+                {!isCharDead && !isCharStabilized && (role === 'gm' || myCharacter?.id === character.id) && (() => {
+                  const charCb = campaign.combat.active
+                    ? campaign.combat.combatants.find(
+                        (cb) => cb.type === 'character' && cb.referenceId === character.id
+                      )
+                    : undefined;
+                  const activeTurnCb = campaign.combat.active
+                    ? campaign.combat.combatants[campaign.combat.currentTurnIndex]
+                    : undefined;
+                  const notMyTurnInCombat =
+                    role !== 'gm' &&
+                    Boolean(
+                      campaign.combat.active &&
+                        charCb &&
+                        activeTurnCb &&
+                        activeTurnCb.id !== charCb.id
+                    );
+                  const actionSpentInCombat =
+                    role !== 'gm' &&
+                    Boolean(campaign.combat.active && charCb && charCb.actionAvailable === false);
+                  const locked = notMyTurnInCombat || actionSpentInCombat;
+                  return (
+                    <button
+                      onClick={handleDeathSaveRoll}
+                      disabled={locked}
+                      title={
+                        notMyTurnInCombat
+                          ? `Aguarde seu turno na iniciativa (${activeTurnCb?.name || 'outro combatente'})`
+                          : actionSpentInCombat
+                            ? 'Você já rolou o Teste contra a Morte (Ação Padrão gasta) neste turno. Encerre o turno.'
+                            : campaign.combat.active
+                              ? 'Rola 1 Teste contra a Morte (1x por turno, gasta sua Ação Padrão)'
+                              : 'Rolar Teste contra a Morte (1d20)'
+                      }
+                      className="rpg-btn-crimson px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+                    >
+                      <Dices className="w-4 h-4" />
+                      <span>
+                        {notMyTurnInCombat
+                          ? 'Aguarde seu Turno'
+                          : actionSpentInCombat
+                            ? 'Feito neste Turno'
+                            : ds.assistedBy
+                              ? 'Rolar com Vantagem (2d20)'
+                              : 'Rolar Destino (d20)'}
+                      </span>
+                    </button>
+                  );
+                })()}
 
                 {canAllyAssist && myCharacter && (
                   <button
@@ -1167,9 +1211,13 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                             <input
                               type="number"
                               min={0}
+                              max={stats.maxHp}
                               value={character.hp}
                               onChange={(e) =>
-                                updateChar((c) => ({ ...c, hp: Math.max(0, Number(e.target.value) || 0) }))
+                                updateChar((c) => ({
+                                  ...c,
+                                  hp: Math.max(0, Math.min(stats.maxHp, Number(e.target.value) || 0)),
+                                }))
                               }
                               className="rpg-input w-14 text-center font-bold text-base py-0.5"
                               title="PV Atual"
@@ -1694,286 +1742,260 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                 </div>
               </div>
 
-              {/* Right Column: Skills */}
-              <div className="lg:col-span-7 rpg-card rounded-xl p-3">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="font-display font-bold text-sm">
-                    Perícias &amp; Testes de Resistência
-                  </h3>
-                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                    {role === 'gm'
-                      ? 'Marque quais perícias são treinadas • Clique para rolar'
-                      : 'Clique em qualquer perícia para rolar'}
-                  </span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                  {campaign.compendium.skills.map((sk) => {
-                    const computed = stats.skills[sk.id];
-                    return (
-                      <div
-                        key={sk.id}
-                        className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition ${
-                          computed.trained ? 'bg-amber-500/8 border-amber-500/35' : 'hover:bg-black/15'
-                        }`}
-                        style={!computed.trained ? { borderColor: 'var(--border-subtle)' } : undefined}
-                        title={computed.breakdown.join(' | ')}
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          {role === 'gm' ? (
-                            <input
-                              type="checkbox"
-                              checked={computed.trained}
-                              onChange={() => toggleSkillTrained(sk.id)}
-                              className="accent-amber-500 cursor-pointer"
-                            />
-                          ) : (
-                            <span
-                              className={`w-2 h-2 rounded-full shrink-0 ${
-                                computed.trained ? 'bg-amber-400 shadow-[0_0_6px_#fbbf24]' : 'bg-white/15'
-                              }`}
-                              title={computed.trained ? 'Perícia Treinada' : 'Não treinada'}
-                            />
-                          )}
-                          <button
-                            onClick={() =>
-                              quickRollFormula(
-                                sk.isSavingThrow ? `Resistência: ${sk.name}` : `Perícia: ${sk.name}`,
-                                `1d20 + ${computed.total}${computed.diceBonuses.length > 0 ? ` + ${computed.diceBonuses.join(' + ')}` : ''}`,
-                                character.name
-                              )
-                            }
-                            className="text-left text-xs font-medium truncate cursor-pointer hover:underline"
-                          >
-                            {sk.name}{' '}
-                            <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                              ({computed.attrShort})
-                            </span>
-                          </button>
-                        </div>
-
-                        <button
-                          onClick={() =>
-                            quickRollFormula(
-                              sk.isSavingThrow ? `Resistência: ${sk.name}` : `Perícia: ${sk.name}`,
-                              `1d20 + ${computed.total}${computed.diceBonuses.length > 0 ? ` + ${computed.diceBonuses.join(' + ')}` : ''}`,
-                              character.name
-                            )
-                          }
-                          className="font-mono-dice text-xs font-bold px-2 py-0.5 rounded bg-black/25 cursor-pointer flex items-center gap-1"
-                          style={{ color: computed.trained ? 'var(--accent-primary)' : 'var(--text-primary)' }}
-                        >
-                          <span>
-                            {formatSigned(computed.total)}
-                            {computed.diceBonuses.length > 0
-                              ? ` +${computed.diceBonuses.join('+')}`
-                              : ''}
-                          </span>
-                          <Dices className="w-3 h-3 opacity-60" />
-                        </button>
-                      </div>
+              {/* Right Column: Saving Throws (Salvaguardas) & Skills (Perícias) — clearly separated! */}
+              <div className="lg:col-span-7 space-y-3">
+                {(() => {
+                  const attrOrder = ['for', 'des', 'con', 'int', 'sab', 'car'];
+                  const savingThrows = [...campaign.compendium.skills]
+                    .filter((s) => s.isSavingThrow)
+                    .sort(
+                      (a, b) =>
+                        (attrOrder.indexOf(a.defaultAttributeId) === -1
+                          ? 99
+                          : attrOrder.indexOf(a.defaultAttributeId)) -
+                        (attrOrder.indexOf(b.defaultAttributeId) === -1
+                          ? 99
+                          : attrOrder.indexOf(b.defaultAttributeId))
                     );
-                  })}
-                </div>
+                  const regularSkills = campaign.compendium.skills.filter((s) => !s.isSavingThrow);
+                  const regularSkillIdSet = new Set(regularSkills.map((s) => s.id));
+                  const favIds = (character.favoriteSkillIds || []).filter((id) =>
+                    regularSkillIdSet.has(id)
+                  );
+
+                  return (
+                    <>
+                      {/* Dedicated Saving Throws (Salvaguardas) Card */}
+                      {savingThrows.length > 0 && (
+                        <div className="rpg-card rounded-xl p-3 border border-sky-500/30 bg-sky-950/10">
+                          <div className="flex items-center justify-between gap-2 mb-2">
+                            <h3 className="font-display font-bold text-sm text-sky-200 flex items-center gap-1.5">
+                              <Shield className="w-4 h-4 text-sky-400" />
+                              <span>Testes de Resistência (Salvaguardas)</span>
+                            </h3>
+                            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                              {role === 'gm'
+                                ? 'Proficiência independente de perícias • Clique para rolar'
+                                : 'Clique para rolar 1d20 + bônus'}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
+                            {savingThrows.map((sk) => {
+                              const computed = stats.skills[sk.id];
+                              if (!computed) return null;
+                              return (
+                                <div
+                                  key={sk.id}
+                                  className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition ${
+                                    computed.trained
+                                      ? 'bg-sky-500/12 border-sky-400/45'
+                                      : 'hover:bg-black/15'
+                                  }`}
+                                  style={
+                                    !computed.trained
+                                      ? { borderColor: 'var(--border-subtle)' }
+                                      : undefined
+                                  }
+                                  title={computed.breakdown.join(' | ')}
+                                >
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    {role === 'gm' ? (
+                                      <input
+                                        type="checkbox"
+                                        checked={computed.trained}
+                                        onChange={() => toggleSkillTrained(sk.id)}
+                                        className="accent-sky-400 cursor-pointer"
+                                      />
+                                    ) : (
+                                      <span
+                                        className={`w-2 h-2 rounded-full shrink-0 ${
+                                          computed.trained
+                                            ? 'bg-sky-400 shadow-[0_0_6px_#38bdf8]'
+                                            : 'bg-white/15'
+                                        }`}
+                                        title={
+                                          computed.trained
+                                            ? 'Salvaguarda Proficiente'
+                                            : 'Sem proficiência'
+                                        }
+                                      />
+                                    )}
+                                    <button
+                                      onClick={() =>
+                                        quickRollFormula(
+                                          `Salvaguarda: ${computed.attrShort} • ${sk.name}`,
+                                          `1d20 + ${computed.total}${computed.diceBonuses.length > 0 ? ` + ${computed.diceBonuses.join(' + ')}` : ''}`,
+                                          character.name
+                                        )
+                                      }
+                                      className="text-left text-xs font-medium truncate cursor-pointer hover:underline"
+                                    >
+                                      <span className="font-mono-dice text-[10px] font-bold text-sky-300 mr-1">
+                                        {computed.attrShort}
+                                      </span>
+                                      <span>{sk.name}</span>
+                                    </button>
+                                  </div>
+                                  <button
+                                    onClick={() =>
+                                      quickRollFormula(
+                                        `Salvaguarda: ${computed.attrShort} • ${sk.name}`,
+                                        `1d20 + ${computed.total}${computed.diceBonuses.length > 0 ? ` + ${computed.diceBonuses.join(' + ')}` : ''}`,
+                                        character.name
+                                      )
+                                    }
+                                    className="font-mono-dice text-xs font-bold px-2 py-0.5 rounded bg-black/30 cursor-pointer flex items-center gap-1 shrink-0"
+                                    style={{
+                                      color: computed.trained ? '#7dd3fc' : 'var(--text-primary)',
+                                    }}
+                                  >
+                                    <span>
+                                      {formatSigned(computed.total)}
+                                      {computed.diceBonuses.length > 0
+                                        ? ` +${computed.diceBonuses.join('+')}`
+                                        : ''}
+                                    </span>
+                                    <Dices className="w-3 h-3 opacity-60" />
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Dedicated Regular Skills (Perícias) Card */}
+                      <div className="rpg-card rounded-xl p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <h3 className="font-display font-bold text-sm">Perícias</h3>
+                          <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                            {role === 'gm'
+                              ? `Treinadas • Estrela fixa no HUD (${favIds.length}/6) • Clique para rolar`
+                              : `Clique na estrela para fixar no HUD (${favIds.length}/6) • Clique para rolar`}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                          {regularSkills.map((sk) => {
+                            const computed = stats.skills[sk.id];
+                            if (!computed) return null;
+                            const isFavorite = favIds.includes(sk.id);
+                            const favLimitReached = !isFavorite && favIds.length >= 6;
+                            return (
+                              <div
+                                key={sk.id}
+                                className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition ${
+                                  computed.trained
+                                    ? 'bg-amber-500/8 border-amber-500/35'
+                                    : 'hover:bg-black/15'
+                                }`}
+                                style={
+                                  !computed.trained
+                                    ? { borderColor: 'var(--border-subtle)' }
+                                    : undefined
+                                }
+                                title={computed.breakdown.join(' | ')}
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  {role === 'gm' ? (
+                                    <input
+                                      type="checkbox"
+                                      checked={computed.trained}
+                                      onChange={() => toggleSkillTrained(sk.id)}
+                                      className="accent-amber-500 cursor-pointer"
+                                    />
+                                  ) : (
+                                    <span
+                                      className={`w-2 h-2 rounded-full shrink-0 ${
+                                        computed.trained
+                                          ? 'bg-amber-400 shadow-[0_0_6px_#fbbf24]'
+                                          : 'bg-white/15'
+                                      }`}
+                                      title={computed.trained ? 'Perícia Treinada' : 'Não treinada'}
+                                    />
+                                  )}
+                                  <button
+                                    onClick={() =>
+                                      quickRollFormula(
+                                        `Perícia: ${sk.name}`,
+                                        `1d20 + ${computed.total}${computed.diceBonuses.length > 0 ? ` + ${computed.diceBonuses.join(' + ')}` : ''}`,
+                                        character.name
+                                      )
+                                    }
+                                    className="text-left text-xs font-medium truncate cursor-pointer hover:underline"
+                                  >
+                                    {sk.name}{' '}
+                                    <span
+                                      className="text-[10px]"
+                                      style={{ color: 'var(--text-muted)' }}
+                                    >
+                                      ({computed.attrShort})
+                                    </span>
+                                  </button>
+                                </div>
+
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                    type="button"
+                                    disabled={favLimitReached}
+                                    onClick={() => toggleSkillFavorite(sk.id)}
+                                    className={`p-1 rounded transition cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed ${
+                                      isFavorite
+                                        ? 'text-amber-300 hover:text-amber-200'
+                                        : 'text-white/30 hover:text-amber-300/80'
+                                    }`}
+                                    title={
+                                      isFavorite
+                                        ? 'Remover das Perícias Favoritas do HUD'
+                                        : favLimitReached
+                                          ? 'Limite de 6 perícias favoritas no HUD atingido'
+                                          : 'Fixar nas Perícias Favoritas do HUD (1 clique)'
+                                    }
+                                  >
+                                    <Star
+                                      className={`w-3.5 h-3.5 ${isFavorite ? 'fill-amber-400' : ''}`}
+                                    />
+                                  </button>
+
+                                  <button
+                                    onClick={() =>
+                                      quickRollFormula(
+                                        `Perícia: ${sk.name}`,
+                                        `1d20 + ${computed.total}${computed.diceBonuses.length > 0 ? ` + ${computed.diceBonuses.join(' + ')}` : ''}`,
+                                        character.name
+                                      )
+                                    }
+                                    className="font-mono-dice text-xs font-bold px-2 py-0.5 rounded bg-black/25 cursor-pointer flex items-center gap-1"
+                                    style={{
+                                      color: computed.trained
+                                        ? 'var(--accent-primary)'
+                                        : 'var(--text-primary)',
+                                    }}
+                                  >
+                                    <span>
+                                      {formatSigned(computed.total)}
+                                      {computed.diceBonuses.length > 0
+                                        ? ` +${computed.diceBonuses.join('+')}`
+                                        : ''}
+                                    </span>
+                                    <Dices className="w-3 h-3 opacity-60" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             </div>
           )}
 
           {tab === 'abilities' && (
             <div className="space-y-5">
-              {/* GM-ONLY: FORGE CUSTOM ATTACK / ABILITY FOR THIS PLAYER */}
-              {role === 'gm' && (
-                <form
-                  onSubmit={handleForgeSubmit}
-                  className="rpg-glass-panel rounded-xl p-4 space-y-3 text-xs"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 font-display font-bold text-sm" style={{ color: 'var(--accent-primary)' }}>
-                      <Crown className="w-4 h-4" />
-                      <span>Forjar Carta de Ataque ou Habilidade para {character.name} (Exclusivo do Mestre)</span>
-                    </div>
-                    <div className="flex rounded overflow-hidden border" style={{ borderColor: 'var(--border-subtle)' }}>
-                      <button
-                        type="button"
-                        onClick={() => setForgeMode('attack')}
-                        className={`px-3 py-1 cursor-pointer ${forgeMode === 'attack' ? 'rpg-btn-crimson' : 'rpg-card'}`}
-                      >
-                        Carta de Ataque
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setForgeMode('ability')}
-                        className={`px-3 py-1 cursor-pointer ${forgeMode === 'ability' ? 'rpg-btn-primary' : 'rpg-card'}`}
-                      >
-                        Carta de Habilidade / Magia
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5">
-                    <div className="col-span-2">
-                      <label className="block mb-1">Nome da Carta *</label>
-                      <input
-                        required
-                        value={forgeName}
-                        onChange={(e) => setForgeName(e.target.value)}
-                        placeholder={forgeMode === 'attack' ? 'Ex: Espada Flamejante' : 'Ex: Golpe Trovejante'}
-                        className="rpg-input w-full"
-                      />
-                    </div>
-                    <div>
-                      <label className="block mb-1">Fórmula Acerto</label>
-                      <FormulaBuilderInput
-                        value={forgeAttack}
-                        onChange={setForgeAttack}
-                        stats={stats}
-                        character={character}
-                        placeholder="1d20 + FOR + PROF"
-                        showQuickPills={false}
-                      />
-                    </div>
-                    <div>
-                      <label className="block mb-1">Dano / Cura (d4/d6/d8...)</label>
-                      <FormulaBuilderInput
-                        value={forgeDamage}
-                        onChange={setForgeDamage}
-                        stats={stats}
-                        character={character}
-                        placeholder="2d6 + FOR"
-                        showQuickPills={false}
-                      />
-                    </div>
-                    <div>
-                      <label className="block mb-1">Tipo de Dano</label>
-                      <select
-                        value={forgeDamageType}
-                        onChange={(e) => setForgeDamageType(e.target.value)}
-                        className="rpg-input w-full"
-                      >
-                        {campaignDamageTypes.map((dt) => (
-                          <option key={dt} value={dt}>
-                            {dt}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block mb-1">Raridade</label>
-                      <select
-                        value={forgeRarity}
-                        onChange={(e) => setForgeRarity(e.target.value as CardRarity)}
-                        className="rpg-input w-full"
-                      >
-                        <option value="comum">Comum (Ferro)</option>
-                        <option value="raro">Raro (Safira)</option>
-                        <option value="epico">Épico (Ametista)</option>
-                        <option value="lendario">Lendário (Ouro)</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-6 gap-2.5 items-end">
-                    {forgeMode === 'ability' && (
-                      <>
-                        <div>
-                          <label className="block mb-1">Tipo de Ação</label>
-                          <select
-                            value={forgeActionType}
-                            onChange={(e) =>
-                              setForgeActionType(
-                                e.target.value as CharacterCustomAbility['actionType']
-                              )
-                            }
-                            className="rpg-input w-full"
-                          >
-                            <option value="Padrão">Padrão</option>
-                            <option value="Bônus">Bônus</option>
-                            <option value="Reação">Reação</option>
-                            <option value="Movimento">Movimento</option>
-                            <option value="Livre">Livre</option>
-                            <option value="Passiva">Passiva</option>
-                          </select>
-                        </div>
-                        {forgeActionType !== 'Passiva' && (
-                          <div>
-                            <label className="block mb-1">Custo ({campaign.settings.resourceShort})</label>
-                            <input
-                              type="number"
-                              value={forgeCostMp}
-                              onChange={(e) => setForgeCostMp(Number(e.target.value))}
-                              className="rpg-input w-full"
-                            />
-                          </div>
-                        )}
-                      </>
-                    )}
-                    <div>
-                      <label className="block mb-1">Alcance</label>
-                      <select
-                        value={forgeRange}
-                        onChange={(e) => setForgeRange(e.target.value)}
-                        className="rpg-input w-full"
-                      >
-                        {ATTACK_RANGE_OPTIONS.map((rng) => (
-                          <option key={rng} value={rng}>
-                            {rng}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div
-                      className={
-                        forgeMode === 'ability'
-                          ? forgeActionType === 'Passiva'
-                            ? 'sm:col-span-3'
-                            : 'sm:col-span-2'
-                          : 'sm:col-span-4'
-                      }
-                    >
-                      <label className="block mb-1">Descrição / Efeito Especial</label>
-                      <input
-                        value={forgeDesc}
-                        onChange={(e) => setForgeDesc(e.target.value)}
-                        placeholder="Descreva o efeito..."
-                        className="rpg-input w-full"
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className="rpg-btn-primary py-2 px-3 rounded-lg font-bold cursor-pointer"
-                    >
-                      ✨ Forjar &amp; Entregar
-                    </button>
-                  </div>
-
-                  {/* Optional Artwork Upload for Attack/Ability Card */}
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <FileUploadButton
-                      label={forgeImageUrl ? 'Trocar Imagem da Carta' : 'Subir Imagem da Carta (Opcional)'}
-                      accept="image/*"
-                      className="rpg-card px-2.5 py-1 rounded text-[11px]"
-                      onUploaded={(url) => setForgeImageUrl(url)}
-                    />
-                    {forgeImageUrl && (
-                      <>
-                        <img
-                          src={resolveAssetUrl(forgeImageUrl)}
-                          alt="Prévia da carta"
-                          className="w-8 h-8 rounded object-cover border border-amber-400/50"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setForgeImageUrl('')}
-                          className="text-[11px] text-red-400 underline cursor-pointer"
-                        >
-                          Remover
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </form>
-              )}
-
-              {/* CUSTOM ATTACKS AS COLLECTIBLE MAGIC CARDS (#2) */}
+              {/* EQUIPPED WEAPONS & LEGACY ATTACK CARDS */}
+              {((character.customAttacks || []).length > 0 || equippedWeapons.length > 0) && (
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="font-display font-bold text-sm flex items-center gap-1.5">
@@ -2197,6 +2219,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                             damageType: atk.damageType,
                             range: atk.range,
                             actionCost: 'Padrão',
+                            isWeaponAttack: true,
                           });
                           onClose();
                         }}
@@ -2235,6 +2258,9 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                             damageType: item!.damageType,
                             range: item!.range,
                             actionCost: 'Padrão',
+                            isWeaponAttack: true,
+                            critRange: item!.critRange,
+                            critMultiplier: item!.critMultiplier,
                           });
                           onClose();
                         }}
@@ -2246,6 +2272,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   ))}
                 </div>
               </div>
+              )}
 
               {/* CUSTOM ABILITIES + COMPENDIUM ABILITIES */}
               <div>
@@ -2362,14 +2389,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                         <button
                           disabled={role !== 'gm' && character.hp <= 0}
                           onClick={() => {
-                            const cost: ActionEconomyCost =
-                              ab.actionType === 'Bônus'
-                                ? 'Bônus'
-                                : ab.actionType === 'Reação'
-                                  ? 'Reação'
-                                  : ab.actionType === 'Livre'
-                                    ? 'Livre'
-                                    : 'Padrão';
+                            const cost: ActionEconomyCost = normalizeActionEconomyCost(ab.actionType);
                             rollCharacterAction({
                               characterId: character.id,
                               title: ab.name,
@@ -2388,6 +2408,9 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                               aoeSizeMeters: ab.aoeSizeMeters,
                               aoeColor: ab.aoeColor,
                               aoePersistent: ab.aoePersistent,
+                              isTeleport: ab.isTeleport,
+                              teleportRequiresSight: ab.teleportRequiresSight,
+                              teleportAoeOrigin: ab.teleportAoeOrigin,
                             });
                             onClose();
                           }}
@@ -2460,6 +2483,24 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                                 {ab.costMp} {campaign.settings.resourceShort}
                               </span>
                             )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingCutInAbilityId((curr) => (curr === ab.id ? null : ab.id))
+                              }
+                              className={`px-1.5 py-0.5 rounded text-[10px] border cursor-pointer transition ${
+                                ab.isUltimate || ab.isDomainExpansion
+                                  ? 'bg-sky-950/85 border-sky-400/65 text-sky-200 font-bold'
+                                  : 'rpg-card text-[#c7bda9] hover:text-sky-200'
+                              }`}
+                              title="Configurar Cut-In de Técnica Suprema / Expansão de Domínio nesta habilidade"
+                            >
+                              {ab.isDomainExpansion
+                                ? 'Domínio'
+                                : ab.isUltimate
+                                  ? 'Cut-In ★'
+                                  : 'Cut-In'}
+                            </button>
                             {role === 'gm' && (
                               <>
                                 <button
@@ -2616,6 +2657,52 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                                 ))}
                               </select>
                             </div>
+                            <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                              <label className="flex items-center gap-1.5 cursor-pointer select-none text-cyan-200">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(ab.isTeleport)}
+                                  onChange={(e) =>
+                                    updateChar((c) => ({
+                                      ...c,
+                                      customAbilities: c.customAbilities.map((x) =>
+                                        x.id === ab.id
+                                          ? {
+                                              ...x,
+                                              isTeleport: e.target.checked || undefined,
+                                              teleportRequiresSight: e.target.checked
+                                                ? x.teleportRequiresSight ?? true
+                                                : undefined,
+                                            }
+                                          : x
+                                      ),
+                                    }))
+                                  }
+                                  className="accent-cyan-400"
+                                />
+                                <span>Teletransporte (sem Atq. Oportunidade)</span>
+                              </label>
+                              {ab.isTeleport && (
+                                <label className="flex items-center gap-1.5 cursor-pointer select-none text-slate-300">
+                                  <input
+                                    type="checkbox"
+                                    checked={ab.teleportRequiresSight !== false}
+                                    onChange={(e) =>
+                                      updateChar((c) => ({
+                                        ...c,
+                                        customAbilities: c.customAbilities.map((x) =>
+                                          x.id === ab.id
+                                            ? { ...x, teleportRequiresSight: e.target.checked }
+                                            : x
+                                        ),
+                                      }))
+                                    }
+                                    className="accent-cyan-400"
+                                  />
+                                  <span>Exige Linha de Visão</span>
+                                </label>
+                              )}
+                            </div>
                             <textarea
                               rows={2}
                               value={ab.description}
@@ -2631,19 +2718,144 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                             />
                           </div>
                         )}
+
+                        {/* Cut-In / Domain Expansion Config Panel (usable by BOTH Player & GM!) */}
+                        {editingCutInAbilityId === ab.id && (
+                          <div className="mt-2 p-2.5 rounded-lg bg-[#0d1424]/90 border border-sky-400/45 space-y-2 text-[11px]">
+                            <div className="flex flex-wrap items-center gap-3">
+                              <label className="flex items-center gap-1.5 cursor-pointer text-sky-200 font-semibold">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(ab.isUltimate)}
+                                  onChange={(e) =>
+                                    updateChar((c) => ({
+                                      ...c,
+                                      customAbilities: c.customAbilities.map((x) =>
+                                        x.id === ab.id
+                                          ? {
+                                              ...x,
+                                              isUltimate: e.target.checked || undefined,
+                                              ultimateColor: x.ultimateColor || charColor,
+                                            }
+                                          : x
+                                      ),
+                                    }))
+                                  }
+                                  className="accent-sky-400 cursor-pointer"
+                                />
+                                <span>Ativar Cut-In</span>
+                              </label>
+                              <label className="flex items-center gap-1.5 cursor-pointer text-purple-200 font-semibold">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(ab.isDomainExpansion)}
+                                  onChange={(e) =>
+                                    updateChar((c) => ({
+                                      ...c,
+                                      customAbilities: c.customAbilities.map((x) =>
+                                        x.id === ab.id
+                                          ? {
+                                              ...x,
+                                              isDomainExpansion: e.target.checked || undefined,
+                                              isUltimate: e.target.checked ? true : x.isUltimate,
+                                              domainTheme: x.domainTheme || 'sonic',
+                                              ultimateColor: x.ultimateColor || charColor,
+                                            }
+                                          : x
+                                      ),
+                                    }))
+                                  }
+                                  className="accent-purple-400 cursor-pointer"
+                                />
+                                <span>Expansão de Domínio</span>
+                              </label>
+                            </div>
+                            <input
+                              type="text"
+                              value={ab.ultimateCatchphrase || ''}
+                              onChange={(e) =>
+                                updateChar((c) => ({
+                                  ...c,
+                                  customAbilities: c.customAbilities.map((x) =>
+                                    x.id === ab.id
+                                      ? { ...x, ultimateCatchphrase: e.target.value }
+                                      : x
+                                  ),
+                                }))
+                              }
+                              placeholder="Frase de impacto no Cut-In..."
+                              className="rpg-input w-full py-1 text-[11px]"
+                            />
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="color"
+                                value={ab.ultimateColor || charColor || '#38bdf8'}
+                                onChange={(e) =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    customAbilities: c.customAbilities.map((x) =>
+                                      x.id === ab.id ? { ...x, ultimateColor: e.target.value } : x
+                                    ),
+                                  }))
+                                }
+                                className="w-7 h-7 rounded bg-transparent border border-white/20 cursor-pointer shrink-0"
+                                title="Cor da aura do Cut-In"
+                              />
+                              {ab.isDomainExpansion && (
+                                <select
+                                  value={ab.domainTheme || 'sonic'}
+                                  onChange={(e) =>
+                                    updateChar((c) => ({
+                                      ...c,
+                                      customAbilities: c.customAbilities.map((x) =>
+                                        x.id === ab.id
+                                          ? { ...x, domainTheme: e.target.value as DomainThemePreset }
+                                          : x
+                                      ),
+                                    }))
+                                  }
+                                  className="rpg-input flex-1 py-1 text-[11px]"
+                                >
+                                  <option value="sonic">Tema: Sônico</option>
+                                  <option value="void">Tema: Vazio</option>
+                                  <option value="crimson">Tema: Carmesim</option>
+                                  <option value="frost">Tema: Glacial</option>
+                                  <option value="solar">Tema: Solar</option>
+                                  <option value="emerald">Tema: Esmeralda</option>
+                                </select>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  triggerUltimateCutIn({
+                                    actorName: character.name,
+                                    techniqueName: ab.name,
+                                    catchphrase: ab.ultimateCatchphrase,
+                                    color: ab.ultimateColor || charColor,
+                                    portraitUrl: ab.ultimateImageUrl || ab.imageUrl || character.portraitUrl,
+                                    style: ab.ultimateStyle,
+                                    sfxPreset: ab.ultimateSfxPreset,
+                                    sfxUrl: ab.ultimateSfxUrl,
+                                    activateDomain: Boolean(ab.isDomainExpansion),
+                                    domainTheme: ab.domainTheme || 'sonic',
+                                    domainDurationRounds: ab.domainDurationRounds,
+                                    domainMusicUrl: ab.domainMusicUrl,
+                                    casterCharacterId: character.id,
+                                  })
+                                }
+                                className="px-2 py-1 rounded bg-sky-900/75 hover:bg-sky-800/80 border border-sky-400/60 text-sky-100 text-[10px] font-display font-bold cursor-pointer shrink-0"
+                              >
+                                Testar
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       {ab.actionType !== 'Passiva' && (
                         <button
                           onClick={() => {
-                            const cost: ActionEconomyCost =
-                              ab.actionType === 'Bônus'
-                                ? 'Bônus'
-                                : ab.actionType === 'Reação'
-                                ? 'Reação'
-                                : ab.actionType === 'Livre'
-                                ? 'Livre'
-                                : 'Padrão';
+                            const cost: ActionEconomyCost = normalizeActionEconomyCost(ab.actionType);
                             rollCharacterAction({
                               characterId: character.id,
                               title: ab.name,
@@ -2653,8 +2865,19 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                               range: ab.range,
                               actionCost: cost,
                               costMp: ab.costMp,
+                              costResourceId: ab.costResourceId,
+                              isTeleport: ab.isTeleport,
+                              teleportRequiresSight: ab.teleportRequiresSight,
                             });
-                            if (ab.attackFormula || (ab.damageFormula && ab.damageType?.toLowerCase() !== 'cura')) {
+                            const isRangedTargeted = Boolean(
+                              ab.range && !ab.range.toLowerCase().includes('pessoal')
+                            );
+                            if (
+                              ab.isTeleport ||
+                              ab.attackFormula ||
+                              isRangedTargeted ||
+                              (ab.damageFormula && ab.damageType?.toLowerCase() !== 'cura')
+                            ) {
                               onClose();
                             }
                           }}
@@ -2688,8 +2911,20 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                         <div>
                           <div className="flex items-start justify-between gap-2">
                             <div>
-                              <div className="text-[10px] uppercase tracking-widest opacity-70">
-                                {ab.category} • {ab.actionType}
+                              <div className="text-[10px] uppercase tracking-widest opacity-70 flex items-center gap-1.5 flex-wrap">
+                                <span>{ab.category} • {ab.actionType}</span>
+                                {(ab.isDomainExpansion || ab.isUltimate) && (
+                                  <span
+                                    className="px-1.5 py-0.2 rounded text-[9px] font-display font-bold border"
+                                    style={{
+                                      borderColor: `${ab.ultimateColor || '#38bdf8'}88`,
+                                      color: ab.ultimateColor || '#38bdf8',
+                                      backgroundColor: `${ab.ultimateColor || '#38bdf8'}18`,
+                                    }}
+                                  >
+                                    {ab.isDomainExpansion ? 'DOMÍNIO' : 'SUPREMA'}
+                                  </span>
+                                )}
                               </div>
                               <h4 className="font-display font-bold text-base">{ab.name}</h4>
                             </div>
@@ -2747,14 +2982,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                         {ab.actionType !== 'Passiva' && (
                           <button
                             onClick={() => {
-                              const cost: ActionEconomyCost =
-                                ab.actionType === 'Bônus'
-                                  ? 'Bônus'
-                                  : ab.actionType === 'Reação'
-                                  ? 'Reação'
-                                  : ab.actionType === 'Livre'
-                                  ? 'Livre'
-                                  : 'Padrão';
+                              const cost: ActionEconomyCost = normalizeActionEconomyCost(ab.actionType);
                               rollCharacterAction({
                                 characterId: character.id,
                                 title: ab.name,
@@ -2773,8 +3001,20 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                                 aoeSizeMeters: ab.aoeSizeMeters,
                                 aoeColor: ab.aoeColor,
                                 aoePersistent: ab.aoePersistent,
+                                isTeleport: ab.isTeleport,
+                                teleportRequiresSight: ab.teleportRequiresSight,
+                                teleportAoeOrigin: ab.teleportAoeOrigin,
                               });
-                              if (ab.aoeShape || ab.attackFormula || ab.damageFormula) {
+                              const isRangedTargeted = Boolean(
+                                ab.range && !ab.range.toLowerCase().includes('pessoal')
+                              );
+                              if (
+                                ab.isTeleport ||
+                                ab.aoeShape ||
+                                ab.attackFormula ||
+                                ab.damageFormula ||
+                                isRangedTargeted
+                              ) {
                                 onClose();
                               }
                             }}
@@ -2985,37 +3225,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                         ) : item.type === 'Consumível' ? (
                           <button
                             disabled={role !== 'gm' && character.hp <= 0}
-                            onClick={() => {
-                              if (role !== 'gm' && character.hp <= 0) return;
-                              if (item.damageFormula) {
-                                rollCharacterAction({
-                                  characterId: character.id,
-                                  title: `Usou ${item.name}`,
-                                  damageFormula: item.damageFormula,
-                                  damageType: item.damageType || 'Cura',
-                                  range: 'Pessoal',
-                                  actionCost: 'Bônus',
-                                });
-                              } else {
-                                rollCharacterAction({
-                                  characterId: character.id,
-                                  title: `Usou ${item.name}`,
-                                  damageFormula: '2d4 + 2',
-                                  damageType: 'Cura',
-                                  range: 'Pessoal',
-                                  actionCost: 'Bônus',
-                                });
-                              }
-                              updateChar((c) => ({
-                                ...c,
-                                inventory:
-                                  inv.quantity > 1
-                                    ? c.inventory.map((x) =>
-                                        x.id === inv.id ? { ...x, quantity: x.quantity - 1 } : x
-                                      )
-                                    : c.inventory.filter((x) => x.id !== inv.id),
-                              }));
-                            }}
+                            onClick={() => useConsumable(character.id, inv.id, item.id)}
                             title={
                               role !== 'gm' && character.hp <= 0
                                 ? 'Você está caído (0 PV) e não pode usar consumíveis'
@@ -3498,6 +3708,212 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   </div>
                 )}
 
+                {/* Alternate Forms & Transformations Manager */}
+                <div className="p-3 rounded-lg bg-black/30 border border-sky-400/30 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="font-display font-bold text-xs text-sky-200 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Formas &amp; Transformações ({(character.forms || []).length})</span>
+                      </div>
+                      <div className="text-[10px] opacity-75">
+                        Crie estados alternativos (Modo Desperto, Ferido, Disfarce) para trocar retrato, token e aura em 1 clique!
+                      </div>
+                    </div>
+                  </div>
+
+                  {(character.forms || []).length > 0 && (
+                    <div className="space-y-1.5">
+                      {(character.forms || []).map((fm) => {
+                        const isAct = character.activeFormId === fm.id;
+                        return (
+                          <div
+                            key={fm.id}
+                            className={`p-2 rounded-md border flex items-center justify-between gap-2 ${
+                              isAct
+                                ? 'bg-[#1a2233] border-sky-400/70'
+                                : 'bg-black/35 border-white/10'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <TokenPortrait
+                                name={fm.name}
+                                imageUrl={fm.portraitUrl || character.portraitUrl}
+                                playerColor={fm.tokenColor || charColor}
+                                frameStyle={fm.frameStyle || character.tokenFrameStyle || 'gold'}
+                                sizePx={36}
+                              />
+                              <div className="min-w-0">
+                                <div className="font-display font-bold text-xs text-[#f4ead7] truncate">
+                                  {fm.name} {fm.isDefault ? '(Base)' : ''}
+                                </div>
+                                <div className="text-[10px] text-[#9b9180] truncate">
+                                  {[
+                                    fm.bonusAc ? `${fm.bonusAc > 0 ? '+' : ''}${fm.bonusAc} CA` : '',
+                                    fm.bonusSpeed ? `${fm.bonusSpeed > 0 ? '+' : ''}${fm.bonusSpeed}m` : '',
+                                    fm.catchphrase ? `"${fm.catchphrase}"` : '',
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' • ') || 'Visual / Retrato'}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                disabled={isAct}
+                                onClick={() => switchCharacterForm(character.id, fm.id)}
+                                className={`px-2 py-1 rounded text-[10px] font-display font-bold cursor-pointer transition ${
+                                  isAct
+                                    ? 'bg-emerald-950/80 border border-emerald-400/55 text-emerald-200 cursor-default'
+                                    : 'rpg-btn-primary'
+                                }`}
+                              >
+                                {isAct ? 'Ativa' : 'Ativar'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateChar((c) => ({
+                                    ...c,
+                                    forms: (c.forms || []).filter((x) => x.id !== fm.id),
+                                    activeFormId: c.activeFormId === fm.id ? null : c.activeFormId,
+                                  }))
+                                }
+                                className="p-1 rounded bg-black/45 border border-white/10 text-red-400/80 hover:text-red-200 cursor-pointer"
+                                title="Excluir forma"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Add New Form Sub-Form */}
+                  <div className="pt-2 border-t border-white/10 space-y-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                      <input
+                        type="text"
+                        value={newFormName}
+                        onChange={(e) => setNewFormName(e.target.value)}
+                        placeholder="Nome da forma (ex: Modo Desperto)"
+                        className="rpg-input py-1 text-xs"
+                      />
+                      <input
+                        type="text"
+                        value={newFormCatchphrase}
+                        onChange={(e) => setNewFormCatchphrase(e.target.value)}
+                        placeholder="Frase ao transformar (opcional)"
+                        className="rpg-input py-1 text-xs"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <FileUploadButton
+                        accept="image/*"
+                        label={newFormPortrait ? 'Trocar Retrato' : 'Subir Retrato da Forma'}
+                        className="rpg-card px-2 py-1 rounded text-[11px]"
+                        onUploaded={(url) => setNewFormPortrait(url)}
+                      />
+                      {newFormPortrait && (
+                        <img
+                          src={resolveAssetUrl(newFormPortrait)}
+                          alt="Prévia da forma"
+                          className="w-7 h-7 rounded object-cover border border-sky-400/60"
+                        />
+                      )}
+                      <input
+                        type="color"
+                        value={newFormColor}
+                        onChange={(e) => setNewFormColor(e.target.value)}
+                        className="w-7 h-7 rounded bg-transparent border border-white/20 cursor-pointer"
+                        title="Cor e aura desta forma"
+                      />
+                      <select
+                        value={newFormFrame}
+                        onChange={(e) => setNewFormFrame(e.target.value as TokenFrameStyle)}
+                        className="rpg-input py-1 text-[11px]"
+                      >
+                        <option value="gold">Moldura: Ouro</option>
+                        <option value="arcane">Moldura: Arcana</option>
+                        <option value="crimson">Moldura: Carmesim</option>
+                        <option value="emerald">Moldura: Esmeralda</option>
+                        <option value="runic">Moldura: Rúnica</option>
+                      </select>
+                      {role === 'gm' && (
+                        <>
+                          <input
+                            type="number"
+                            value={newFormBonusAc}
+                            onChange={(e) => setNewFormBonusAc(Number(e.target.value) || 0)}
+                            className="rpg-input w-14 py-1 text-center font-mono-dice text-[11px]"
+                            title="Bônus de CA nesta forma (Mestre)"
+                            placeholder="+CA"
+                          />
+                          <input
+                            type="number"
+                            step={1.5}
+                            value={newFormBonusSpeed}
+                            onChange={(e) => setNewFormBonusSpeed(Number(e.target.value) || 0)}
+                            className="rpg-input w-14 py-1 text-center font-mono-dice text-[11px]"
+                            title="Bônus de Deslocamento em metros nesta forma (Mestre)"
+                            placeholder="+m"
+                          />
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        disabled={!newFormName.trim()}
+                        onClick={() => {
+                          const existing = character.forms || [];
+                          const baseSeed: CharacterForm[] =
+                            existing.length === 0
+                              ? [
+                                  {
+                                    id: `form-base-${Date.now()}`,
+                                    name: 'Forma Base',
+                                    portraitUrl: character.portraitUrl,
+                                    tokenColor: charColor,
+                                    frameStyle: character.tokenFrameStyle || 'gold',
+                                    isDefault: true,
+                                    cinematicTransform: false,
+                                  },
+                                ]
+                              : [];
+                          const added: CharacterForm = {
+                            id: `form-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+                            name: newFormName.trim(),
+                            portraitUrl: newFormPortrait || character.portraitUrl,
+                            tokenColor: newFormColor,
+                            auraColor: newFormColor,
+                            frameStyle: newFormFrame,
+                            catchphrase: newFormCatchphrase.trim() || undefined,
+                            bonusAc: role === 'gm' && newFormBonusAc ? newFormBonusAc : undefined,
+                            bonusSpeed:
+                              role === 'gm' && newFormBonusSpeed ? newFormBonusSpeed : undefined,
+                            cinematicTransform: true,
+                          };
+                          updateChar((c) => ({
+                            ...c,
+                            forms: [...existing, ...baseSeed, added],
+                            activeFormId: c.activeFormId || baseSeed[0]?.id || existing[0]?.id,
+                          }));
+                          setNewFormName('');
+                          setNewFormPortrait('');
+                          setNewFormCatchphrase('');
+                          setNewFormBonusAc(0);
+                          setNewFormBonusSpeed(0);
+                        }}
+                        className="rpg-btn-primary px-2.5 py-1 rounded text-[11px] font-display font-bold flex items-center gap-1 cursor-pointer disabled:opacity-40 ml-auto"
+                      >
+                        <Plus className="w-3 h-3" /> Adicionar Forma
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Character Damage Resistances / Immunities / Vulnerabilities */}
                 <div className="p-3 rounded-lg bg-black/25 border border-amber-500/25 space-y-2">
                   <div className="font-display font-bold text-xs text-amber-200">
@@ -3529,7 +3945,7 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                           {group.label}
                         </div>
                         <div className="flex flex-wrap gap-1">
-                          {DAMAGE_TYPE_OPTIONS.map((dt) => {
+                          {campaignDamageTypes.map((dt) => {
                             const active = list.includes(dt);
                             return (
                               <button
@@ -3611,12 +4027,12 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
           )}
         </div>
         </OrnateFrame>
-      </DraggablePanel>
+      </div>
 
       {/* Personal Letter / Scroll Reader Modal (Visible ONLY to the owner reading it!) */}
       {readingLetterItem && (
         <div
-          className="fixed inset-0 z-[80] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-[80] bg-[#040508]/82 backdrop-blur-[3px] flex items-center justify-center p-4"
           onClick={() => setReadingLetterItem(null)}
         >
           <div
@@ -3624,29 +4040,29 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
             onClick={(e) => e.stopPropagation()}
           >
             <OrnateFrame
-              accentColor="#e8c266"
-              cornerSize={18}
-              className="rpg-glass-panel rounded-xl p-6 space-y-4 shadow-[0_26px_75px_rgba(0,0,0,0.95)]"
+              accentColor="#b89146"
+              cornerSize={16}
+              className="rpg-panel rpg-grain rounded-lg p-5 space-y-4"
             >
               <div className="flex items-start justify-between gap-3 border-b pb-3" style={{ borderColor: 'var(--border-subtle)' }}>
                 <div>
-                  <div className="text-[10px] font-display uppercase tracking-widest text-amber-300/80">
-                    📜 Carta Pessoal (Visível apenas para você)
+                  <div className="text-[10px] font-display uppercase tracking-[0.16em] text-[#a69b88]">
+                    Carta Pessoal — Visível apenas para você
                   </div>
-                  <h3 className="font-chronicle font-black text-lg text-amber-100 mt-0.5">
+                  <h3 className="font-display font-bold text-lg chronicle-gold-text mt-0.5">
                     {readingLetterItem.name}
                   </h3>
                 </div>
                 <button
                   type="button"
                   onClick={() => setReadingLetterItem(null)}
-                  className="rpg-card p-1.5 rounded-md hover:border-amber-400 cursor-pointer"
+                  className="rpg-card w-8 h-8 rounded flex items-center justify-center cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
               {readingLetterItem.imageUrl && (
-                <div className="rounded-lg overflow-hidden border border-amber-500/30 bg-black/40">
+                <div className="rounded overflow-hidden border border-[#b89146]/30 bg-black/40">
                   <img
                     src={resolveAssetUrl(readingLetterItem.imageUrl)}
                     alt={readingLetterItem.name}
@@ -3654,14 +4070,14 @@ export const CharacterSheetModal: React.FC<CharacterSheetModalProps> = ({ onClos
                   />
                 </div>
               )}
-              <div className="rpg-card rounded-lg p-4 max-h-[45vh] overflow-y-auto text-sm font-lore leading-relaxed whitespace-pre-wrap text-amber-100/95">
+              <div className="rpg-well rounded p-4 max-h-[45vh] overflow-y-auto text-base font-lore leading-relaxed whitespace-pre-wrap text-[#ece4d5]">
                 {readingLetterItem.text}
               </div>
               <div className="flex justify-end">
                 <button
                   type="button"
                   onClick={() => setReadingLetterItem(null)}
-                  className="rpg-btn-primary px-4 py-1.5 rounded-md text-xs font-display font-bold cursor-pointer"
+                  className="rpg-btn-primary px-4 py-1.5 rounded text-xs cursor-pointer"
                 >
                   Guardar Carta
                 </button>

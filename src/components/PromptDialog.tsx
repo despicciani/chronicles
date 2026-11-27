@@ -122,14 +122,16 @@ export const PromptDialogHost: React.FC = () => {
     if (!req) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        e.preventDefault();
         e.stopPropagation();
+        e.stopImmediatePropagation();
         const resolver = req.resolve;
         setReq(null);
         resolver(req.mode === 'confirm' ? false : null);
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [req]);
 
   if (!req) return null;
@@ -152,7 +154,9 @@ export const PromptDialogHost: React.FC = () => {
 
   return (
     <div
-      className="fixed inset-0 z-[120] bg-black/75 backdrop-blur-xs flex items-center justify-center p-4"
+      data-modal-overlay="true"
+      data-prompt-dialog="true"
+      className="fixed inset-0 z-[130] bg-[#040508]/80 backdrop-blur-[3px] flex items-center justify-center p-4"
       onClick={() => handleClose(req.mode === 'confirm' ? false : null)}
     >
       <div className="w-full max-w-md animate-modal-unfurl" onClick={(e) => e.stopPropagation()}>

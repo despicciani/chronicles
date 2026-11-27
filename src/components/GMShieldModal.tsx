@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Dices,
   Eye,
@@ -19,6 +19,7 @@ import { openAlertDialog } from './PromptDialog';
 import { computeCharacterStats } from '../shared/rulesEngine';
 import { GmNote, NpcEntry } from '../shared/types';
 import { FileUploadButton } from './FileUploadButton';
+import { GrimoireModal } from './GrimoireModal';
 
 interface GMShieldModalProps {
   onClose: () => void;
@@ -55,8 +56,27 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
   const [tab, setTab] = useState<'party' | 'boss' | 'improv' | 'handouts' | 'wiki'>('party');
 
   // Skill Check Request state
-  const [checkSkillId, setCheckSkillId] = useState('percepcao');
+  const [checkSkillId, setCheckSkillId] = useState(
+    () =>
+      campaign.compendium.skills.find((s) => s.id === 'percepcao')?.id ||
+      campaign.compendium.skills[0]?.id ||
+      campaign.compendium.attributes[0]?.id ||
+      'percepcao'
+  );
   const [checkDc, setCheckDc] = useState(14);
+  const [checkHideDc, setCheckHideDc] = useState(false);
+  const [checkIsGroup, setCheckIsGroup] = useState(false);
+
+  useEffect(() => {
+    const valid =
+      campaign.compendium.skills.some((s) => s.id === checkSkillId) ||
+      campaign.compendium.attributes.some((a) => a.id === checkSkillId);
+    if (!valid) {
+      setCheckSkillId(
+        campaign.compendium.skills[0]?.id || campaign.compendium.attributes[0]?.id || ''
+      );
+    }
+  }, [campaign.compendium.skills, campaign.compendium.attributes, checkSkillId]);
 
   // Boss Fight Banner state
   const [bossName, setBossName] = useState(campaign.activeBoss?.name || 'Lorde Malakor');
@@ -94,9 +114,11 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
   const [selectedNoteId, setSelectedNoteId] = useState<string>(campaign.gmNotes[0]?.id || '');
 
   const generateNpc = () => {
+    const pickedRace =
+      campaign.compendium.races.length > 0 ? pick(campaign.compendium.races)?.name : undefined;
     setGeneratedNpc({
       name: `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`,
-      race: pick(campaign.compendium.races).name || 'Humano',
+      race: pickedRace || 'Humano',
       role: pick(OCCUPATIONS),
       trait: pick(TRAITS),
       secret: pick(SECRETS),
@@ -137,23 +159,70 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
 
   const generateLoot = () => {
     const gold = Math.floor(Math.random() * 80) + 15;
-    const randomItem = pick(campaign.compendium.items);
+    const randomItem =
+      campaign.compendium.items.length > 0 ? pick(campaign.compendium.items) : null;
     const gem = pick(['Ágata Musgosa (25 PO)', 'Rubi Lascado (60 PO)', 'Cálice de Prata (40 PO)', 'Pergaminho Cifrado']);
-    setGeneratedLoot(`${gold} Peças de Ouro + ${gem} + 1x ${randomItem.name}`);
+    setGeneratedLoot(
+      `${gold} Peças de Ouro + ${gem}${randomItem ? ` + 1x ${randomItem.name}` : ''}`
+    );
   };
 
   const adjustCharStat = (charId: string, field: 'hp' | 'mp', delta: number) => {
-    updateCampaign((prev) => ({
-      ...prev,
-      characters: prev.characters.map((c) => {
-        if (c.id !== charId) return c;
-        const stats = computeCharacterStats(c, prev);
-        if (field === 'hp') {
-          return { ...c, hp: Math.max(0, Math.min(stats.maxHp, c.hp + delta)) };
-        }
-        return { ...c, mp: Math.max(0, Math.min(stats.maxMp, c.mp + delta)) };
-      }),
-    }));
+    updateCampaign((prev) => {
+      const target = prev.characters.find((c) => c.id === charId);
+      if (!target) return prev;
+      const stats = computeCharacterStats(target, prev);
+      if (field === 'hp') {
+        const isPermDead = Boolean(
+          target.hp <= 0 &&
+            (target.deathSaves?.dead || (target.deathSaves?.failures ?? 0) >= 3)
+        );
+        if (delta > 0 && isPermDead) return prev;
+        const nextHp = Math.max(0, Math.min(stats.maxHp, target.hp + delta));
+        const revived = target.hp <= 0 && nextHp > 0;
+        const nextConds = revived
+          ? target.activeConditionIds.filter((cid) => cid !== 'cond-inconsciente')
+          : target.activeConditionIds;
+        return {
+          ...prev,
+          characters: prev.characters.map((c) =>
+            c.id !== charId
+              ? c
+              : {
+                  ...c,
+                  hp: nextHp,
+                  activeConditionIds: nextConds,
+                  ...(revived
+                    ? { deathSaves: { successes: 0, failures: 0, stabilized: false, dead: false } }
+                    : {}),
+                }
+          ),
+          maps: prev.maps.map((m) => ({
+            ...m,
+            tokens: m.tokens.map((t) =>
+              t.type === 'character' && t.referenceId === charId
+                ? { ...t, hp: nextHp, maxHp: stats.maxHp, activeConditionIds: nextConds }
+                : t
+            ),
+          })),
+          combat: prev.combat.active
+            ? {
+                ...prev.combat,
+                combatants: prev.combat.combatants.map((cb) =>
+                  cb.type === 'character' && cb.referenceId === charId
+                    ? { ...cb, hp: nextHp, maxHp: stats.maxHp }
+                    : cb
+                ),
+              }
+            : prev.combat,
+        };
+      }
+      const nextMp = Math.max(0, Math.min(stats.maxMp, target.mp + delta));
+      return {
+        ...prev,
+        characters: prev.characters.map((c) => (c.id === charId ? { ...c, mp: nextMp } : c)),
+      };
+    });
   };
 
   const giveItemToChar = (charId: string) => {
@@ -179,53 +248,43 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
     campaign.gmNotes.find((n) => n.id === selectedNoteId) || campaign.gmNotes[0];
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 md:p-6">
-      <div className="rpg-panel rpg-ornate-border rounded-xl w-full max-w-6xl h-[88vh] flex flex-col overflow-hidden">
-        {/* Header */}
-        <div
-          className="px-4 py-3 border-b flex items-center justify-between gap-3 shrink-0"
-          style={{ borderColor: 'var(--border-subtle)' }}
-        >
-          <div className="flex items-center gap-2">
-            <Shield className="w-5 h-5 text-red-400" />
-            <div>
-              <h2 className="font-display font-bold text-base leading-none">
-                Escudo do Mestre Digital
-              </h2>
-              <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                Monitoramento em tempo real do grupo, geradores de improviso, handouts e anotações secretas.
-              </p>
-            </div>
-          </div>
-          <button onClick={onClose} className="rpg-card p-1.5 rounded cursor-pointer">
-            <X className="w-4 h-4" />
+    <GrimoireModal
+      title="Escudo do Mestre"
+      subtitle="Monitoramento do grupo, chefe de fase, geradores de improviso, handouts e anotações secretas"
+      icon={<Shield className="w-4 h-4 text-[#d6575b]" />}
+      accentColor="#9e2427"
+      onClose={onClose}
+      size="2xl"
+      bodyClassName="flex flex-col overflow-hidden"
+    >
+      {/* Tabs */}
+      <div
+        className="px-4 py-2 border-b flex items-center gap-1.5 overflow-x-auto shrink-0 bg-[#0d0f16]"
+        style={{ borderColor: 'var(--border-hairline)' }}
+      >
+        {[
+          { id: 'party', label: 'Monitor & Testes', icon: <Eye className="w-3.5 h-3.5" /> },
+          { id: 'boss', label: 'Anunciar Chefe', icon: <Skull className="w-3.5 h-3.5" /> },
+          { id: 'improv', label: 'Improviso', icon: <Wand2 className="w-3.5 h-3.5" /> },
+          { id: 'handouts', label: 'Handouts / Pistas', icon: <Send className="w-3.5 h-3.5" /> },
+          { id: 'wiki', label: 'Notas Secretas', icon: <FileText className="w-3.5 h-3.5" /> },
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTab(t.id as typeof tab)}
+            className={`px-3 py-1.5 rounded text-xs font-display font-semibold flex items-center gap-1.5 shrink-0 cursor-pointer transition ${
+              tab === t.id ? 'rpg-btn-crimson' : 'rpg-btn-ghost'
+            }`}
+          >
+            {t.icon}
+            <span>{t.label}</span>
           </button>
-        </div>
+        ))}
+      </div>
 
-        {/* Tabs */}
-        <div className="px-4 py-2 border-b flex items-center gap-2 overflow-x-auto shrink-0" style={{ borderColor: 'var(--border-subtle)' }}>
-          {[
-            { id: 'party', label: 'Monitor & Pedir Teste', icon: <Eye className="w-4 h-4" /> },
-            { id: 'boss', label: 'Anunciar Boss Fight', icon: <Skull className="w-4 h-4" /> },
-            { id: 'improv', label: 'Gerador de Improviso', icon: <Wand2 className="w-4 h-4" /> },
-            { id: 'handouts', label: 'Projetar Handouts / Pistas', icon: <Send className="w-4 h-4" /> },
-            { id: 'wiki', label: 'Wiki Secreta do Mestre', icon: <FileText className="w-4 h-4" /> },
-          ].map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id as typeof tab)}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                tab === t.id ? 'rpg-btn-crimson' : 'rpg-card hover:opacity-85'
-              }`}
-            >
-              {t.icon}
-              <span>{t.label}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 min-h-0">
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto p-4 sm:p-5 min-h-0">
           {tab === 'party' && (
             <div className="space-y-4">
               {/* Tactical Combat Rules Toggles */}
@@ -242,21 +301,48 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
                   <button
                     type="button"
                     onClick={() =>
-                      updateCampaign((prev) => ({
-                        ...prev,
-                        settings: {
-                          ...prev.settings,
-                          enableFlanking: !(prev.settings.enableFlanking ?? true),
-                        },
-                      }))
+                      updateCampaign((prev) => {
+                        const curMode =
+                          prev.settings.flankingMode ??
+                          (prev.settings.enableFlanking === false ? 'off' : 'advantage');
+                        const nextMode: 'off' | 'advantage' | 'plus2' =
+                          curMode === 'off'
+                            ? 'advantage'
+                            : curMode === 'advantage'
+                              ? 'plus2'
+                              : 'off';
+                        return {
+                          ...prev,
+                          settings: {
+                            ...prev.settings,
+                            flankingMode: nextMode,
+                            enableFlanking: nextMode !== 'off',
+                          },
+                        };
+                      })
                     }
                     className={`px-3 py-1.5 rounded-md font-display font-bold text-[11px] border cursor-pointer transition ${
-                      (campaign.settings.enableFlanking ?? true)
-                        ? 'bg-emerald-950/85 border-emerald-400/70 text-emerald-200'
-                        : 'rpg-card opacity-75'
+                      (campaign.settings.flankingMode ??
+                        (campaign.settings.enableFlanking === false ? 'off' : 'advantage')) === 'plus2'
+                        ? 'bg-cyan-950/85 border-cyan-400/70 text-cyan-200'
+                        : (campaign.settings.flankingMode ??
+                              (campaign.settings.enableFlanking === false ? 'off' : 'advantage')) === 'advantage'
+                          ? 'bg-emerald-950/85 border-emerald-400/70 text-emerald-200'
+                          : 'rpg-card opacity-75'
                     }`}
+                    title="Clique para alternar entre Desligado, Vantagem (DMG) e +2 no Ataque"
                   >
-                    Flanqueamento: {(campaign.settings.enableFlanking ?? true) ? 'Ligado (Vantagem)' : 'Desligado'}
+                    Flanqueamento:{' '}
+                    {(() => {
+                      const fm =
+                        campaign.settings.flankingMode ??
+                        (campaign.settings.enableFlanking === false ? 'off' : 'advantage');
+                      return fm === 'plus2'
+                        ? '+2 no Ataque'
+                        : fm === 'advantage'
+                          ? 'Vantagem (DMG)'
+                          : 'Desligado';
+                    })()}
                   </button>
                   <button
                     type="button"
@@ -323,11 +409,32 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
                       className="rpg-input w-14 text-center py-1.5"
                     />
                   </div>
+                  <label className="flex items-center gap-1 text-[11px] cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={checkHideDc}
+                      onChange={(e) => setCheckHideDc(e.target.checked)}
+                      className="accent-purple-400 cursor-pointer"
+                    />
+                    <span>CD Oculta</span>
+                  </label>
+                  <label className="flex items-center gap-1 text-[11px] cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={checkIsGroup}
+                      onChange={(e) => setCheckIsGroup(e.target.checked)}
+                      className="accent-emerald-400 cursor-pointer"
+                    />
+                    <span>Em Grupo</span>
+                  </label>
                   <button
                     onClick={() => {
                       const sk = campaign.compendium.skills.find((s) => s.id === checkSkillId);
                       const at = campaign.compendium.attributes.find((a) => a.id === checkSkillId);
-                      requestSkillCheck(checkSkillId, sk?.name || at?.name || checkSkillId, checkDc);
+                      requestSkillCheck(checkSkillId, sk?.name || at?.name || checkSkillId, checkDc, {
+                        hideDc: checkHideDc,
+                        isGroupCheck: checkIsGroup,
+                      });
                       onClose();
                     }}
                     className="rpg-btn-primary px-3.5 py-1.5 rounded-lg font-bold cursor-pointer"
@@ -503,8 +610,9 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
                   <label className="block mb-1">PV Máximo do Chefe</label>
                   <input
                     type="number"
+                    min={1}
                     value={bossMaxHp}
-                    onChange={(e) => setBossMaxHp(Number(e.target.value))}
+                    onChange={(e) => setBossMaxHp(Math.max(1, Number(e.target.value) || 1))}
                     className="rpg-input w-full"
                   />
                 </div>
@@ -522,21 +630,23 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
               <div className="flex items-center gap-2 pt-2">
                 <button
                   onClick={() => {
+                    const safeMaxHp = Math.max(1, Number(bossMaxHp) || 1);
                     announceBoss({
                       id: `boss-${Date.now()}`,
                       name: bossName || 'Chefe',
                       title: bossTitle || 'Guardião',
-                      hp: bossMaxHp,
-                      maxHp: bossMaxHp,
+                      hp: safeMaxHp,
+                      maxHp: safeMaxHp,
                       imageUrl: bossImage,
                       color: '#dc2626',
                       active: true,
                     });
                     onClose();
                   }}
-                  className="rpg-btn-crimson px-4 py-2 rounded-lg font-bold cursor-pointer"
+                  className="rpg-btn-crimson px-4 py-2 rounded font-bold inline-flex items-center gap-1.5 cursor-pointer"
                 >
-                  🐉 Anunciar Chefe Agora!
+                  <Skull className="w-4 h-4" />
+                  <span>Anunciar Chefe Agora</span>
                 </button>
                 {campaign.activeBoss && (
                   <button
@@ -555,8 +665,9 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
               {/* NPC Generator */}
               <div className="rpg-card rounded-xl p-4 space-y-3">
                 <h3 className="font-display font-bold text-sm">Gerador Instantâneo de NPC</h3>
-                <button onClick={generateNpc} className="rpg-btn-primary w-full py-2 rounded text-xs cursor-pointer">
-                  🎲 Sortear NPC Completo
+                <button onClick={generateNpc} className="rpg-btn-primary w-full py-2 rounded text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer">
+                  <Dices className="w-3.5 h-3.5" />
+                  <span>Sortear NPC Completo</span>
                 </button>
                 {generatedNpc && (
                   <div className="space-y-2 text-xs p-3 rounded bg-black/20">
@@ -585,8 +696,9 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
               {/* Tavern Generator */}
               <div className="rpg-card rounded-xl p-4 space-y-3">
                 <h3 className="font-display font-bold text-sm">Gerador de Taverna &amp; Rumores</h3>
-                <button onClick={generateTavern} className="rpg-btn-primary w-full py-2 rounded text-xs cursor-pointer">
-                  🍺 Sortear Taverna
+                <button onClick={generateTavern} className="rpg-btn-primary w-full py-2 rounded text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer">
+                  <Wand2 className="w-3.5 h-3.5" />
+                  <span>Sortear Taverna</span>
                 </button>
                 {generatedTavern && (
                   <div className="space-y-2 text-xs p-3 rounded bg-black/20">
@@ -837,8 +949,7 @@ export const GMShieldModal: React.FC<GMShieldModalProps> = ({ onClose }) => {
               )}
             </div>
           )}
-        </div>
       </div>
-    </div>
+    </GrimoireModal>
   );
 };

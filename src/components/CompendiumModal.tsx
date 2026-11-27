@@ -17,11 +17,13 @@ import {
 import { useCampaign } from '../context/CampaignContext';
 import {
   ATTACK_RANGE_OPTIONS,
-  DAMAGE_TYPE_OPTIONS,
+  buildMonsterAttackFromAbility,
   DEFAULT_XP_THRESHOLDS,
   findNearestFreeGridCell,
+  formatMonsterAttackSummary,
   getCampaignDamageTypes,
   getXpThresholds,
+  normalizeActionEconomyCost,
 } from '../shared/rulesEngine';
 import {
   DND5E_CLASSIC_CLASSES,
@@ -32,6 +34,7 @@ import {
 } from '../shared/dnd5ePack';
 import { FileUploadButton } from './FileUploadButton';
 import { openEntitySheet } from './EntitySheetModal';
+import { GrimoireModal } from './GrimoireModal';
 import { openAlertDialog, openTextPrompt } from './PromptDialog';
 import { ABILITY_SFX_OPTIONS, resolveAbilitySfxPreset, soundEngine } from '../utils/soundEngine';
 import { TokenPortrait } from './TokenPortrait';
@@ -41,12 +44,17 @@ import {
   CardRarity,
   ClassDef,
   ConditionDef,
+  CUT_IN_STYLE_OPTIONS,
+  CutInStylePreset,
+  DomainThemePreset,
   ItemDef,
   MonsterDef,
   RaceDef,
   SavedEncounter,
   SkillDef,
   StatModifier,
+  ULTIMATE_SFX_OPTIONS,
+  UltimateSfxPreset,
 } from '../shared/types';
 
 type CompendiumSection =
@@ -75,6 +83,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
     quickRollFormula,
     resolveAssetUrl,
     startCombatFromMap,
+    triggerUltimateCutIn,
   } = useCampaign();
   const campaignDamageTypes = getCampaignDamageTypes(campaign);
   const [section, setSection] = useState<CompendiumSection>(
@@ -227,7 +236,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
   // Creation handlers
   const handleCreateNew = () => {
     const uid = Date.now();
-    if (section === 'races') {
+    if (activeSection === 'races') {
       const item: RaceDef = {
         id: `raca-${uid}`,
         name: 'Nova Raça Customizada',
@@ -241,7 +250,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
       };
       updateCompendium('races', [...campaign.compendium.races, item]);
       setSelectedId(item.id);
-    } else if (section === 'classes') {
+    } else if (activeSection === 'classes') {
       const item: ClassDef = {
         id: `classe-${uid}`,
         name: 'Nova Classe Customizada',
@@ -259,7 +268,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
       };
       updateCompendium('classes', [...campaign.compendium.classes, item]);
       setSelectedId(item.id);
-    } else if (section === 'abilities') {
+    } else if (activeSection === 'abilities') {
       const item: AbilityDef = {
         id: `hab-${uid}`,
         name: 'Nova Habilidade / Magia',
@@ -275,7 +284,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
       };
       updateCompendium('abilities', [...campaign.compendium.abilities, item]);
       setSelectedId(item.id);
-    } else if (section === 'items') {
+    } else if (activeSection === 'items') {
       const item: ItemDef = {
         id: `item-${uid}`,
         name: 'Novo Item Customizado',
@@ -289,7 +298,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
       };
       updateCompendium('items', [...campaign.compendium.items, item]);
       setSelectedId(item.id);
-    } else if (section === 'conditions') {
+    } else if (activeSection === 'conditions') {
       const item: ConditionDef = {
         id: `cond-${uid}`,
         name: 'Nova Condição',
@@ -300,7 +309,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
       };
       updateCompendium('conditions', [...campaign.compendium.conditions, item]);
       setSelectedId(item.id);
-    } else if (section === 'monsters') {
+    } else if (activeSection === 'monsters') {
       const item: MonsterDef = {
         id: `mon-${uid}`,
         name: 'Nova Criatura',
@@ -322,7 +331,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
       };
       updateCompendium('monsters', [...campaign.compendium.monsters, item]);
       setSelectedId(item.id);
-    } else if (section === 'encounters') {
+    } else if (activeSection === 'encounters') {
       const firstMonId = campaign.compendium.monsters[0]?.id;
       const enc: SavedEncounter = {
         id: `enc-${uid}`,
@@ -386,7 +395,9 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               color: mon.tokenColor,
               frameStyle: mon.isBoss ? 'crimson' : undefined,
               imageUrl: mon.imageUrl,
+              hideNameFromPlayers: mon.hideNameFromPlayers,
               hideAcFromPlayers: mon.hideAcFromPlayers,
+              hideHpFromPlayers: mon.hideHpFromPlayers,
               isBoss: mon.isBoss,
               bossTitle: mon.bossTitle,
               bossPhase: mon.isBoss ? 1 : undefined,
@@ -438,7 +449,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
           tokens: [
             ...m.tokens,
             {
-              id: `tok-${Date.now()}`,
+              id: `tok-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
               name: mon.isBoss ? mon.name : `${mon.name} #${count + 1}`,
               type: 'monster',
               referenceId: mon.id,
@@ -453,7 +464,9 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               color: mon.tokenColor,
               frameStyle: mon.isBoss ? 'crimson' : undefined,
               imageUrl: mon.imageUrl,
+              hideNameFromPlayers: mon.hideNameFromPlayers,
               hideAcFromPlayers: mon.hideAcFromPlayers,
+              hideHpFromPlayers: mon.hideHpFromPlayers,
               isBoss: mon.isBoss,
               bossTitle: mon.bossTitle,
               bossPhase: mon.isBoss ? 1 : undefined,
@@ -555,7 +568,9 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
             onChange={(e) =>
               onChange(
                 modifiers.map((m, i) =>
-                  i === idx ? { ...m, target: e.target.value as StatModifier['target'] } : m
+                  i === idx
+                    ? { ...m, target: e.target.value as StatModifier['target'], targetId: undefined }
+                    : m
                 )
               )
             }
@@ -640,70 +655,60 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
   const q = search.trim().toLowerCase();
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 md:p-6">
-      <div className="rpg-panel rpg-ornate-border rounded-xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden">
-        {/* Header */}
-        <div
-          className="px-4 py-3 border-b flex items-center justify-between gap-3 shrink-0"
-          style={{ borderColor: 'var(--border-subtle)' }}
-        >
-          <div className="flex items-center gap-2.5">
-            <BookOpen className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
-            <div>
-              <h2 className="font-display font-bold text-base leading-none">
-                Estúdio de Compêndio &amp; Regras Customizáveis
-              </h2>
-              <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                {canEdit
-                  ? 'Crie ou edite raças, classes, magias, itens, monstros, atributos e perícias livremente.'
-                  : 'Modo de Consulta (Mude para perfil Mestre para editar o compêndio).'}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {canEdit && (
-              <button
-                type="button"
-                onClick={importDnd5ePack}
-                className="rpg-btn-primary px-3 py-1.5 rounded-md text-xs font-display font-bold flex items-center gap-1.5 cursor-pointer"
-                title="Adicionar raças, classes, magias, itens mágicos e monstros/chefes clássicos de D&D 5e sem apagar seus dados"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Carregar Pacote D&D 5e</span>
-              </button>
-            )}
-            <button onClick={onClose} className="rpg-card p-1.5 rounded cursor-pointer">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
-        {/* Section Tabs */}
-        <div
-          className="px-4 py-2 border-b flex items-center gap-1.5 overflow-x-auto shrink-0"
-          style={{ borderColor: 'var(--border-subtle)' }}
-        >
-          {sections.map((sec) => (
-            <button
-              key={sec.id}
-              onClick={() => {
-                setSection(sec.id);
-                setSelectedId(null);
-                setSearch('');
-              }}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 shrink-0 cursor-pointer transition ${
-                activeSection === sec.id ? 'rpg-btn-primary' : 'rpg-card hover:opacity-85'
-              }`}
-            >
-              {sec.icon}
-              <span>{sec.label}</span>
-            </button>
-          ))}
-        </div>
+    <GrimoireModal
+      title={mode === 'bestiary' ? 'Bestiário & Encontros' : 'Compêndio & Regras da Campanha'}
+      subtitle={
+        canEdit
+          ? mode === 'bestiary'
+            ? 'Crie criaturas, chefes com fases e encontros prontos para o mapa'
+            : 'Personalize atributos, perícias, raças, classes, poderes, itens e condições'
+          : 'Modo de Consulta (perfil Mestre libera edição do compêndio)'
+      }
+      icon={mode === 'bestiary' ? <Skull className="w-4 h-4 text-[#d6575b]" /> : <BookOpen className="w-4 h-4" />}
+      accentColor={mode === 'bestiary' ? '#9e2427' : '#b89146'}
+      onClose={onClose}
+      size="2xl"
+      bodyClassName="flex flex-col overflow-hidden"
+      headerActions={
+        canEdit ? (
+          <button
+            type="button"
+            onClick={importDnd5ePack}
+            className="rpg-btn-primary px-3 py-1.5 rounded text-xs flex items-center gap-1.5 cursor-pointer"
+            title="Adicionar raças, classes, magias, itens mágicos e monstros clássicos de D&D 5e sem apagar seus dados"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Pacote D&amp;D 5e</span>
+          </button>
+        ) : undefined
+      }
+    >
+      {/* Section Tabs */}
+      <div
+        className="px-4 py-2 border-b flex items-center gap-1 overflow-x-auto shrink-0 bg-[#0d0f16]"
+        style={{ borderColor: 'var(--border-hairline)' }}
+      >
+        {sections.map((sec) => (
+          <button
+            key={sec.id}
+            type="button"
+            onClick={() => {
+              setSection(sec.id);
+              setSelectedId(null);
+              setSearch('');
+            }}
+            className={`px-3 py-1.5 rounded text-xs font-display font-semibold flex items-center gap-1.5 shrink-0 cursor-pointer transition ${
+              activeSection === sec.id ? 'rpg-btn-primary' : 'rpg-btn-ghost'
+            }`}
+          >
+            {sec.icon}
+            <span>{sec.label}</span>
+          </button>
+        ))}
+      </div>
 
         {/* Body */}
-        {section === 'rules' ? (
+        {activeSection === 'rules' ? (
           /* CAMPAIGN RULES, ATTRIBUTES & SKILLS EDITOR */
           <div className="flex-1 overflow-y-auto p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 min-h-0">
             {/* Global System Settings + Custom Attributes */}
@@ -1391,17 +1396,17 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               </div>
 
               {canEdit &&
-                (section === 'races' ||
-                  section === 'classes' ||
-                  section === 'abilities' ||
-                  section === 'items' ||
-                  section === 'conditions') && (
+                (activeSection === 'races' ||
+                  activeSection === 'classes' ||
+                  activeSection === 'abilities' ||
+                  activeSection === 'items' ||
+                  activeSection === 'conditions') && (
                   <div className="flex items-center justify-between gap-1 text-[10px]">
                     <span className="opacity-70">Visibilidade p/ Jogadores:</span>
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
-                        onClick={() => setAllSectionPublic(section, true)}
+                        onClick={() => setAllSectionPublic(activeSection, true)}
                         className="rpg-card px-1.5 py-0.5 rounded text-emerald-300 hover:border-emerald-400 cursor-pointer"
                         title="Tornar todos os itens desta aba públicos para os jogadores"
                       >
@@ -1409,7 +1414,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setAllSectionPublic(section, false)}
+                        onClick={() => setAllSectionPublic(activeSection, false)}
                         className="rpg-card px-1.5 py-0.5 rounded text-amber-300 hover:border-amber-400 cursor-pointer"
                         title="Ocultar todos os itens desta aba dos jogadores"
                       >
@@ -1420,7 +1425,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                 )}
 
               <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
-                {section === 'races' && (
+                {activeSection === 'races' && (
                   <>
                     {visibleRaces
                       .filter((r) => r.name.toLowerCase().includes(q))
@@ -2117,12 +2122,33 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                       return {
                         ...atk,
                         name: updatedAbility.name,
-                        attackBonus: hasNoDamage || updatedAbility.damageType?.toLowerCase() === 'cura' ? 0 : atk.attackBonus,
+                        attackBonus:
+                          hasNoDamage ||
+                          updatedAbility.damageType?.toLowerCase() === 'cura' ||
+                          updatedAbility.aoeShape ||
+                          updatedAbility.saveSkillId
+                            ? 0
+                            : atk.attackBonus,
                         damageFormula: cleanDamageFormula,
                         damageType: updatedAbility.damageType || '',
                         range: updatedAbility.range || atk.range,
+                        actionType: normalizeActionEconomyCost(updatedAbility.actionType),
                         applyConditionId: updatedAbility.applyConditionId,
                         conditionDurationRounds: updatedAbility.conditionDurationRounds,
+                        saveSkillId: updatedAbility.saveSkillId,
+                        saveDcFormula: updatedAbility.saveDcFormula,
+                        halfOnSuccess: updatedAbility.halfOnSuccess,
+                        aoeShape: updatedAbility.aoeShape,
+                        aoeSizeMeters: updatedAbility.aoeSizeMeters,
+                        aoeColor: updatedAbility.aoeColor,
+                        aoePersistent: updatedAbility.aoePersistent,
+                        aoeTargetFilter: updatedAbility.aoeTargetFilter,
+                        createsSurface: updatedAbility.createsSurface,
+                        sfxPreset: updatedAbility.sfxPreset,
+                        vfxKind: updatedAbility.vfxKind,
+                        isTeleport: updatedAbility.isTeleport,
+                        teleportRequiresSight: updatedAbility.teleportRequiresSight,
+                        teleportAoeOrigin: updatedAbility.teleportAoeOrigin,
                       };
                     };
                     updateCampaign((prev) => ({
@@ -2553,11 +2579,13 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                               className="rpg-input w-full"
                             >
                               <option value="">Nenhuma</option>
-                              {campaign.compendium.conditions.map((c) => (
-                                <option key={c.id} value={c.id}>
-                                  {c.icon} {c.name}
-                                </option>
-                              ))}
+                              {campaign.compendium.conditions
+                                .filter((c) => role === 'gm' || Boolean(c.publicToPlayers))
+                                .map((c) => (
+                                  <option key={c.id} value={c.id}>
+                                    {c.icon} {c.name}
+                                  </option>
+                                ))}
                             </select>
                           </div>
                         </div>
@@ -2630,6 +2658,365 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                             />
                             <span className="text-[11px]">Manter forma no mapa após conjurar</span>
                           </label>
+                        </div>
+
+                        {/* Teleportation Ability Config (Misty Step, Thunder Step, Dimension Door) */}
+                        <div className="pt-2 border-t border-white/10 space-y-2">
+                          <div className="flex flex-wrap items-center gap-4">
+                            <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                              <input
+                                disabled={!canEdit}
+                                type="checkbox"
+                                checked={Boolean(item.isTeleport)}
+                                onChange={(e) =>
+                                  patch({
+                                    isTeleport: e.target.checked || undefined,
+                                    teleportRequiresSight: e.target.checked
+                                      ? item.teleportRequiresSight ?? true
+                                      : undefined,
+                                    teleportAoeOrigin:
+                                      e.target.checked && item.aoeShape
+                                        ? item.teleportAoeOrigin || 'departure'
+                                        : undefined,
+                                    ...(e.target.checked && !item.sfxPreset
+                                      ? { sfxPreset: 'teleport' }
+                                      : {}),
+                                  })
+                                }
+                                className="accent-cyan-400"
+                              />
+                              <span className="text-[11px] font-semibold text-cyan-200">
+                                Teletransporte (ex: Passo Nebuloso — sem Ataque de Oportunidade)
+                              </span>
+                            </label>
+                            {item.isTeleport && (
+                              <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                                <input
+                                  disabled={!canEdit}
+                                  type="checkbox"
+                                  checked={item.teleportRequiresSight !== false}
+                                  onChange={(e) =>
+                                    patch({ teleportRequiresSight: e.target.checked })
+                                  }
+                                  className="accent-cyan-400"
+                                />
+                                <span className="text-[11px] text-slate-300">
+                                  Exige Linha de Visão (desmarque p/ Porta Dimensional)
+                                </span>
+                              </label>
+                            )}
+                          </div>
+                          {item.isTeleport && item.aoeShape && (
+                            <div className="max-w-xs">
+                              <label className="block mb-1 text-[11px]">
+                                Origem da Área (AoE) ao Teletransportar
+                              </label>
+                              <select
+                                disabled={!canEdit}
+                                value={item.teleportAoeOrigin || 'departure'}
+                                onChange={(e) =>
+                                  patch({
+                                    teleportAoeOrigin: e.target.value as 'departure' | 'arrival',
+                                  })
+                                }
+                                className="rpg-input w-full text-xs"
+                              >
+                                <option value="departure">Na Saída (ex: Passo Trovejante)</option>
+                                <option value="arrival">Na Chegada (explosão no destino)</option>
+                              </select>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Técnica Suprema (Cut-In Cinematográfico) & Expansão de Domínio */}
+                        <div className="pt-2 border-t border-white/10 space-y-2.5">
+                          <div className="flex flex-wrap items-center gap-4">
+                            <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                              <input
+                                disabled={!canEdit}
+                                type="checkbox"
+                                checked={Boolean(item.isUltimate)}
+                                onChange={(e) =>
+                                  patch({
+                                    isUltimate: e.target.checked || undefined,
+                                    ultimateColor: e.target.checked
+                                      ? item.ultimateColor || '#38bdf8'
+                                      : undefined,
+                                    ...(e.target.checked
+                                      ? {}
+                                      : { isDomainExpansion: undefined, domainTheme: undefined }),
+                                  })
+                                }
+                                className="accent-sky-400"
+                              />
+                              <span className="font-semibold text-sky-200">
+                                Técnica Suprema (Cut-In na tela de todos)
+                              </span>
+                            </label>
+                            <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                              <input
+                                disabled={!canEdit}
+                                type="checkbox"
+                                checked={Boolean(item.isDomainExpansion)}
+                                onChange={(e) =>
+                                  patch({
+                                    isDomainExpansion: e.target.checked || undefined,
+                                    isUltimate: e.target.checked ? true : item.isUltimate,
+                                    ultimateColor: e.target.checked
+                                      ? item.ultimateColor || '#38bdf8'
+                                      : item.ultimateColor,
+                                    domainTheme: e.target.checked
+                                      ? item.domainTheme || 'sonic'
+                                      : undefined,
+                                  })
+                                }
+                                className="accent-purple-400"
+                              />
+                              <span className="font-semibold text-purple-200">
+                                Expansão de Domínio (transforma o mapa)
+                              </span>
+                            </label>
+                          </div>
+
+                          {(item.isUltimate || item.isDomainExpansion) && (
+                            <div className="p-3 rounded-lg bg-[#0d1424]/80 border border-sky-400/35 space-y-2.5">
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                <div className="sm:col-span-2">
+                                  <label className="block mb-1 text-[11px] text-[#c8bfb0]">
+                                    Frase de Impacto (Cut-In)
+                                  </label>
+                                  <input
+                                    disabled={!canEdit}
+                                    type="text"
+                                    value={item.ultimateCatchphrase || ''}
+                                    onChange={(e) =>
+                                      patch({ ultimateCatchphrase: e.target.value })
+                                    }
+                                    placeholder="Ex: Silêncio absoluto... Ressonância Zero!"
+                                    className="rpg-input w-full py-1 text-xs"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block mb-1 text-[11px] text-[#c8bfb0]">
+                                    Cor &amp; Tema
+                                  </label>
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      disabled={!canEdit}
+                                      type="color"
+                                      value={item.ultimateColor || '#38bdf8'}
+                                      onChange={(e) =>
+                                        patch({ ultimateColor: e.target.value })
+                                      }
+                                      className="w-8 h-8 rounded bg-transparent border border-white/20 cursor-pointer shrink-0"
+                                      title="Cor da aura do Cut-In e Domínio"
+                                    />
+                                    {item.isDomainExpansion ? (
+                                      <select
+                                        disabled={!canEdit}
+                                        value={item.domainTheme || 'sonic'}
+                                        onChange={(e) =>
+                                          patch({
+                                            domainTheme: e.target.value as DomainThemePreset,
+                                          })
+                                        }
+                                        className="rpg-input flex-1 py-1 text-xs"
+                                      >
+                                        <option value="sonic">Sônico</option>
+                                        <option value="void">Vazio</option>
+                                        <option value="crimson">Carmesim</option>
+                                        <option value="frost">Glacial</option>
+                                        <option value="solar">Solar</option>
+                                        <option value="emerald">Esmeralda</option>
+                                      </select>
+                                    ) : (
+                                      <span className="text-[10px] font-mono-dice opacity-75">
+                                        {item.ultimateColor || '#38bdf8'}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Visual Style + 3-Beat Cinema SFX Preset */}
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <div>
+                                  <label className="block mb-1 text-[11px] text-[#c8bfb0]">
+                                    Estilo Visual do Cut-In
+                                  </label>
+                                  <select
+                                    disabled={!canEdit}
+                                    value={item.ultimateStyle || 'anime-impact'}
+                                    onChange={(e) =>
+                                      patch({
+                                        ultimateStyle: e.target.value as CutInStylePreset,
+                                      })
+                                    }
+                                    className="rpg-input w-full py-1 text-xs"
+                                  >
+                                    {CUT_IN_STYLE_OPTIONS.map((opt) => (
+                                      <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="block mb-1 text-[11px] text-[#c8bfb0]">
+                                    Áudio / SFX Cinematográfico (3 Tempos)
+                                  </label>
+                                  <div className="flex items-center gap-1.5">
+                                    <select
+                                      disabled={!canEdit}
+                                      value={item.ultimateSfxPreset || 'bass-drop'}
+                                      onChange={(e) =>
+                                        patch({
+                                          ultimateSfxPreset: e.target.value as UltimateSfxPreset,
+                                        })
+                                      }
+                                      className="rpg-input flex-1 py-1 text-xs"
+                                    >
+                                      {ULTIMATE_SFX_OPTIONS.map((opt) => (
+                                        <option key={opt.value} value={opt.value}>
+                                          {opt.label}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        soundEngine.playUltimateSfx(
+                                          item.ultimateSfxPreset || 'bass-drop',
+                                          item.ultimateSfxUrl
+                                            ? resolveAssetUrl(item.ultimateSfxUrl)
+                                            : undefined
+                                        )
+                                      }
+                                      className="rpg-card px-2 py-1 rounded text-[11px] font-display font-bold text-sky-200 hover:border-sky-400 cursor-pointer shrink-0"
+                                      title="Ouvir prévia do áudio cinematográfico"
+                                    >
+                                      Ouvir
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Optional Custom Art, Custom MP3 SFX, Domain Music & Test Button */}
+                              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-white/10">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {canEdit && (
+                                    <FileUploadButton
+                                      accept="image/*"
+                                      label={
+                                        item.ultimateImageUrl
+                                          ? 'Trocar Arte Cut-In'
+                                          : 'Arte Exclusiva (Opcional)'
+                                      }
+                                      className="rpg-card px-2 py-1 rounded text-[11px]"
+                                      onUploaded={(url) => patch({ ultimateImageUrl: url })}
+                                    />
+                                  )}
+                                  {item.ultimateImageUrl && (
+                                    <>
+                                      <img
+                                        src={resolveAssetUrl(item.ultimateImageUrl)}
+                                        alt="Arte Cut-In"
+                                        className="w-7 h-7 rounded object-cover border border-sky-400/60"
+                                      />
+                                      {canEdit && (
+                                        <button
+                                          type="button"
+                                          onClick={() => patch({ ultimateImageUrl: undefined })}
+                                          className="text-[10px] text-red-400 hover:underline cursor-pointer"
+                                        >
+                                          Remover
+                                        </button>
+                                      )}
+                                    </>
+                                  )}
+
+                                  {canEdit && (
+                                    <FileUploadButton
+                                      accept="audio/*"
+                                      label={
+                                        item.ultimateSfxUrl
+                                          ? 'Trocar SFX MP3'
+                                          : 'Subir SFX MP3 Próprio'
+                                      }
+                                      className="rpg-card px-2 py-1 rounded text-[11px]"
+                                      onUploaded={(url) => patch({ ultimateSfxUrl: url })}
+                                    />
+                                  )}
+                                  {item.ultimateSfxUrl && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-400/45 text-emerald-200 text-[10px]">
+                                      SFX MP3 ativo
+                                      {canEdit && (
+                                        <button
+                                          type="button"
+                                          onClick={() => patch({ ultimateSfxUrl: undefined })}
+                                          className="text-red-300 hover:text-red-100 ml-1 cursor-pointer"
+                                          title="Remover SFX MP3"
+                                        >
+                                          ✕
+                                        </button>
+                                      )}
+                                    </span>
+                                  )}
+
+                                  {item.isDomainExpansion && canEdit && (
+                                    <FileUploadButton
+                                      accept="audio/*"
+                                      label={
+                                        item.domainMusicUrl
+                                          ? 'Trocar Música Domínio'
+                                          : 'Música do Domínio (Opcional)'
+                                      }
+                                      className="rpg-card px-2 py-1 rounded text-[11px]"
+                                      onUploaded={(url) => patch({ domainMusicUrl: url })}
+                                    />
+                                  )}
+                                  {item.isDomainExpansion && item.domainMusicUrl && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-950/80 border border-purple-400/45 text-purple-200 text-[10px]">
+                                      Trilha Domínio
+                                      {canEdit && (
+                                        <button
+                                          type="button"
+                                          onClick={() => patch({ domainMusicUrl: undefined })}
+                                          className="text-red-300 hover:text-red-100 ml-1 cursor-pointer"
+                                          title="Remover música do Domínio"
+                                        >
+                                          ✕
+                                        </button>
+                                      )}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    triggerUltimateCutIn({
+                                      actorName: 'Prévia do Compêndio',
+                                      techniqueName: item.name,
+                                      catchphrase: item.ultimateCatchphrase,
+                                      color: item.ultimateColor || '#38bdf8',
+                                      portraitUrl: item.ultimateImageUrl || item.imageUrl,
+                                      style: item.ultimateStyle || 'anime-impact',
+                                      sfxPreset: item.ultimateSfxPreset || 'bass-drop',
+                                      sfxUrl: item.ultimateSfxUrl,
+                                      activateDomain: Boolean(item.isDomainExpansion),
+                                      domainTheme: item.domainTheme || 'sonic',
+                                      domainMusicUrl: item.domainMusicUrl,
+                                    })
+                                  }
+                                  className="px-3 py-1 rounded bg-sky-900/80 hover:bg-sky-800/85 border border-sky-400/65 text-sky-100 text-[11px] font-display font-bold flex items-center gap-1.5 cursor-pointer"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                  <span>Testar Cut-In</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
 
                         {/* Elemental Surface Created on Ground */}
@@ -2789,7 +3176,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                           />
                         </div>
                       </div>
-                      {item.type === 'Carta' && (
+                      {item.type === 'Carta' && role === 'gm' && (
                         <div className="p-3 rounded-lg bg-amber-950/25 border border-amber-500/40 space-y-1.5">
                           <label className="block text-[11px] font-display font-bold text-amber-300">
                             📜 Conteúdo da Carta / Pergaminho (Lido apenas pelo dono do item)
@@ -2990,7 +3377,11 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                             >
                               <option value="">Nenhuma habilidade</option>
                               {campaign.compendium.abilities
-                                .filter((a) => a.actionType !== 'Passiva')
+                                .filter(
+                                  (a) =>
+                                    a.actionType !== 'Passiva' &&
+                                    (role === 'gm' || Boolean(a.publicToPlayers))
+                                )
                                 .map((a) => (
                                   <option key={a.id} value={a.id}>
                                     {a.name} ({a.category})
@@ -3267,7 +3658,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                           <div className="flex flex-wrap gap-1.5">
                             {(item.grantedAbilityIds || []).map((aid) => {
                               const ab = campaign.compendium.abilities.find((a) => a.id === aid);
-                              if (!ab) return null;
+                              if (!ab || (role !== 'gm' && !ab.publicToPlayers)) return null;
                               return (
                                 <span
                                   key={aid}
@@ -3398,7 +3789,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                                   }
                                   className="rpg-input w-full text-xs"
                                 >
-                                  {DAMAGE_TYPE_OPTIONS.map((dt) => (
+                                  {campaignDamageTypes.map((dt) => (
                                     <option key={dt} value={dt}>
                                       {dt}
                                     </option>
@@ -3518,7 +3909,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                             <div key={grp.key} className="space-y-1">
                               <div className="text-[10px] opacity-75 font-semibold">{grp.label}</div>
                               <div className="flex flex-wrap gap-1">
-                                {DAMAGE_TYPE_OPTIONS.map((dt) => {
+                                {campaignDamageTypes.map((dt) => {
                                   const active = list.includes(dt);
                                   return (
                                     <button
@@ -3559,7 +3950,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                         <div className="flex flex-wrap items-center gap-2">
                           {item.transformImageUrl && (
                             <img
-                              src={item.transformImageUrl}
+                              src={resolveAssetUrl(item.transformImageUrl)}
                               alt="Transformação"
                               className="w-10 h-10 rounded-full object-cover border border-purple-400/70"
                             />
@@ -3611,10 +4002,46 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                     campaign.compendium.monsters[0];
                   if (!item) return null;
                   const patch = (next: Partial<MonsterDef>) =>
-                    updateCompendium(
-                      'monsters',
-                      campaign.compendium.monsters.map((m) => (m.id === item.id ? { ...m, ...next } : m))
-                    );
+                    updateCampaign((prev) => ({
+                      ...prev,
+                      compendium: {
+                        ...prev.compendium,
+                        monsters: prev.compendium.monsters.map((m) =>
+                          m.id === item.id ? { ...m, ...next } : m
+                        ),
+                      },
+                      maps: prev.maps.map((mp) => ({
+                        ...mp,
+                        tokens: mp.tokens.map((t) => {
+                          if (t.type !== 'monster' || t.referenceId !== item.id) return t;
+                          const nextMax = next.maxHp ?? t.maxHp;
+                          const numSuffix = t.name.match(/\s+#\d+$/)?.[0] || '';
+                          return {
+                            ...t,
+                            name: next.name !== undefined ? `${next.name}${numSuffix}` : t.name,
+                            maxHp: nextMax,
+                            hp: Math.min(t.hp, nextMax),
+                            defense: next.defense ?? t.defense,
+                            color: next.tokenColor ?? t.color,
+                            imageUrl: next.imageUrl !== undefined ? next.imageUrl : t.imageUrl,
+                            hideNameFromPlayers:
+                              next.hideNameFromPlayers !== undefined
+                                ? next.hideNameFromPlayers
+                                : t.hideNameFromPlayers,
+                            hideAcFromPlayers:
+                              next.hideAcFromPlayers !== undefined
+                                ? next.hideAcFromPlayers
+                                : t.hideAcFromPlayers,
+                            hideHpFromPlayers:
+                              next.hideHpFromPlayers !== undefined
+                                ? next.hideHpFromPlayers
+                                : t.hideHpFromPlayers,
+                            isBoss: next.isBoss !== undefined ? next.isBoss : t.isBoss,
+                            bossTitle: next.bossTitle !== undefined ? next.bossTitle : t.bossTitle,
+                          };
+                        }),
+                      })),
+                    }));
                   return (
                     <div className="space-y-3 text-xs">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -3668,10 +4095,52 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                               </button>
                               <button
                                 onClick={() => {
-                                  updateCompendium(
-                                    'monsters',
-                                    campaign.compendium.monsters.filter((m) => m.id !== item.id)
-                                  );
+                                  updateCampaign((prev) => {
+                                    const removedTokIds = new Set<string>();
+                                    const nextMaps = prev.maps.map((mp) => {
+                                      const kept = mp.tokens.filter((t) => {
+                                        if (t.type === 'monster' && t.referenceId === item.id) {
+                                          removedTokIds.add(t.id);
+                                          return false;
+                                        }
+                                        return true;
+                                      });
+                                      return { ...mp, tokens: kept };
+                                    });
+                                    let nextTurnIdx = prev.combat.currentTurnIndex;
+                                    const nextCombatants: typeof prev.combat.combatants = [];
+                                    prev.combat.combatants.forEach((cb, idx) => {
+                                      const isRemoved =
+                                        (cb.type === 'monster' && cb.referenceId === item.id) ||
+                                        (cb.tokenId && removedTokIds.has(cb.tokenId));
+                                      if (isRemoved) {
+                                        if (idx < nextTurnIdx) nextTurnIdx = Math.max(0, nextTurnIdx - 1);
+                                      } else {
+                                        nextCombatants.push(cb);
+                                      }
+                                    });
+                                    nextTurnIdx = Math.min(
+                                      nextTurnIdx,
+                                      Math.max(0, nextCombatants.length - 1)
+                                    );
+                                    return {
+                                      ...prev,
+                                      compendium: {
+                                        ...prev.compendium,
+                                        monsters: prev.compendium.monsters.filter((m) => m.id !== item.id),
+                                      },
+                                      maps: nextMaps,
+                                      combat: {
+                                        ...prev.combat,
+                                        combatants: nextCombatants,
+                                        currentTurnIndex: nextTurnIdx,
+                                      },
+                                      savedEncounters: (prev.savedEncounters || []).map((enc) => ({
+                                        ...enc,
+                                        entries: enc.entries.filter((e) => e.monsterId !== item.id),
+                                      })),
+                                    };
+                                  });
                                   setSelectedId(null);
                                 }}
                                 className="text-red-400 flex items-center gap-1 cursor-pointer"
@@ -3721,7 +4190,23 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                                 const sz = e.target.value as MonsterDef['size'];
                                 const mapped =
                                   sz === 'Colossal' ? 4 : sz === 'Enorme' ? 3 : sz === 'Grande' ? 2 : 1;
-                                patch({ size: sz, gridSize: mapped });
+                                updateCampaign((prev) => ({
+                                  ...prev,
+                                  compendium: {
+                                    ...prev.compendium,
+                                    monsters: prev.compendium.monsters.map((m) =>
+                                      m.id === item.id ? { ...m, size: sz, gridSize: mapped } : m
+                                    ),
+                                  },
+                                  maps: prev.maps.map((mp) => ({
+                                    ...mp,
+                                    tokens: mp.tokens.map((t) =>
+                                      t.type === 'monster' && t.referenceId === item.id
+                                        ? { ...t, size: mapped }
+                                        : t
+                                    ),
+                                  })),
+                                }));
                               }}
                               className="rpg-input flex-1"
                             >
@@ -3739,9 +4224,14 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                               value={getMonsterGridSize(item)}
                               onChange={(e) => {
                                 const nextGrid = Math.max(1, Math.min(8, Number(e.target.value) || 1));
-                                patch({ gridSize: nextGrid });
                                 updateCampaign((prev) => ({
                                   ...prev,
+                                  compendium: {
+                                    ...prev.compendium,
+                                    monsters: prev.compendium.monsters.map((m) =>
+                                      m.id === item.id ? { ...m, gridSize: nextGrid } : m
+                                    ),
+                                  },
                                   maps: prev.maps.map((mp) => ({
                                     ...mp,
                                     tokens: mp.tokens.map((t) =>
@@ -3802,18 +4292,41 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                         </div>
                       </div>
 
-                      {/* Per-Enemy AC Visibility + Boss Configuration */}
+                      {/* Per-Enemy Visibility (Name, AC, HP) + Boss Configuration */}
                       <div className="rpg-card p-3 rounded-lg space-y-2.5 border border-amber-500/30">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold">
-                            <input
-                              type="checkbox"
-                              disabled={!canEdit}
-                              checked={item.hideAcFromPlayers ?? !campaign.settings.showEnemyAcToPlayers}
-                              onChange={(e) => patch({ hideAcFromPlayers: e.target.checked })}
-                            />
-                            <span>Ocultar C.A. deste inimigo para os jogadores</span>
-                          </label>
+                        <div className="flex flex-wrap items-center justify-between gap-2.5">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-purple-200">
+                              <input
+                                type="checkbox"
+                                disabled={!canEdit}
+                                checked={Boolean(item.hideNameFromPlayers)}
+                                onChange={(e) => patch({ hideNameFromPlayers: e.target.checked })}
+                                className="accent-purple-400"
+                              />
+                              <span>Ocultar Nome p/ Jogadores (???)</span>
+                            </label>
+
+                            <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold">
+                              <input
+                                type="checkbox"
+                                disabled={!canEdit}
+                                checked={item.hideAcFromPlayers ?? !campaign.settings.showEnemyAcToPlayers}
+                                onChange={(e) => patch({ hideAcFromPlayers: e.target.checked })}
+                              />
+                              <span>Ocultar C.A.</span>
+                            </label>
+
+                            <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold">
+                              <input
+                                type="checkbox"
+                                disabled={!canEdit}
+                                checked={Boolean(item.hideHpFromPlayers)}
+                                onChange={(e) => patch({ hideHpFromPlayers: e.target.checked })}
+                              />
+                              <span>Ocultar Vida (PV)</span>
+                            </label>
+                          </div>
 
                           <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-amber-300">
                             <input
@@ -4050,7 +4563,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                                 {group.label}
                               </div>
                               <div className="flex flex-wrap gap-1">
-                                {DAMAGE_TYPE_OPTIONS.map((dt) => {
+                                {campaignDamageTypes.map((dt) => {
                                   const active = list.includes(dt);
                                   return (
                                     <button
@@ -4081,26 +4594,94 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
 
                       {/* Attacks + 1-Click Monster Attack Roll for GM */}
                       <div className="rpg-card p-3 rounded-lg space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="font-semibold">Ataques do Monstro (Clique em Rolar para atacar alvo)</span>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold">Ataques &amp; Habilidades do Monstro</span>
                           {canEdit && (
-                            <button
-                              onClick={() =>
-                                patch({
-                                  attacks: [
-                                    ...item.attacks,
-                                    { name: 'Novo Ataque', attackBonus: 4, damageFormula: '1d8+2', damageType: 'Corte' },
-                                  ],
-                                })
-                              }
-                              className="rpg-card px-2 py-0.5 rounded text-[11px] cursor-pointer"
-                            >
-                              + Ataque
-                            </button>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <select
+                                value=""
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  if (!val) return;
+                                  const [kind, refId] = val.split('::');
+                                  if (kind === 'item') {
+                                    const it = campaign.compendium.items.find((i) => i.id === refId);
+                                    if (!it) return;
+                                    const strMod = Math.floor(((item.attributes?.for ?? 10) - 10) / 2);
+                                    patch({
+                                      attacks: [
+                                        ...item.attacks,
+                                        {
+                                          name: it.name,
+                                          attackBonus: Math.max(2, strMod + 2),
+                                          damageFormula:
+                                            (it.damageFormula || '1d8')
+                                              .replace(/@\w+/g, '0')
+                                              .replace(/\+\s*0\b/g, '')
+                                              .trim() || '1d8',
+                                          damageType: it.damageType || 'Corte',
+                                          range: it.range || '1,5m',
+                                          sourceItemId: it.id,
+                                        },
+                                      ],
+                                    });
+                                  } else if (kind === 'ability') {
+                                    const ab = campaign.compendium.abilities.find((a) => a.id === refId);
+                                    if (!ab) return;
+                                    const intMod = Math.floor(((item.attributes?.int ?? 10) - 10) / 2);
+                                    patch({
+                                      attacks: [
+                                        ...item.attacks,
+                                        buildMonsterAttackFromAbility(ab, Math.max(2, intMod + 2)),
+                                      ],
+                                    });
+                                  }
+                                }}
+                                className="rpg-input py-0.5 px-1.5 text-[11px] max-w-[200px]"
+                                title="Importar arma ou habilidade (incluindo AoE em Esfera/Cone/Linha/Cubo) do Compêndio"
+                              >
+                                <option value="">+ Importar do Compêndio...</option>
+                                {campaign.compendium.abilities.length > 0 && (
+                                  <optgroup label="Habilidades & Magias">
+                                    {campaign.compendium.abilities.map((ab) => (
+                                      <option key={ab.id} value={`ability::${ab.id}`}>
+                                        ✨ {ab.name}
+                                        {ab.aoeShape ? ` (${ab.aoeSizeMeters || 6}m)` : ''}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                                {campaign.compendium.items.filter((i) => i.type === 'Arma').length > 0 && (
+                                  <optgroup label="Armas">
+                                    {campaign.compendium.items
+                                      .filter((i) => i.type === 'Arma')
+                                      .map((it) => (
+                                        <option key={it.id} value={`item::${it.id}`}>
+                                          ⚔ {it.name}
+                                        </option>
+                                      ))}
+                                  </optgroup>
+                                )}
+                              </select>
+                              <button
+                                onClick={() =>
+                                  patch({
+                                    attacks: [
+                                      ...item.attacks,
+                                      { name: 'Novo Ataque', attackBonus: 4, damageFormula: '1d8+2', damageType: 'Corte' },
+                                    ],
+                                  })
+                                }
+                                className="rpg-card px-2 py-0.5 rounded text-[11px] cursor-pointer"
+                              >
+                                + Ataque
+                              </button>
+                            </div>
                           )}
                         </div>
                         {item.attacks.map((atk, idx) => (
-                          <div key={idx} className="grid grid-cols-12 gap-1.5 items-center">
+                          <div key={idx} className="space-y-1">
+                            <div className="grid grid-cols-12 gap-1.5 items-center">
                             <input
                               disabled={!canEdit}
                               value={atk.name}
@@ -4150,20 +4731,50 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                               }
                               className="rpg-input col-span-2 py-1"
                             />
-                            <button
-                              onClick={() =>
-                                quickRollFormula(
-                                  `${item.name}: ${atk.name}`,
-                                  `1d20 + ${atk.attackBonus}`,
-                                  item.name,
-                                  atk.damageFormula,
-                                  atk.damageType
-                                )
-                              }
-                              className="rpg-btn-crimson col-span-2 py-1 rounded text-[11px] cursor-pointer"
-                            >
-                              Rolar 🎲
-                            </button>
+                            <div className="col-span-2 flex items-center gap-1">
+                              <button
+                                onClick={() =>
+                                  quickRollFormula(
+                                    `${item.name}: ${atk.name}`,
+                                    `1d20 + ${atk.attackBonus}`,
+                                    item.name,
+                                    atk.damageFormula,
+                                    atk.damageType
+                                  )
+                                }
+                                className="rpg-btn-crimson flex-1 py-1 rounded text-[11px] cursor-pointer"
+                              >
+                                Rolar 🎲
+                              </button>
+                              {canEdit && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    patch({
+                                      attacks: item.attacks.filter((_, i) => i !== idx),
+                                    })
+                                  }
+                                  className="p-1 rounded text-red-400 hover:bg-red-950/60 cursor-pointer shrink-0"
+                                  title="Remover ataque"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                            </div>
+                            {(atk.aoeShape || atk.saveSkillId || atk.sourceAbilityId) && (
+                              <div className="text-[10px] text-amber-300/85 pl-1 flex flex-wrap items-center gap-2">
+                                <span>{formatMonsterAttackSummary(atk, campaign)}</span>
+                                {atk.aoeShape && (
+                                  <span className="opacity-75">
+                                    • {atk.aoePersistent ? 'Persiste no mapa' : 'Explosão instantânea'}
+                                  </span>
+                                )}
+                                {atk.saveDcFormula && (
+                                  <span className="opacity-75 font-mono-dice">• CD: {atk.saveDcFormula}</span>
+                                )}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -4203,10 +4814,13 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                               onChange={(e) => {
                                 const iid = e.target.value;
                                 if (!iid) return;
-                                const cur = [...(item.lootItems || [])];
-                                const existing = cur.find((x) => x.itemId === iid);
-                                if (existing) {
-                                  existing.quantity += 1;
+                                const cur = (item.lootItems || []).map((x) => ({ ...x }));
+                                const existingIdx = cur.findIndex((x) => x.itemId === iid);
+                                if (existingIdx >= 0) {
+                                  cur[existingIdx] = {
+                                    ...cur[existingIdx],
+                                    quantity: cur[existingIdx].quantity + 1,
+                                  };
                                 } else {
                                   cur.push({ itemId: iid, quantity: 1 });
                                 }
@@ -4456,7 +5070,6 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </GrimoireModal>
   );
 };

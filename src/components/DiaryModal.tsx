@@ -12,10 +12,16 @@ import {
   X,
 } from 'lucide-react';
 import { useCampaign } from '../context/CampaignContext';
-import { DAMAGE_TYPE_OPTIONS, findNearestFreeGridCell } from '../shared/rulesEngine';
+import {
+  buildMonsterAttackFromAbility,
+  findNearestFreeGridCell,
+  getCampaignDamageTypes,
+} from '../shared/rulesEngine';
 import { MonsterAttack, NpcEntry, Quest, SharedLootItem } from '../shared/types';
 import { FileUploadButton } from './FileUploadButton';
 import { openEntitySheet } from './EntitySheetModal';
+import { GrimoireModal } from './GrimoireModal';
+import { openInspectNpc } from './InspectEntityModal';
 import { openTextPrompt } from './PromptDialog';
 import { TokenPortrait } from './TokenPortrait';
 
@@ -26,8 +32,8 @@ interface DiaryModalProps {
 
 export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' }) => {
   const { campaign, role, updateCampaign } = useCampaign();
-  const [tab, setTab] = useState<'npcs' | 'treasury'>(
-    mode === 'npcs' ? 'npcs' : 'treasury'
+  const [tab, setTab] = useState<'chronicle' | 'npcs' | 'treasury'>(
+    mode === 'npcs' ? 'npcs' : 'chronicle'
   );
   const activeTab = mode === 'npcs' ? 'npcs' : tab;
 
@@ -40,7 +46,6 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
       role: 'Habitante Local',
       location: 'Cidade',
       imageUrl: '',
-      tokenColor: '#e0b84c',
       publicBio: 'Descrição visível para os jogadores.',
       secretNotes: 'Segredo exclusivo do Mestre.',
       sharedPartyNotes: '',
@@ -72,6 +77,17 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
             maxHp: nextMaxHp,
             hp: Math.min(t.hp, nextMaxHp),
             defense: patch.defense ?? t.defense,
+            ...(patch.revealedToPlayers !== undefined
+              ? { isHidden: !patch.revealedToPlayers }
+              : {}),
+            hideNameFromPlayers:
+              patch.hideNameFromPlayers !== undefined
+                ? patch.hideNameFromPlayers
+                : t.hideNameFromPlayers,
+            hideAcFromPlayers:
+              patch.hideAcFromPlayers !== undefined ? patch.hideAcFromPlayers : t.hideAcFromPlayers,
+            hideHpFromPlayers:
+              patch.hideHpFromPlayers !== undefined ? patch.hideHpFromPlayers : t.hideHpFromPlayers,
           };
         }),
       })),
@@ -112,7 +128,11 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                     color: npcColor,
                     frameStyle: npcFrame,
                     maxHp: npc.maxHp || 15,
+                    hp: Math.min(t.hp, npc.maxHp || 15),
                     defense: npc.defense || 11,
+                    hideNameFromPlayers: npc.hideNameFromPlayers,
+                    hideAcFromPlayers: npc.hideAcFromPlayers,
+                    hideHpFromPlayers: npc.hideHpFromPlayers,
                   }
                 : t
             ),
@@ -141,6 +161,9 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
               defense: npc.defense || 11,
               activeConditionIds: [],
               isHidden: !npc.revealedToPlayers,
+              hideNameFromPlayers: npc.hideNameFromPlayers,
+              hideAcFromPlayers: npc.hideAcFromPlayers,
+              hideHpFromPlayers: npc.hideHpFromPlayers,
               color: npcColor,
               frameStyle: npcFrame,
               imageUrl: npc.imageUrl,
@@ -175,49 +198,134 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
   const visibleNpcs = campaign.npcs.filter((n) => role === 'gm' || n.revealedToPlayers);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 md:p-6">
-      <div className="rpg-panel rpg-ornate-border rounded-xl w-full max-w-5xl h-[86vh] flex flex-col overflow-hidden">
+    <GrimoireModal
+      title={mode === 'npcs' ? 'Diretório de NPCs' : 'Diário & Tesouro do Grupo'}
+      subtitle={
+        mode === 'npcs'
+          ? 'Aliados, mercadores e figurantes com história e combate opcional'
+          : 'Tesouro coletivo e estoque compartilhado do grupo'
+      }
+      icon={mode === 'npcs' ? <Users className="w-4 h-4" /> : <ScrollText className="w-4 h-4" />}
+      onClose={onClose}
+      size="xl"
+      bodyClassName="flex flex-col overflow-hidden"
+    >
+      {/* Tabs */}
+      {mode !== 'npcs' && (
         <div
-          className="px-4 py-3 border-b flex items-center justify-between gap-3 shrink-0"
-          style={{ borderColor: 'var(--border-subtle)' }}
+          className="px-4 py-2 border-b flex items-center gap-2 shrink-0 bg-[#0d0f16]"
+          style={{ borderColor: 'var(--border-hairline)' }}
         >
-          <div className="flex items-center gap-2">
-            {mode === 'npcs' ? (
-              <Users className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
-            ) : (
-              <ScrollText className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
-            )}
-            <div>
-              <h2 className="font-display font-bold text-base leading-none">
-                {mode === 'npcs' ? 'Criador & Diretório de NPCs' : 'Diário Compartilhado da Campanha'}
-              </h2>
-              <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                {mode === 'npcs'
-                  ? 'Crie aliados, mercadores e figurantes com foto, história e combate opcional (separado do Bestiário).'
-                  : 'Tesouro coletivo e estoque compartilhado do grupo (Missões ficam no botão "Missões" do Menu).'}
-              </p>
-            </div>
-          </div>
-          <button onClick={onClose} className="rpg-card p-1.5 rounded cursor-pointer">
-            <X className="w-4 h-4" />
+          <button
+            type="button"
+            onClick={() => setTab('chronicle')}
+            className={`px-3 py-1 rounded text-xs font-display font-semibold flex items-center gap-1.5 cursor-pointer ${
+              activeTab === 'chronicle' ? 'rpg-btn-primary' : 'rpg-btn-ghost'
+            }`}
+          >
+            <ScrollText className="w-3.5 h-3.5" />
+            <span>Crônica &amp; Notas</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('treasury')}
+            className={`px-3 py-1 rounded text-xs font-display font-semibold flex items-center gap-1.5 cursor-pointer ${
+              activeTab === 'treasury' ? 'rpg-btn-primary' : 'rpg-btn-ghost'
+            }`}
+          >
+            <Coins className="w-3.5 h-3.5" />
+            <span>Tesouro do Grupo ({campaign.groupTreasury.gold} PO)</span>
           </button>
         </div>
+      )}
 
-        {/* Tabs */}
-        {mode !== 'npcs' && (
-          <div className="px-4 py-2 border-b flex items-center gap-2 shrink-0" style={{ borderColor: 'var(--border-subtle)' }}>
-            <button
-              onClick={() => setTab('treasury')}
-              className="px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer rpg-btn-primary"
-            >
-              <Coins className="w-4 h-4" />
-              <span>Tesouro do Grupo ({campaign.groupTreasury.gold} PO)</span>
-            </button>
-          </div>
-        )}
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-4 sm:p-5 min-h-0">
+          {activeTab === 'chronicle' && (
+            <div className="space-y-4 text-xs">
+              <div className="rpg-card rounded-xl p-4 space-y-2">
+                <div className="font-display font-bold text-sm text-amber-200 flex items-center gap-2">
+                  <ScrollText className="w-4 h-4 text-amber-400" />
+                  <span>Sinopse &amp; Diário da Campanha — {campaign.name}</span>
+                </div>
+                {role === 'gm' ? (
+                  <textarea
+                    rows={5}
+                    value={campaign.description || ''}
+                    onChange={(e) =>
+                      updateCampaign((p) => ({ ...p, description: e.target.value }))
+                    }
+                    placeholder="Escreva aqui o resumo dos capítulos, acontecimentos marcantes e notas públicas do grupo..."
+                    className="rpg-input w-full text-xs leading-relaxed"
+                  />
+                ) : (
+                  <div className="rpg-well rounded p-3 font-lore text-sm leading-relaxed whitespace-pre-wrap text-[#ece4d5]">
+                    {campaign.description || 'Nenhuma crônica pública registrada ainda.'}
+                  </div>
+                )}
+              </div>
 
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto p-4 min-h-0">
+              {(campaign.questLog || []).length > 0 && (
+                <div className="rpg-card rounded-xl p-4 space-y-2">
+                  <div className="font-display font-bold text-xs uppercase tracking-wider text-amber-300">
+                    Missões Registradas ({(campaign.questLog || []).length})
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {(campaign.questLog || []).map((q) => (
+                      <div key={q.id} className="rpg-socket rounded-lg p-2.5 space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-display font-bold text-amber-100 truncate">
+                            {q.title}
+                          </span>
+                          <span
+                            className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-display font-bold ${
+                              q.status === 'completed'
+                                ? 'bg-emerald-950/70 text-emerald-300 border border-emerald-500/40'
+                                : q.status === 'failed'
+                                  ? 'bg-red-950/70 text-red-300 border border-red-500/40'
+                                  : 'bg-amber-950/70 text-amber-300 border border-amber-500/40'
+                            }`}
+                          >
+                            {q.status === 'completed'
+                              ? 'Concluída'
+                              : q.status === 'failed'
+                                ? 'Falha'
+                                : 'Ativa'}
+                          </span>
+                        </div>
+                        {q.description && (
+                          <p className="text-[11px] opacity-80 line-clamp-2">{q.description}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {visibleNpcs.some((n) => n.sharedPartyNotes?.trim()) && (
+                <div className="rpg-card rounded-xl p-4 space-y-2">
+                  <div className="font-display font-bold text-xs uppercase tracking-wider text-sky-300">
+                    Anotações do Grupo sobre NPCs
+                  </div>
+                  <div className="space-y-2">
+                    {visibleNpcs
+                      .filter((n) => n.sharedPartyNotes?.trim())
+                      .map((n) => (
+                        <div key={n.id} className="rpg-socket rounded-lg p-2.5 space-y-0.5">
+                          <div className="font-display font-bold text-amber-200">
+                            {role !== 'gm' && n.hideNameFromPlayers ? '???' : n.name}
+                          </div>
+                          <p className="text-[11px] whitespace-pre-wrap opacity-90">
+                            {n.sharedPartyNotes}
+                          </p>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {activeTab === 'npcs' && (
             <div className="space-y-3 text-xs">
               <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -262,7 +370,7 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                       <div className="flex items-start justify-between gap-2.5">
                         <div className="flex items-center gap-2.5 min-w-0 flex-1">
                           <TokenPortrait
-                            name={npc.name}
+                            name={role !== 'gm' && npc.hideNameFromPlayers ? '???' : npc.name}
                             imageUrl={npc.imageUrl}
                             playerColor={npcColor}
                             frameStyle={npcFrame}
@@ -278,24 +386,39 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                               />
                             ) : (
                               <div className="font-display font-bold text-sm truncate">
-                                {npc.name}
+                                {npc.hideNameFromPlayers ? '???' : npc.name}
                               </div>
                             )}
                             <div className="text-[11px] mt-0.5 truncate" style={{ color: 'var(--accent-primary)' }}>
-                              {npc.role} • {npc.location} • {npc.disposition}
+                              {role !== 'gm' && npc.hideNameFromPlayers
+                                ? 'Identidade Desconhecida'
+                                : `${npc.role} • ${npc.location} • ${npc.disposition}`}
                             </div>
                           </div>
                         </div>
 
                         <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => openEntitySheet({ kind: 'npc', id: npc.id })}
-                            className="rpg-card px-2 py-1 rounded text-[10px] font-display font-bold text-amber-200 hover:border-amber-400/60 cursor-pointer"
-                            title="Abrir Ficha Completa deste NPC"
-                          >
-                            📜 Ficha
-                          </button>
+                          {role === 'gm' ? (
+                            <button
+                              type="button"
+                              onClick={() => openEntitySheet({ kind: 'npc', id: npc.id })}
+                              className="rpg-card px-2 py-1 rounded text-[10px] font-display font-semibold text-[#e8c683] flex items-center gap-1 cursor-pointer"
+                              title="Abrir Ficha Completa deste NPC (Mestre)"
+                            >
+                              <ScrollText className="w-3 h-3" />
+                              <span>Ficha</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => openInspectNpc(npc.id)}
+                              className="rpg-card px-2 py-1 rounded text-[10px] font-display font-semibold text-[#e8c683] flex items-center gap-1 cursor-pointer"
+                              title="Inspecionar informações públicas deste NPC"
+                            >
+                              <Eye className="w-3 h-3" />
+                              <span>Inspecionar</span>
+                            </button>
+                          )}
                           {role === 'gm' && (
                             <>
                             <button
@@ -326,10 +449,39 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                             </button>
                             <button
                               onClick={() =>
-                                updateCampaign((p) => ({
-                                  ...p,
-                                  npcs: p.npcs.filter((n) => n.id !== npc.id),
-                                }))
+                                updateCampaign((p) => {
+                                  const removedTokIds = new Set(
+                                    p.maps
+                                      .flatMap((m) => m.tokens)
+                                      .filter((t) => t.type === 'npc' && t.referenceId === npc.id)
+                                      .map((t) => t.id)
+                                  );
+                                  const remainingCbs = p.combat.combatants.filter(
+                                    (cb) =>
+                                      !(
+                                        (cb.tokenId && removedTokIds.has(cb.tokenId)) ||
+                                        (cb.type !== 'character' && cb.referenceId === npc.id)
+                                      )
+                                  );
+                                  return {
+                                    ...p,
+                                    npcs: p.npcs.filter((n) => n.id !== npc.id),
+                                    maps: p.maps.map((m) => ({
+                                      ...m,
+                                      tokens: m.tokens.filter(
+                                        (t) => !(t.type === 'npc' && t.referenceId === npc.id)
+                                      ),
+                                    })),
+                                    combat: {
+                                      ...p.combat,
+                                      combatants: remainingCbs,
+                                      currentTurnIndex: Math.min(
+                                        p.combat.currentTurnIndex,
+                                        Math.max(0, remainingCbs.length - 1)
+                                      ),
+                                    },
+                                  };
+                                })
                               }
                               className="text-red-400 p-1 cursor-pointer"
                               title="Excluir NPC"
@@ -409,6 +561,42 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                               onChange={(e) => updateNpc(npc.id, { publicBio: e.target.value })}
                               className="rpg-input w-full text-xs"
                             />
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                            <label className="rpg-card rounded px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] cursor-pointer select-none">
+                              <span className="text-[#d6ccb8]">Ocultar Nome (???)</span>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(npc.hideNameFromPlayers)}
+                                onChange={(e) =>
+                                  updateNpc(npc.id, { hideNameFromPlayers: e.target.checked })
+                                }
+                                className="accent-[#a855f7]"
+                              />
+                            </label>
+                            <label className="rpg-card rounded px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] cursor-pointer select-none">
+                              <span className="text-[#d6ccb8]">Ocultar C.A.</span>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(npc.hideAcFromPlayers)}
+                                onChange={(e) =>
+                                  updateNpc(npc.id, { hideAcFromPlayers: e.target.checked })
+                                }
+                                className="accent-[#d4ad5c]"
+                              />
+                            </label>
+                            <label className="rpg-card rounded px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] cursor-pointer select-none">
+                              <span className="text-[#d6ccb8]">Ocultar Vida (PV)</span>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(npc.hideHpFromPlayers)}
+                                onChange={(e) =>
+                                  updateNpc(npc.id, { hideHpFromPlayers: e.target.checked })
+                                }
+                                className="accent-[#d4ad5c]"
+                              />
+                            </label>
                           </div>
 
                           {/* Optional Combat Stats for NPC (GM Only) */}
@@ -501,20 +689,7 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                                           } else if (kind === 'ability') {
                                             const ab = campaign.compendium.abilities.find((a) => a.id === refId);
                                             if (ab) {
-                                              const hasNoDamage = !ab.damageType;
-                                              const isHeal = ab.damageType?.toLowerCase() === 'cura';
-                                              nextAtk = {
-                                                name: ab.name,
-                                                attackBonus: hasNoDamage || isHeal ? 0 : 4,
-                                                damageFormula: hasNoDamage
-                                                  ? ''
-                                                  : (ab.damageFormula || '1d8').replace(/@\w+/g, '0').replace(/\+\s*0\b/g, '').trim() || '1d8',
-                                                damageType: ab.damageType || '',
-                                                range: ab.range || 'Pessoal',
-                                                sourceAbilityId: ab.id,
-                                                applyConditionId: ab.applyConditionId,
-                                                conditionDurationRounds: ab.conditionDurationRounds,
-                                              };
+                                              nextAtk = buildMonsterAttackFromAbility(ab, 4);
                                             }
                                           }
                                           if (nextAtk) {
@@ -621,7 +796,8 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                                         }
                                         className="rpg-input col-span-2 py-0.5 text-[10px]"
                                       >
-                                        {DAMAGE_TYPE_OPTIONS.map((dt) => (
+                                        <option value="">Nenhum</option>
+                                        {getCampaignDamageTypes(campaign).map((dt) => (
                                           <option key={dt} value={dt}>
                                             {dt}
                                           </option>
@@ -647,7 +823,7 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                         </>
                       )}
 
-                      {role !== 'gm' && (
+                      {role !== 'gm' && !npc.hideNameFromPlayers && (
                         <p style={{ color: 'var(--text-secondary)' }}>{npc.publicBio}</p>
                       )}
 
@@ -696,13 +872,14 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
                     <div className="flex items-center gap-2 mt-1">
                       <input
                         type="number"
+                        min={0}
                         value={campaign.groupTreasury.gold}
                         onChange={(e) =>
                           updateCampaign((p) => ({
                             ...p,
                             groupTreasury: {
                               ...p.groupTreasury,
-                              gold: Number(e.target.value),
+                              gold: Math.max(0, Number(e.target.value) || 0),
                             },
                           }))
                         }
@@ -761,8 +938,7 @@ export const DiaryModal: React.FC<DiaryModalProps> = ({ onClose, mode = 'diary' 
               </div>
             </div>
           )}
-        </div>
       </div>
-    </div>
+    </GrimoireModal>
   );
 };

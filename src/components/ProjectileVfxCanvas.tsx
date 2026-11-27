@@ -81,6 +81,7 @@ export const ProjectileVfxCanvas: React.FC<ProjectileVfxCanvasProps> = ({
   const activeMapRef = useRef<Map<string, ActiveAnim>>(new Map());
   const seenIdsRef = useRef<Set<string>>(new Set());
   const rafRef = useRef<number | null>(null);
+  const startLoopRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const now = performance.now();
@@ -90,6 +91,7 @@ export const ProjectileVfxCanvas: React.FC<ProjectileVfxCanvasProps> = ({
         seenIdsRef.current.delete(id);
       }
     });
+    let addedAny = false;
     projectiles.forEach((p) => {
       if (!seenIdsRef.current.has(p.id)) {
         seenIdsRef.current.add(p.id);
@@ -106,8 +108,12 @@ export const ProjectileVfxCanvas: React.FC<ProjectileVfxCanvasProps> = ({
           impactMs: p.isCrit ? 760 : 540,
           seed: Math.random() * 100,
         });
+        addedAny = true;
       }
     });
+    if (addedAny) {
+      startLoopRef.current?.();
+    }
   }, [projectiles]);
 
   useEffect(() => {
@@ -118,8 +124,11 @@ export const ProjectileVfxCanvas: React.FC<ProjectileVfxCanvasProps> = ({
 
     const width = Math.max(1, Math.round(gridWidth * cellPx));
     const height = Math.max(1, Math.round(gridHeight * cellPx));
-    canvas.width = width;
-    canvas.height = height;
+    const maxDim = Math.max(width, height, 1);
+    const scale = Math.min(1, 4096 / maxDim);
+    canvas.width = Math.max(1, Math.ceil(width * scale));
+    canvas.height = Math.max(1, Math.ceil(height * scale));
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
     let hadActiveLastFrame = false;
 
@@ -129,7 +138,7 @@ export const ProjectileVfxCanvas: React.FC<ProjectileVfxCanvasProps> = ({
           ctx.clearRect(0, 0, width, height);
           hadActiveLastFrame = false;
         }
-        rafRef.current = window.requestAnimationFrame(render);
+        rafRef.current = null;
         return;
       }
       hadActiveLastFrame = true;
@@ -426,23 +435,35 @@ export const ProjectileVfxCanvas: React.FC<ProjectileVfxCanvasProps> = ({
               ctx.fill();
             }
           } else {
-            const sparkCount = proj.isCrit ? 24 : proj.kind === 'fireball' ? 16 : 10;
+            // Double golden shockwave ring on Critical Hits
+            if (proj.isCrit && it < 0.8) {
+              const critR = r * (0.5 + it * 1.15);
+              ctx.globalAlpha = (1 - it / 0.8) * 0.85;
+              ctx.strokeStyle = '#f4de9e';
+              ctx.lineWidth = Math.max(1, 3.2 * (1 - it));
+              ctx.beginPath();
+              ctx.arc(x2, y2, critR, 0, Math.PI * 2);
+              ctx.stroke();
+            }
+
+            // Velocity-stretched directional ember/spark streaks
+            const sparkCount = proj.isCrit ? 26 : proj.kind === 'fireball' ? 18 : 12;
             ctx.globalAlpha = alpha;
             for (let i = 0; i < sparkCount; i++) {
-              const a = (i / sparkCount) * Math.PI * 2 + seed * 0.1 + (proj.isCrit ? it * 0.65 : 0);
-              const dist = r * (0.48 + ((i * 7) % 5) * 0.14);
+              const a = (i / sparkCount) * Math.PI * 2 + seed * 0.1 + (proj.isCrit ? it * 0.45 : 0);
+              const dist = r * (0.45 + ((i * 7) % 5) * 0.15);
+              const tailLen = Math.max(4, (proj.isCrit ? 14 : 9) * (1 - it * 0.72));
               const sx = x2 + Math.cos(a) * dist;
               const sy = y2 + Math.sin(a) * dist;
+              const tx = sx - Math.cos(a) * tailLen;
+              const ty = sy - Math.sin(a) * tailLen;
+              ctx.strokeStyle = proj.isCrit && i % 2 === 0 ? '#f7e6bd' : i % 3 === 0 ? pal.accent : pal.glow;
+              ctx.lineWidth = Math.max(1.2, (proj.isCrit ? 3.2 : 2.2) * (1 - it * 0.75));
+              ctx.lineCap = 'round';
               ctx.beginPath();
-              ctx.arc(
-                sx,
-                sy,
-                Math.max(1.2, (proj.isCrit ? 4.6 : 3.1) * (1 - it * 0.85)),
-                0,
-                Math.PI * 2
-              );
-              ctx.fillStyle = proj.isCrit && i % 2 === 0 ? '#fef08a' : i % 3 === 0 ? pal.accent : pal.glow;
-              ctx.fill();
+              ctx.moveTo(tx, ty);
+              ctx.lineTo(sx, sy);
+              ctx.stroke();
             }
           }
         }
@@ -450,13 +471,26 @@ export const ProjectileVfxCanvas: React.FC<ProjectileVfxCanvasProps> = ({
         ctx.restore();
       });
 
-      rafRef.current = window.requestAnimationFrame(render);
+      if (activeMapRef.current.size > 0) {
+        rafRef.current = window.requestAnimationFrame(render);
+      } else {
+        // Schedule one final frame to clear canvas cleanly, then go completely idle (0% CPU!)
+        rafRef.current = window.requestAnimationFrame(render);
+      }
     };
 
-    rafRef.current = window.requestAnimationFrame(render);
+    const startLoop = () => {
+      if (rafRef.current === null && activeMapRef.current.size > 0) {
+        rafRef.current = window.requestAnimationFrame(render);
+      }
+    };
+    startLoopRef.current = startLoop;
+    startLoop();
     return () => {
+      startLoopRef.current = null;
       if (rafRef.current !== null) {
         window.cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
       }
     };
   }, [cellPx, gridHeight, gridWidth]);
